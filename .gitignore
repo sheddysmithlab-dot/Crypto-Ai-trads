@@ -1,0 +1,21 @@
+# Claude Code local tooling (not part of the project)
+.claude/
+
+# Old static frontend, kept locally only as a reference backup
+frontend_legacy_backup/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+*.log
+npm-debug.log*
+
+# Python
+backend/__pycache__/
+*.pyc
+.env
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
