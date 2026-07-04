@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { API_BASE } from './config/api';
 import { debugLog } from './config/debug';
 import { useApiStatus } from './hooks/useApiStatus';
@@ -25,7 +25,6 @@ export default function App() {
   const { trades, activePair: activeTradesPair, closeTrade, clearTrades } = useTrades(setConnected);
   const { notifications, unreadCount, markAllRead } = useNotifications();
 
-  const [controlPhase, setControlPhase] = useState('idle');
   const [riskModal, setRiskModal] = useState({ open: false, lossPct: 0, threshold: 2.5 });
   const [alertOpen, setAlertOpen] = useState(false);
   const [paperModalOpen, setPaperModalOpen] = useState(false);
@@ -36,17 +35,14 @@ export default function App() {
     onEmergencyTriggered: (lossPct, threshold) => setRiskModal({ open: true, lossPct, threshold }),
   });
 
-  // Whenever the backend confirms the bot is active again, clear any transient "starting" phase.
-  useEffect(() => {
-    if (controlPhase === 'starting' && portfolio.isActive) setControlPhase('idle');
-  }, [portfolio.isActive, controlPhase]);
-
   const uptime = useUptime(portfolio.isActive);
 
   const chartContainerRef = useRef(null);
+  const volumeContainerRef = useRef(null);
   const rsiContainerRef = useRef(null);
   const { timeframe, switchTimeframe, readouts } = useTradingChart({
     chartContainerRef,
+    volumeContainerRef,
     rsiContainerRef,
     pairLabel: pairSelector.activePairLabel,
     pairPrice: pairSelector.activePair.price,
@@ -55,32 +51,23 @@ export default function App() {
   });
 
   async function handleControlClick() {
-    if (controlPhase === 'starting' || controlPhase === 'stopping') return;
-
     if (!portfolio.isActive) {
       debugLog('User clicked START TRADING. Sending POST /start-bot to Backend...');
-      setControlPhase('starting');
       try {
         const res = await fetch(`${API_BASE}/start-bot`, { method: 'POST' });
         const data = await res.json();
         debugLog('Bot started successfully:', data.message);
       } catch (err) {
         console.error('Failed to start bot:', err);
-        setControlPhase('idle');
       }
     } else {
       debugLog('User clicked STOP TRADING. Sending POST /emergency-exit to Backend...');
-      setControlPhase('stopping');
       try {
         await fetch(`${API_BASE}/emergency-exit`, { method: 'POST' });
-        setTimeout(() => {
-          clearTrades();
-          setAlertOpen(true);
-          setControlPhase('halted');
-        }, 500);
+        clearTrades();
+        setAlertOpen(true);
       } catch (err) {
         console.error('Emergency exit failed:', err);
-        setControlPhase('idle');
       }
     }
   }
@@ -94,7 +81,6 @@ export default function App() {
       console.error('Emergency exit request failed:', err);
     }
     clearTrades();
-    setControlPhase('halted');
   }
 
   async function handleRiskContinue() {
@@ -107,7 +93,6 @@ export default function App() {
     } catch (err) {
       console.error('Continue-trading request failed:', err);
     }
-    setControlPhase('idle');
   }
 
   const displayCapital = manualCapital ?? portfolio.totalCapital;
@@ -134,6 +119,7 @@ export default function App() {
         <ChartPanel
           pairSelector={pairSelector}
           chartContainerRef={chartContainerRef}
+          volumeContainerRef={volumeContainerRef}
           rsiContainerRef={rsiContainerRef}
           timeframe={timeframe}
           switchTimeframe={switchTimeframe}
@@ -144,7 +130,6 @@ export default function App() {
       </main>
 
       <ControlBar
-        phase={controlPhase}
         botIsActive={portfolio.isActive}
         uptime={uptime}
         lastUpdated={readouts.lastUpdated}

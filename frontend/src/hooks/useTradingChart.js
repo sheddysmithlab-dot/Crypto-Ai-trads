@@ -2,12 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createChart, CrosshairMode, LineStyle } from 'lightweight-charts';
 import { API_BASE, WS_BASE } from '../config/api';
 import { debugLog } from '../config/debug';
-import { getBinanceSymbol } from '../data/pairs';
+import { fmtNum, getBinanceSymbol } from '../data/pairs';
 
 // Timeframe -> candle interval in seconds. Drives BOTH historical bucketing
 // and live WebSocket tick bucketing so the chart genuinely reacts to the
 // selected timeframe (not just a cosmetic label change).
-const TIMEFRAME_SECONDS = { '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 86400 };
+const TIMEFRAME_SECONDS = { '10S': 10, '30S': 30, '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 86400 };
+
+const MA_PERIODS = [5, 10, 20, 30];
+const MA_COLORS = { 5: '#facc15', 10: '#ec4899', 20: '#38bdf8', 30: '#a855f7' };
+const VOLUME_MA_PERIOD = 20;
 
 function generateMockData(basePrice, intervalSeconds) {
   const data = [];
@@ -20,21 +24,60 @@ function generateMockData(basePrice, intervalSeconds) {
     const close = i === 99 ? basePrice : price + volatility;
     const high = Math.max(open, close) + Math.abs(volatility) * 0.5;
     const low = Math.min(open, close) - Math.abs(volatility) * 0.5;
+    // Volume roughly tracks candle range (bigger moves -> bigger bars) plus noise.
+    const volume = ((high - low) / basePrice) * 500 + Math.random() * 3;
 
-    data.push({ time: time + i * intervalSeconds, open, high, low, close });
+    data.push({ time: time + i * intervalSeconds, open, high, low, close, volume });
     price = close;
   }
   return data;
 }
 
-function calcEMA(data, period) {
-  const k = 2 / (period + 1);
-  let emaPrev = data[0].close;
-  return data.map((d, i) => {
-    const val = i === 0 ? d.close : d.close * k + emaPrev * (1 - k);
-    emaPrev = val;
-    return { time: d.time, value: val };
-  });
+function calcSMA(data, period) {
+  const result = [];
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) {
+    sum += data[i].close;
+    if (i >= period) sum -= data[i - period].close;
+    if (i >= period - 1) result.push({ time: data[i].time, value: sum / period });
+  }
+  return result;
+}
+
+function calcVolumeSMA(data, period) {
+  const result = [];
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) {
+    sum += data[i].volume;
+    if (i >= period) sum -= data[i - period].volume;
+    if (i >= period - 1) result.push({ time: data[i].time, value: sum / period });
+  }
+  return result;
+}
+
+function toVolumeBars(data) {
+  return data.map((d) => ({
+    time: d.time,
+    value: d.volume,
+    color: d.close >= d.open ? 'rgba(34,197,94,0.55)' : 'rgba(239,68,68,0.55)',
+  }));
+}
+
+// Marks the highest-high and lowest-low bar in the dataset with their price,
+// same as the swing-point labels on a real exchange chart.
+function computeExtremeMarkers(data) {
+  if (!data.length) return [];
+  let highBar = data[0];
+  let lowBar = data[0];
+  for (const bar of data) {
+    if (bar.high > highBar.high) highBar = bar;
+    if (bar.low < lowBar.low) lowBar = bar;
+  }
+  const markers = [
+    { time: highBar.time, position: 'aboveBar', color: '#eab308', shape: 'circle', text: fmtNum(highBar.high) },
+    { time: lowBar.time, position: 'belowBar', color: '#eab308', shape: 'circle', text: fmtNum(lowBar.low) },
+  ];
+  return markers.sort((a, b) => a.time - b.time);
 }
 
 function calcRSI(data, period = 14) {
@@ -79,14 +122,25 @@ const darkThemeConfig = {
   timeScale: { borderColor: '#1E2329' },
 };
 
-// Candlestick + EMA overlay chart, RSI sub-panel, live OHLC/Volume readouts,
-// the free Binance public feed (paper trading), and the backend/Bybit feed (live trading).
-export function useTradingChart({ chartContainerRef, rsiContainerRef, pairLabel, pairPrice, externalTradingMode, setConnected }) {
+// Candlestick + MA(5,10,20,30) overlay chart, Volume histogram sub-panel,
+// RSI sub-panel, live OHLC/Change/Range readouts, the free Binance public
+// feed (paper trading), and the backend/Bybit feed (live trading).
+export function useTradingChart({
+  chartContainerRef,
+  volumeContainerRef,
+  rsiContainerRef,
+  pairLabel,
+  pairPrice,
+  externalTradingMode,
+  setConnected,
+}) {
   const chartRef = useRef(null);
+  const volumeChartRef = useRef(null);
   const rsiChartRef = useRef(null);
   const candleSeriesRef = useRef(null);
-  const emaSeries20Ref = useRef(null);
-  const emaSeries50Ref = useRef(null);
+  const maSeriesRef = useRef({});
+  const volumeSeriesRef = useRef(null);
+  const volumeMaSeriesRef = useRef(null);
   const rsiSeriesRef = useRef(null);
   const trailingLockLineRef = useRef(null);
   const mockDataRef = useRef([]);
@@ -104,30 +158,62 @@ export function useTradingChart({ chartContainerRef, rsiContainerRef, pairLabel,
     high: pairPrice,
     low: pairPrice,
     close: pairPrice,
+    changeAbs: 0,
     changePct: 0,
+    rangeAbs: 0,
+    rangePct: 0,
     isUp: true,
-    vol: pairPrice,
-    ema: 85.15,
+    ma5: pairPrice,
+    ma10: pairPrice,
+    ma20: pairPrice,
+    ma30: pairPrice,
+    vol: 0,
+    volMA: 0,
     rsi: 50,
     lastUpdated: '--:-- UTC',
     label: `Candlestick · 1H · ${pairLabel}`,
   });
 
-  const updateReadouts = useCallback((bar, firstBar) => {
-    const pctChange = ((bar.close - firstBar.open) / firstBar.open) * 100;
+  const updateReadouts = useCallback((bar, data) => {
+    const changeAbs = bar.close - bar.open;
+    const changePct = (changeAbs / bar.open) * 100;
+    const rangeAbs = bar.high - bar.low;
+    const rangePct = (rangeAbs / bar.low) * 100;
     const now = new Date();
+
+    const maValues = {};
+    MA_PERIODS.forEach((period) => {
+      const series = calcSMA(data.slice(-(period + 5)), period);
+      maValues[`ma${period}`] = series.length ? series[series.length - 1].value : bar.close;
+    });
+
+    const volSeries = calcVolumeSMA(data.slice(-(VOLUME_MA_PERIOD + 5)), VOLUME_MA_PERIOD);
+
     setReadouts((prev) => ({
       ...prev,
       open: bar.open,
       high: bar.high,
       low: bar.low,
       close: bar.close,
-      changePct: pctChange,
+      changeAbs,
+      changePct,
+      rangeAbs,
+      rangePct,
       isUp: bar.close >= bar.open,
-      vol: (Math.abs(bar.close) * 1.0) % 1000 + bar.close,
-      ema: bar.close - entryPriceRef.current + 85.15,
+      ...maValues,
+      vol: bar.volume,
+      volMA: volSeries.length ? volSeries[volSeries.length - 1].value : bar.volume,
       lastUpdated: `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')} UTC`,
     }));
+  }, []);
+
+  const applyAllOverlays = useCallback((data) => {
+    MA_PERIODS.forEach((period) => {
+      maSeriesRef.current[period]?.setData(calcSMA(data, period));
+    });
+    volumeSeriesRef.current?.setData(toVolumeBars(data));
+    volumeMaSeriesRef.current?.setData(calcVolumeSMA(data, VOLUME_MA_PERIOD));
+    candleSeriesRef.current?.setMarkers(computeExtremeMarkers(data));
   }, []);
 
   const disconnectFreeSource = useCallback(() => {
@@ -155,7 +241,7 @@ export function useTradingChart({ chartContainerRef, rsiContainerRef, pairLabel,
 
       let updated;
       if (bucketTime > lastCandle.time) {
-        updated = { time: bucketTime, open: lastCandle.close, high: newClose, low: newClose, close: newClose };
+        updated = { time: bucketTime, open: lastCandle.close, high: newClose, low: newClose, close: newClose, volume: Math.random() * 2 };
         mockData.push(updated);
         if (mockData.length > 200) mockData.shift();
       } else {
@@ -164,15 +250,14 @@ export function useTradingChart({ chartContainerRef, rsiContainerRef, pairLabel,
           close: newClose,
           high: Math.max(lastCandle.high, newClose),
           low: Math.min(lastCandle.low, newClose),
+          volume: lastCandle.volume + Math.random() * 0.3,
         };
         mockData[mockData.length - 1] = updated;
       }
 
       candleSeriesRef.current.update(updated);
-      updateReadouts(updated, mockData[0]);
-
-      const emaTail = calcEMA(mockData.slice(-30), 20);
-      emaSeries20Ref.current.update(emaTail[emaTail.length - 1]);
+      updateReadouts(updated, mockData);
+      applyAllOverlays(mockData);
 
       const rsiTail = calcRSI(mockData.slice(-30), 14);
       if (rsiTail.length) {
@@ -180,7 +265,7 @@ export function useTradingChart({ chartContainerRef, rsiContainerRef, pairLabel,
         setReadouts((prev) => ({ ...prev, rsi: rsiTail[rsiTail.length - 1].value }));
       }
     },
-    [updateReadouts]
+    [updateReadouts, applyAllOverlays]
   );
 
   const connectFreeSource = useCallback(
@@ -248,8 +333,7 @@ export function useTradingChart({ chartContainerRef, rsiContainerRef, pairLabel,
       mockDataRef.current = mockData;
 
       candleSeriesRef.current.setData(mockData);
-      emaSeries20Ref.current.setData(calcEMA(mockData, 20));
-      emaSeries50Ref.current.setData(calcEMA(mockData, 50));
+      applyAllOverlays(mockData);
 
       const rsiData = calcRSI(mockData, 14);
       rsiSeriesRef.current.setData(rsiData);
@@ -260,12 +344,12 @@ export function useTradingChart({ chartContainerRef, rsiContainerRef, pairLabel,
         color: '#3b82f6',
       });
 
-      updateReadouts(mockData[mockData.length - 1], mockData[0]);
+      updateReadouts(mockData[mockData.length - 1], mockData);
       if (rsiData.length) {
         setReadouts((prev) => ({ ...prev, rsi: rsiData[rsiData.length - 1].value }));
       }
     },
-    [updateReadouts]
+    [updateReadouts, applyAllOverlays]
   );
 
   const switchTimeframe = useCallback(
@@ -276,14 +360,13 @@ export function useTradingChart({ chartContainerRef, rsiContainerRef, pairLabel,
       mockDataRef.current = mockData;
 
       candleSeriesRef.current.setData(mockData);
-      emaSeries20Ref.current.setData(calcEMA(mockData, 20));
-      emaSeries50Ref.current.setData(calcEMA(mockData, 50));
+      applyAllOverlays(mockData);
 
       const rsiData = calcRSI(mockData, 14);
       rsiSeriesRef.current.setData(rsiData);
 
       chartRef.current.timeScale().fitContent();
-      updateReadouts(mockData[mockData.length - 1], mockData[0]);
+      updateReadouts(mockData[mockData.length - 1], mockData);
       setReadouts((prev) => ({
         ...prev,
         rsi: rsiData.length ? rsiData[rsiData.length - 1].value : prev.rsi,
@@ -298,14 +381,15 @@ export function useTradingChart({ chartContainerRef, rsiContainerRef, pairLabel,
         body: JSON.stringify({ seconds: currentIntervalRef.current }),
       }).catch((err) => console.error('Failed to sync timeframe with backend:', err));
     },
-    [updateReadouts]
+    [updateReadouts, applyAllOverlays]
   );
 
   // Init chart once on mount
   useEffect(() => {
     const chartContainer = chartContainerRef.current;
+    const volumeContainer = volumeContainerRef.current;
     const rsiContainer = rsiContainerRef.current;
-    if (!chartContainer || !rsiContainer) return;
+    if (!chartContainer || !volumeContainer || !rsiContainer) return;
 
     const chart = createChart(chartContainer, {
       width: chartContainer.clientWidth,
@@ -324,6 +408,30 @@ export function useTradingChart({ chartContainerRef, rsiContainerRef, pairLabel,
     });
     candleSeriesRef.current = candleSeries;
 
+    // MA(5,10,20,30) overlay lines
+    maSeriesRef.current = {};
+    MA_PERIODS.forEach((period) => {
+      maSeriesRef.current[period] = chart.addLineSeries({
+        color: MA_COLORS[period],
+        lineWidth: 1.5,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+    });
+
+    // Volume histogram sub-panel (own chart instance, time-synced with the main chart)
+    const volumeChart = createChart(volumeContainer, {
+      width: volumeContainer.clientWidth,
+      height: volumeContainer.clientHeight,
+      ...darkThemeConfig,
+    });
+    volumeChartRef.current = volumeChart;
+    const volumeSeries = volumeChart.addHistogramSeries({ priceFormat: { type: 'volume' } });
+    volumeSeriesRef.current = volumeSeries;
+    const volumeMaSeries = volumeChart.addLineSeries({ color: '#f59e0b', lineWidth: 1.5, lastValueVisible: false });
+    volumeMaSeriesRef.current = volumeMaSeries;
+
+    // RSI Sub-panel Chart (separate synced chart instance)
     const rsiChart = createChart(rsiContainer, {
       width: rsiContainer.clientWidth,
       height: rsiContainer.clientHeight,
@@ -339,14 +447,7 @@ export function useTradingChart({ chartContainerRef, rsiContainerRef, pairLabel,
     const mockData = generateMockData(entryPrice, currentIntervalRef.current);
     mockDataRef.current = mockData;
     candleSeries.setData(mockData);
-
-    const emaSeries20 = chart.addLineSeries({ color: '#f59e0b', lineWidth: 1.5 });
-    emaSeries20.setData(calcEMA(mockData, 20));
-    emaSeries20Ref.current = emaSeries20;
-
-    const emaSeries50 = chart.addLineSeries({ color: '#38bdf8', lineWidth: 1.5 });
-    emaSeries50.setData(calcEMA(mockData, 50));
-    emaSeries50Ref.current = emaSeries50;
+    applyAllOverlays(mockData);
 
     const rsiData = calcRSI(mockData, 14);
     rsiSeries.setData(rsiData);
@@ -362,21 +463,27 @@ export function useTradingChart({ chartContainerRef, rsiContainerRef, pairLabel,
       title: 'Lock +0.08',
     });
 
+    // Sync time scales between the main chart, volume panel, and RSI panel
     chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      volumeChart.timeScale().setVisibleLogicalRange(range);
       rsiChart.timeScale().setVisibleLogicalRange(range);
     });
 
-    updateReadouts(mockData[mockData.length - 1], mockData[0]);
+    updateReadouts(mockData[mockData.length - 1], mockData);
     if (rsiData.length) setReadouts((prev) => ({ ...prev, rsi: rsiData[rsiData.length - 1].value }));
 
+    // Live crosshair OHLC readout (hover to inspect any candle). Reads mockDataRef.current
+    // (not the local mockData variable) so it stays correct after switchSymbol/switchTimeframe
+    // replace the underlying array with a new one.
     chart.subscribeCrosshairMove((param) => {
       if (!param.time) return;
       const bar = param.seriesData.get(candleSeries);
-      if (bar) updateReadouts(bar, mockData[0]);
+      if (bar) updateReadouts(bar, mockDataRef.current);
     });
 
     const handleResize = () => {
       chart.applyOptions({ width: chartContainer.clientWidth, height: chartContainer.clientHeight });
+      volumeChart.applyOptions({ width: volumeContainer.clientWidth, height: volumeContainer.clientHeight });
       rsiChart.applyOptions({ width: rsiContainer.clientWidth, height: rsiContainer.clientHeight });
     };
     window.addEventListener('resize', handleResize);
@@ -451,6 +558,7 @@ export function useTradingChart({ chartContainerRef, rsiContainerRef, pairLabel,
       }
       disconnectFreeSource();
       chart.remove();
+      volumeChart.remove();
       rsiChart.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

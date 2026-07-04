@@ -265,6 +265,12 @@ class AITradingAgent:
         self.emergency_triggered = False
         self.emergency_trigger_time = None  # RULE 8: Backend timer (Source of Truth)
         self.emergency_auto_kill_executed = False  # RULE 8: Flag to prevent double-execution
+        # RULE 8: True ONLY while a genuine 2.5%+ auto-kill popup is actively awaiting the
+        # user's choice. This is what the frontend popup is wired to - NOT emergency_triggered,
+        # which stays true (blocking new trades) long after the decision is already resolved.
+        # Without this split, a manual STOP TRADING click or a page reload after a resolved
+        # emergency would both incorrectly re-show the "choose your action" popup.
+        self.emergency_awaiting_decision = False
 
         # POLICY 2 / RULE 5 Config: Portfolio Kill Switch
         self.starting_capital = 142560.88
@@ -289,11 +295,17 @@ class AITradingAgent:
         # RULE 2: Dynamic Timeframe Syncing (Front-end -> Back-end)
         self.timeframe_seconds = 60  # default "1 minute", synced live from the UI
 
-        # RULE 3: Volume Surge 2x entry condition - live candle simulation state
+        # RULE 3: Volume Anomaly entry condition - live candle simulation state
         self.candle_open_time = None
         self.candle_volume = 0.0
         self.prev_candle_volume = 0.0
+        self.candle_high = None
+        self.candle_low = None
+        self.prev_candle_height = 0.0
         self.volume_signal_used = False
+        # Previous candle's volume must clear this floor before the 2x check even applies,
+        # so a 2x jump in a dead/thin market doesn't false-trigger an entry.
+        self.min_base_volume = 50.0
 
     def _trade_metrics(self, t):
         """ RULE 6: True Net Profit = Gross Profit - (Entry Fee + Estimated Exit Fee).
@@ -348,6 +360,9 @@ class AITradingAgent:
         self.candle_open_time = None  # force a fresh candle bucket on the new interval
         self.candle_volume = 0.0
         self.prev_candle_volume = 0.0
+        self.candle_high = None
+        self.candle_low = None
+        self.prev_candle_height = 0.0
         self.volume_signal_used = False
         print(f"[RULE 2: TIMEFRAME SYNC] Backend now reading {seconds}s candles (synced from Front-end).")
 
@@ -397,6 +412,9 @@ class AITradingAgent:
         self.candle_open_time = None
         self.candle_volume = 0.0
         self.prev_candle_volume = 0.0
+        self.candle_high = None
+        self.candle_low = None
+        self.prev_candle_height = 0.0
         self.volume_signal_used = False
         print(f"[PILLAR 3: AI AGENT] Active pair switched to {pair}. Previous positions cleared (single-coin focus).")
 
@@ -436,6 +454,7 @@ class AITradingAgent:
                 # User didn't respond within 30 seconds -> backend auto-executes emergency exit
                 print(f"[RULE 8: AUTO-KILL] 30-second countdown expired. Backend auto-executing EMERGENCY EXIT.")
                 self.emergency_auto_kill_executed = True
+                self.emergency_awaiting_decision = False  # decision defaulted to Exit - stop showing the popup
                 self.is_active = False  # Stop all processing
                 notifications.push("⚠️ RULE 8: 30-second timeout reached. System auto-halted.", "error")
                 return
@@ -444,20 +463,48 @@ class AITradingAgent:
         bucket_start = int(now // self.timeframe_seconds) * self.timeframe_seconds
         if self.candle_open_time is None:
             self.candle_open_time = bucket_start
+            self.candle_high = new_price
+            self.candle_low = new_price
         elif bucket_start > self.candle_open_time:
-            # Candle closed -> its volume becomes the new baseline for the 2x check
+            # Candle closed -> its volume AND height become the new baseline for the next check
             self.prev_candle_volume = self.candle_volume
+            self.prev_candle_height = self.candle_high - self.candle_low
             self.candle_open_time = bucket_start
             self.candle_volume = 0.0
+            self.candle_high = new_price
+            self.candle_low = new_price
             self.volume_signal_used = False
 
         self.candle_volume += volume_increment
+        self.candle_high = max(self.candle_high, new_price)
+        self.candle_low = min(self.candle_low, new_price)
+        candle_height = self.candle_high - self.candle_low
 
-        # RULE 3: The 2x Volume Surge Trigger -> immediate Market BUY, mid-candle, no waiting
+        # RULE 3: Volume Anomaly Trigger -> immediate Market BUY(s), mid-candle, no waiting.
+        # Base Volume Filter: the previous candle must clear MIN_BASE_VOLUME before the 2x
+        # check even applies, so a 2x jump in a dead/thin market can't false-trigger an entry.
         if (self.is_active and not self.emergency_triggered and not self.volume_signal_used
-                and self.prev_candle_volume > 0 and self.candle_volume >= (self.prev_candle_volume * 2)):
+                and self.prev_candle_volume > self.min_base_volume
+                and self.candle_volume >= (self.prev_candle_volume * 2)):
             self.volume_signal_used = True
-            self.open_trade("LONG", reason=f"RULE 3: 2x Volume Surge ({self.candle_volume:.1f} >= 2x{self.prev_candle_volume:.1f})")
+            if candle_height >= self.prev_candle_height:
+                # Condition A: Normal Breakout - volume AND range both expanding -> 1 order, 1% margin
+                self.open_trade("LONG", reason=(
+                    f"RULE 3A: Normal Breakout (Vol {self.candle_volume:.1f} >= 2x{self.prev_candle_volume:.1f}, "
+                    f"Height {candle_height:.2f} >= {self.prev_candle_height:.2f})"
+                ))
+            else:
+                # Condition B: Volume Anomaly/Accumulation - huge volume but a tight range implies
+                # accumulation rather than a clean breakout -> stack 3 orders (3% margin combined)
+                notifications.push(
+                    f"RULE 3B: Volume Anomaly on {self.active_pair} (Vol {self.candle_volume:.1f} >= "
+                    f"2x{self.prev_candle_volume:.1f}, tight range {candle_height:.2f} < {self.prev_candle_height:.2f}) "
+                    f"- stacking 3x entries.", "info")
+                for i in range(3):
+                    self.open_trade("LONG", reason=(
+                        f"RULE 3B: Volume Anomaly/Accumulation Entry {i + 1}/3 "
+                        f"(Vol {self.candle_volume:.1f} >= 2x{self.prev_candle_volume:.1f})"
+                    ))
 
         if not self.trades:
             return
@@ -506,30 +553,55 @@ class AITradingAgent:
         self.is_lock_active = False
         self.peak_net_pct = 0.0
 
-    def trigger_emergency_exit(self, reason="Manual Master Switch Action"):
-        print(f"[RULE 8: EMERGENCY KILL SWITCH TRIGGERED]: {reason}")
-        # RULE 8: Backend Timer - Source of Truth starts counting (30-second auto-exit countdown)
-        self.emergency_trigger_time = time.time()
-
-        # RULE 5 & 7: Unconditional 'SELL ALL' via Market Order, realizing whatever net P&L remains
+    def _close_all_positions(self, reason):
+        """ RULE 5 & 7: Unconditional 'SELL ALL' via Market Order, realizing whatever net P&L remains. """
         for trade in self.trades:
             m = self._trade_metrics(trade)
             self.current_capital += m["net_usd"]
-            bybit_api.execute_market_sell(trade["pair"], f"EMERGENCY SELL ALL TRIGGERED | Realized Net P&L: ${m['net_usd']:.2f}")
+            bybit_api.execute_market_sell(trade["pair"], f"{reason} | Realized Net P&L: ${m['net_usd']:.2f}")
+        self.trades = []
+        self.peak_net_pct = 0.0
+        self.is_lock_active = False
+
+    def trigger_emergency_exit(self, reason="Manual Master Switch Action"):
+        """ RULE 8: Called ONLY by the automatic 2.5%+ portfolio-loss detector in process_tick.
+        Sells everything, halts the bot, and arms the 30-second decision window - the popup
+        stays visible until the user chooses, or the backend/frontend timer expires. """
+        print(f"[RULE 8: EMERGENCY KILL SWITCH TRIGGERED]: {reason}")
+        # RULE 8: Backend Timer - Source of Truth starts counting (30-second auto-exit countdown)
+        self.emergency_trigger_time = time.time()
+        self._close_all_positions(f"EMERGENCY SELL ALL TRIGGERED | {reason}")
 
         # RULE 5: Halt System - stop all further trading until user chooses action
         self.is_active = False
         self.emergency_triggered = True
-        self.trades = []
-        self.peak_net_pct = 0.0
+        self.emergency_awaiting_decision = True
         print("[RULE 8: SYSTEM PAUSED] Waiting for user choice (EMERGENCY EXIT or CONTINUE) within 30 seconds...")
         notifications.push(f"⏰ RULE 8: 30-second Emergency Exit countdown started. {reason}", "error")
+
+    def confirm_emergency_exit(self):
+        """ User clicked 'EMERGENCY EXIT' on an ACTIVE RULE 8 popup (or the frontend's 30s
+        fallback timer fired) - positions are already closed by trigger_emergency_exit();
+        this just resolves the decision so a page reload doesn't re-show the popup for an
+        emergency that's already over. """
+        print("[RULE 8: EMERGENCY EXIT CONFIRMED] User chose to stay halted.")
+        self.emergency_awaiting_decision = False
+        self.is_active = False
+
+    def manual_stop(self, reason="Manual Kill Switch Activated from Frontend"):
+        """ Plain STOP TRADING button click - a deliberate user action with NO portfolio-loss
+        event. Must NOT set emergency_triggered/emergency_awaiting_decision - that popup is
+        reserved for the automatic RULE 5 detector, not a voluntary stop. """
+        print(f"[PILLAR 2: BACKEND] {reason}")
+        self._close_all_positions(reason)
+        self.is_active = False
 
     def resume_trading_with_higher_buffer(self):
         """ User chose 'CONTINUE' on the risk popup: raise the cumulative stop-loss
         ceiling by another 2.5% (2.5% -> 5% -> 7.5% ...) and resume trading. """
         self.max_loss_pct += 2.5
         self.emergency_triggered = False
+        self.emergency_awaiting_decision = False
         self.emergency_trigger_time = None  # RULE 8: Reset the 30-second timer
         self.emergency_auto_kill_executed = False  # RULE 8: Reset auto-kill flag
         self.is_active = True
@@ -575,6 +647,7 @@ async def start_background_tasks():
 async def start_bot():
     agent.is_active = True
     agent.emergency_triggered = False
+    agent.emergency_awaiting_decision = False
     agent.emergency_trigger_time = None  # RULE 8: Reset timer
     agent.emergency_auto_kill_executed = False  # RULE 8: Reset auto-kill flag
     print("[PILLAR 2: BACKEND] Received 'START' from Frontend. AI Agent awakened.")
@@ -583,8 +656,17 @@ async def start_bot():
 
 @app.post("/emergency-exit")
 async def emergency_exit():
-    print("[PILLAR 2: BACKEND] Received 'EMERGENCY' from Frontend. Bypassing AI...")
-    agent.trigger_emergency_exit("Manual User Intervention from Frontend")
+    """ Shared by two very different situations, disambiguated by server-side state:
+    1. The main STOP TRADING button (voluntary, no loss event) -> manual_stop().
+    2. The RULE 8 popup's 'Emergency Exit' button / 30s frontend fallback, responding to
+       an ALREADY-ACTIVE automatic emergency -> confirm_emergency_exit() (positions are
+       already closed at trigger time; this just resolves the pending decision). """
+    if agent.emergency_awaiting_decision:
+        print("[PILLAR 2: BACKEND] User confirmed EMERGENCY EXIT choice from the RULE 8 popup.")
+        agent.confirm_emergency_exit()
+    else:
+        print("[PILLAR 2: BACKEND] Received manual STOP TRADING from Frontend control button.")
+        agent.manual_stop()
     return {"status": "success", "message": "All trades closed."}
 
 @app.post("/continue-trading")
@@ -773,7 +855,10 @@ async def portfolio_feed(websocket: WebSocket):
                 "daily_profit_pct": round(daily_profit_pct, 2),
                 "portfolio_drop_pct": round(portfolio_drop, 2),  # RULE 8: Actual loss for emergency modal
                 "is_active": agent.is_active,
-                "emergency": agent.emergency_triggered,
+                # RULE 8: Only true while a decision is genuinely pending - NOT emergency_triggered,
+                # which stays true long after resolution and would otherwise re-pop the modal on
+                # every reconnect/reload (and even on a plain manual STOP TRADING click).
+                "emergency": agent.emergency_awaiting_decision,
                 "max_loss_pct": agent.max_loss_pct,
                 "trades": len(agent.trades)
             }
