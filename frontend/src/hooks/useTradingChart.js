@@ -9,6 +9,11 @@ import { fmtNum, getBinanceSymbol } from '../data/pairs';
 // selected timeframe (not just a cosmetic label change).
 const TIMEFRAME_SECONDS = { '10S': 10, '30S': 30, '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 86400 };
 
+// Binance's public klines REST endpoint only supports these standard
+// granularities - our custom 10S/30S timeframes have no equivalent there,
+// so those two always fall back to synthetic data.
+const BINANCE_KLINE_INTERVAL = { '1M': '1m', '5M': '5m', '15M': '15m', '1H': '1h', '1D': '1d' };
+
 const MA_PERIODS = [5, 10, 20, 30];
 const MA_COLORS = { 5: '#facc15', 10: '#ec4899', 20: '#38bdf8', 30: '#a855f7' };
 const VOLUME_MA_PERIOD = 20;
@@ -31,6 +36,39 @@ function generateMockData(basePrice, intervalSeconds) {
     price = close;
   }
   return data;
+}
+
+// Pulls REAL historical OHLCV candles from Binance's free public REST API
+// (no key needed, CORS-open) so the chart shows genuine price history
+// instead of a synthetic random walk. Falls back to generateMockData when
+// the pair/timeframe has no Binance equivalent (10S/30S, or an unlisted pair).
+async function fetchRealHistory(binanceSymbol, klineInterval, limit = 150) {
+  const url = `https://api.binance.com/api/v3/klines?symbol=${binanceSymbol.toUpperCase()}&interval=${klineInterval}&limit=${limit}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const raw = await res.json();
+  if (!Array.isArray(raw) || raw.length === 0) throw new Error('Empty klines response');
+  return raw.map((k) => ({
+    time: Math.floor(k[0] / 1000),
+    open: parseFloat(k[1]),
+    high: parseFloat(k[2]),
+    low: parseFloat(k[3]),
+    close: parseFloat(k[4]),
+    volume: parseFloat(k[5]),
+  }));
+}
+
+async function loadHistoricalData(pairLabelArg, tfKey, basePrice) {
+  const binanceSymbol = getBinanceSymbol(pairLabelArg);
+  const klineInterval = BINANCE_KLINE_INTERVAL[tfKey];
+  if (binanceSymbol && klineInterval) {
+    try {
+      return await fetchRealHistory(binanceSymbol, klineInterval);
+    } catch (err) {
+      console.warn(`[CHART] Failed to fetch real history for ${pairLabelArg} (${tfKey}), using synthetic data:`, err);
+    }
+  }
+  return generateMockData(basePrice, TIMEFRAME_SECONDS[tfKey] || 3600);
 }
 
 function calcSMA(data, period) {
@@ -123,8 +161,9 @@ const darkThemeConfig = {
 };
 
 // Candlestick + MA(5,10,20,30) overlay chart, Volume histogram sub-panel,
-// RSI sub-panel, live OHLC/Change/Range readouts, the free Binance public
-// feed (paper trading), and the backend/Bybit feed (live trading).
+// RSI sub-panel, live OHLC/Change/Range readouts, real Binance historical
+// candles + live public feed (paper trading), and the backend/Bybit feed
+// (live trading).
 export function useTradingChart({
   chartContainerRef,
   volumeContainerRef,
@@ -150,6 +189,9 @@ export function useTradingChart({
   const freeSourceWsRef = useRef(null);
   const pairLabelRef = useRef(pairLabel);
   const skipFirstPairEffect = useRef(true);
+  // Bumped on every switchSymbol/switchTimeframe call so a slow, superseded
+  // real-history fetch can't clobber a newer switch when it finally resolves.
+  const loadGenerationRef = useRef(0);
   pairLabelRef.current = pairLabel;
 
   const [timeframe, setTimeframe] = useState('1H');
@@ -215,6 +257,41 @@ export function useTradingChart({
     volumeMaSeriesRef.current?.setData(calcVolumeSMA(data, VOLUME_MA_PERIOD));
     candleSeriesRef.current?.setMarkers(computeExtremeMarkers(data));
   }, []);
+
+  // Pushes a full dataset (synthetic or real) into every series + the readouts.
+  const applyDataset = useCallback(
+    (data, { fitContent = false, tf } = {}) => {
+      mockDataRef.current = data;
+      candleSeriesRef.current?.setData(data);
+      applyAllOverlays(data);
+
+      const rsiData = calcRSI(data, 14);
+      rsiSeriesRef.current?.setData(rsiData);
+
+      if (fitContent) chartRef.current?.timeScale().fitContent();
+
+      updateReadouts(data[data.length - 1], data);
+      setReadouts((prev) => ({
+        ...prev,
+        rsi: rsiData.length ? rsiData[rsiData.length - 1].value : prev.rsi,
+        label: `Candlestick · ${tf ?? prev.label.split(' · ')[1]} · ${pairLabelRef.current}`,
+      }));
+    },
+    [updateReadouts, applyAllOverlays]
+  );
+
+  // Kicks off the async real-history fetch and swaps it in once ready, unless
+  // a newer switchSymbol/switchTimeframe call has already superseded this one.
+  const loadRealHistoryInBackground = useCallback(
+    (pairLabelArg, tfKey, basePrice) => {
+      const myGeneration = ++loadGenerationRef.current;
+      loadHistoricalData(pairLabelArg, tfKey, basePrice).then((data) => {
+        if (myGeneration !== loadGenerationRef.current) return; // superseded - drop it
+        applyDataset(data, { fitContent: true, tf: tfKey });
+      });
+    },
+    [applyDataset]
+  );
 
   const disconnectFreeSource = useCallback(() => {
     if (freeSourceWsRef.current) {
@@ -329,49 +406,22 @@ export function useTradingChart({
   const switchSymbol = useCallback(
     (basePrice) => {
       entryPriceRef.current = basePrice;
-      const mockData = generateMockData(basePrice, currentIntervalRef.current);
-      mockDataRef.current = mockData;
-
-      candleSeriesRef.current.setData(mockData);
-      applyAllOverlays(mockData);
-
-      const rsiData = calcRSI(mockData, 14);
-      rsiSeriesRef.current.setData(rsiData);
-
-      trailingLockLineRef.current.applyOptions({
-        price: basePrice * 1.0008,
-        title: 'Lock +0.08',
-        color: '#3b82f6',
-      });
-
-      updateReadouts(mockData[mockData.length - 1], mockData);
-      if (rsiData.length) {
-        setReadouts((prev) => ({ ...prev, rsi: rsiData[rsiData.length - 1].value }));
-      }
+      // Instant synthetic placeholder so the chart never sits blank...
+      applyDataset(generateMockData(basePrice, currentIntervalRef.current), { fitContent: true });
+      trailingLockLineRef.current.applyOptions({ price: basePrice * 1.0008, title: 'Lock +0.08', color: '#3b82f6' });
+      // ...then swap in real Binance history for this pair once it arrives.
+      loadRealHistoryInBackground(pairLabelRef.current, timeframe, basePrice);
     },
-    [updateReadouts, applyAllOverlays]
+    [applyDataset, loadRealHistoryInBackground, timeframe]
   );
 
   const switchTimeframe = useCallback(
     (tf) => {
       setTimeframe(tf);
       currentIntervalRef.current = TIMEFRAME_SECONDS[tf] || 3600;
-      const mockData = generateMockData(entryPriceRef.current, currentIntervalRef.current);
-      mockDataRef.current = mockData;
-
-      candleSeriesRef.current.setData(mockData);
-      applyAllOverlays(mockData);
-
-      const rsiData = calcRSI(mockData, 14);
-      rsiSeriesRef.current.setData(rsiData);
-
-      chartRef.current.timeScale().fitContent();
-      updateReadouts(mockData[mockData.length - 1], mockData);
-      setReadouts((prev) => ({
-        ...prev,
-        rsi: rsiData.length ? rsiData[rsiData.length - 1].value : prev.rsi,
-        label: `Candlestick · ${tf} · ${pairLabelRef.current}`,
-      }));
+      // Instant synthetic placeholder, then swap in real history for the new timeframe.
+      applyDataset(generateMockData(entryPriceRef.current, currentIntervalRef.current), { fitContent: true, tf });
+      loadRealHistoryInBackground(pairLabelRef.current, tf, entryPriceRef.current);
 
       // RULE 2: Dynamic Timeframe Syncing - tell the backend AI Agent to read
       // volume/price data on this exact interval from now on.
@@ -381,7 +431,7 @@ export function useTradingChart({
         body: JSON.stringify({ seconds: currentIntervalRef.current }),
       }).catch((err) => console.error('Failed to sync timeframe with backend:', err));
     },
-    [updateReadouts, applyAllOverlays]
+    [applyDataset, loadRealHistoryInBackground]
   );
 
   // Init chart once on mount
@@ -426,7 +476,7 @@ export function useTradingChart({
       ...darkThemeConfig,
     });
     volumeChartRef.current = volumeChart;
-    const volumeSeries = volumeChart.addHistogramSeries({ priceFormat: { type: 'volume' } });
+    const volumeSeries = volumeChart.addHistogramSeries({ priceFormat: { type: 'volume' }, lastValueVisible: false });
     volumeSeriesRef.current = volumeSeries;
     const volumeMaSeries = volumeChart.addLineSeries({ color: '#f59e0b', lineWidth: 1.5, lastValueVisible: false });
     volumeMaSeriesRef.current = volumeMaSeries;
@@ -444,13 +494,14 @@ export function useTradingChart({
     rsiChart.addLineSeries({ color: '#4b5563', lineWidth: 1, lineStyle: LineStyle.Dashed }).setData([]);
 
     const entryPrice = entryPriceRef.current;
-    const mockData = generateMockData(entryPrice, currentIntervalRef.current);
-    mockDataRef.current = mockData;
-    candleSeries.setData(mockData);
-    applyAllOverlays(mockData);
+    // Instant synthetic placeholder so something renders immediately...
+    const placeholderData = generateMockData(entryPrice, currentIntervalRef.current);
+    mockDataRef.current = placeholderData;
+    candleSeries.setData(placeholderData);
+    applyAllOverlays(placeholderData);
 
-    const rsiData = calcRSI(mockData, 14);
-    rsiSeries.setData(rsiData);
+    const placeholderRsi = calcRSI(placeholderData, 14);
+    rsiSeries.setData(placeholderRsi);
     rsiSeries.createPriceLine({ price: 70, color: '#4b5563', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '70' });
     rsiSeries.createPriceLine({ price: 30, color: '#4b5563', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '30' });
 
@@ -469,12 +520,15 @@ export function useTradingChart({
       rsiChart.timeScale().setVisibleLogicalRange(range);
     });
 
-    updateReadouts(mockData[mockData.length - 1], mockData);
-    if (rsiData.length) setReadouts((prev) => ({ ...prev, rsi: rsiData[rsiData.length - 1].value }));
+    updateReadouts(placeholderData[placeholderData.length - 1], placeholderData);
+    if (placeholderRsi.length) setReadouts((prev) => ({ ...prev, rsi: placeholderRsi[placeholderRsi.length - 1].value }));
+
+    // ...then swap in real Binance history for the initial pair/timeframe once it arrives.
+    loadRealHistoryInBackground(pairLabelRef.current, '1H', entryPrice);
 
     // Live crosshair OHLC readout (hover to inspect any candle). Reads mockDataRef.current
-    // (not the local mockData variable) so it stays correct after switchSymbol/switchTimeframe
-    // replace the underlying array with a new one.
+    // (not a local variable) so it stays correct after switchSymbol/switchTimeframe/real-history
+    // swaps replace the underlying array with a new one.
     chart.subscribeCrosshairMove((param) => {
       if (!param.time) return;
       const bar = param.seriesData.get(candleSeries);
@@ -573,7 +627,6 @@ export function useTradingChart({
     if (!candleSeriesRef.current) return;
     debugLog(`[CHART] Regenerating candlestick data for ${pairLabel}`);
     switchSymbol(pairPrice);
-    setReadouts((prev) => ({ ...prev, label: `Candlestick · ${timeframe} · ${pairLabel}` }));
     if (tradingModeRef.current === 'PAPER_TRADING') {
       debugLog(`[FREE SOURCE] Re-subscribing to Binance feed for ${pairLabel}`);
       connectFreeSource(pairLabel);

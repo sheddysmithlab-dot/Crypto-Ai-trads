@@ -61,11 +61,12 @@ export default function App() {
         console.error('Failed to start bot:', err);
       }
     } else {
+      // Plain voluntary stop - no loss event, so no "EMERGENCY EXIT TRIGGERED" modal here.
+      // That wording is reserved for a genuine RULE 5 auto-kill resolved via handleRiskExit.
       debugLog('User clicked STOP TRADING. Sending POST /emergency-exit to Backend...');
       try {
         await fetch(`${API_BASE}/emergency-exit`, { method: 'POST' });
         clearTrades();
-        setAlertOpen(true);
       } catch (err) {
         console.error('Emergency exit failed:', err);
       }
@@ -80,6 +81,7 @@ export default function App() {
     } catch (err) {
       console.error('Emergency exit request failed:', err);
     }
+    setAlertOpen(true);
     clearTrades();
   }
 
