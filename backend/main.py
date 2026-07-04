@@ -2,10 +2,13 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
+import hashlib
+import hmac
 import json
 import random
 import sys
 import time
+import httpx
 
 # Windows' default console codepage (cp1252) can't encode emoji used in log
 # messages below; force UTF-8 stdout/stderr so print() never crashes the app.
@@ -129,17 +132,109 @@ class BybitAPIWrapper:
     """ API Data Cable & Execution Ground (Pillar 4 & 5) """
     def __init__(self):
         # DEFAULT: PAPER TRADING (As per Automation.txt)
-        self.mode = "PAPER_TRADING" 
+        self.mode = "PAPER_TRADING"
         self.connected = False
         # RULE 7: Taker fee tier, continuously "fetched" from Bybit (simulated here at
         # Bybit's standard ~0.055% taker rate; real integration would poll the fee-rate endpoint).
         self.taker_fee_pct = 0.05
 
+        # Real Bybit account equity (USD), refreshed in the background while LIVE_TRADING.
+        # None until the first successful fetch - callers fall back to paper capital until then.
+        self.last_known_balance = None
+        self.last_error = None
+        self._was_failing = False
+
     def connect_real_api(self):
         self.mode = "LIVE_TRADING"
         self.connected = True
+        self.last_known_balance = None
         print("[PILLAR 5: BYBIT] LIVE ACCOUNT CONNECTED. REAL TRADING ENABLED.")
         notifications.push("Bybit API Connected - Real Money Trading is now ACTIVE.", "warning")
+        # Kick off an immediate balance read instead of waiting for the next background poll.
+        asyncio.create_task(self.fetch_real_balance())
+
+    def disconnect_real_api(self, reason="Credentials reset"):
+        if self.mode == "LIVE_TRADING":
+            print(f"[PILLAR 5: BYBIT] Reverting to Paper Trading ({reason}).")
+            notifications.push(f"Bybit disconnected ({reason}) - reverted to Paper Trading.", "info")
+        self.mode = "PAPER_TRADING"
+        self.connected = False
+        self.last_known_balance = None
+
+    def _sign(self, timestamp, recv_window, query_string):
+        payload = f"{timestamp}{settings_store.bybit_api_key}{recv_window}{query_string}"
+        return hmac.new(settings_store.bybit_api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+    async def fetch_real_balance(self):
+        """ RULE 5 wiring: pull the REAL unified-account total equity from Bybit's v5 API.
+        Used both by 'Test Bybit' (to actually verify credentials) and by the background
+        refresher that keeps total_capital showing the live account balance once connected.
+        Returns the equity as a float, or None on any failure (network/auth/parsing). """
+        if not settings_store.is_bybit_configured():
+            self.last_error = "No Bybit API Key/Secret configured."
+            return None
+
+        base_url = (
+            "https://api-testnet.bybit.com"
+            if settings_store.bybit_environment == "testnet"
+            else "https://api.bybit.com"
+        )
+        query_string = "accountType=UNIFIED"
+        timestamp = str(int(time.time() * 1000))
+        recv_window = "5000"
+        headers = {
+            "X-BAPI-API-KEY": settings_store.bybit_api_key,
+            "X-BAPI-SIGN": self._sign(timestamp, recv_window, query_string),
+            "X-BAPI-SIGN-TYPE": "2",
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": recv_window,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.get(f"{base_url}/v5/account/wallet-balance?{query_string}", headers=headers)
+
+            # Bybit returns a bare 401 with an empty body for invalid/expired API keys -
+            # there's no JSON to parse in that case, so check the status first.
+            if resp.status_code == 401:
+                self.last_error = "Invalid API key/secret (Bybit returned 401 Unauthorized)."
+                self._note_failure()
+                return None
+            if resp.status_code != 200:
+                self.last_error = f"Bybit API returned HTTP {resp.status_code}."
+                self._note_failure()
+                return None
+
+            data = resp.json()
+
+            if data.get("retCode") != 0:
+                self.last_error = data.get("retMsg", "Unknown Bybit API error.")
+                self._note_failure()
+                return None
+
+            account_list = data.get("result", {}).get("list", [])
+            if not account_list:
+                self.last_error = "Bybit returned no account data for this key."
+                self._note_failure()
+                return None
+
+            equity = float(account_list[0]["totalEquity"])
+            self.last_known_balance = equity
+            self.last_error = None
+            if self._was_failing:
+                notifications.push("Bybit connection restored - live balance is syncing again.", "success")
+            self._was_failing = False
+            return equity
+        except Exception as exc:
+            self.last_error = f"Bybit request failed: {exc}"
+            self._note_failure()
+            return None
+
+    def _note_failure(self):
+        if not self._was_failing:
+            print(f"[BYBIT] Balance fetch failing: {self.last_error}")
+            notifications.push(f"Bybit balance unreachable ({self.last_error}). Showing last known value.", "error")
+        self._was_failing = True
 
     def get_taker_fee_pct(self):
         """ RULE 6/7: Live taker fee tier used for all True Net Profit calculations. """
@@ -227,7 +322,13 @@ class AITradingAgent:
         return sum(self._trade_metrics(t)["net_usd"] for t in self.trades)
 
     def get_total_portfolio_value(self):
-        """ RULE 5: Total Portfolio Value = realized capital + unrealized P&L of open positions. """
+        """ RULE 5: Total Portfolio Value.
+        PAPER_TRADING (default) -> simulated capital + unrealized P&L of open (simulated) positions.
+        LIVE_TRADING -> the REAL Bybit account equity, refreshed in the background by
+        bybit_api.fetch_real_balance(). Falls back to the simulated value until the first
+        successful read comes back, so the UI never shows a blank/zero balance mid-switch. """
+        if bybit_api.mode == "LIVE_TRADING" and bybit_api.last_known_balance is not None:
+            return bybit_api.last_known_balance
         return self.current_capital + self.get_unrealized_net_usd()
 
     def set_paper_capital(self, amount):
@@ -453,9 +554,19 @@ async def market_simulator():
         agent.process_tick(new_price, volume_increment)
         await asyncio.sleep(0.5)
 
+async def bybit_balance_refresher():
+    """ Keeps bybit_api.last_known_balance fresh while LIVE_TRADING, so
+    get_total_portfolio_value() can read it synchronously without ever
+    blocking on a network call in the hot path (WS loops, kill-switch checks). """
+    while True:
+        if bybit_api.mode == "LIVE_TRADING" and bybit_api.connected:
+            await bybit_api.fetch_real_balance()
+        await asyncio.sleep(3)
+
 @app.on_event("startup")
 async def start_background_tasks():
     asyncio.create_task(market_simulator())
+    asyncio.create_task(bybit_balance_refresher())
 
 # ==========================================
 # 2. REST API COMMAND "WIRES"
@@ -587,9 +698,14 @@ async def test_bybit_connection():
     if not settings_store.is_bybit_configured():
         return {"success": False, "message": "Test failed: No Bybit API Key/Secret configured yet."}
 
-    # In a production build this would make a authenticated read-only call (e.g. GET /v5/account/wallet-balance)
     print(f"[SETTINGS] Testing Bybit connectivity on {settings_store.bybit_environment}...")
-    return {"success": True, "message": f"Bybit credentials look valid for {settings_store.bybit_environment}. Connection OK."}
+    equity = await bybit_api.fetch_real_balance()
+    if equity is None:
+        return {"success": False, "message": f"Bybit test failed: {bybit_api.last_error}"}
+    return {
+        "success": True,
+        "message": f"Bybit credentials verified on {settings_store.bybit_environment}. Account equity: ${equity:,.2f}.",
+    }
 
 @app.post("/settings/test-ai")
 async def test_ai_connection():
@@ -604,6 +720,7 @@ async def test_ai_connection():
 @app.post("/settings/reset")
 async def reset_settings():
     settings_store.reset()
+    bybit_api.disconnect_real_api(reason="Settings reset")
     print("[SETTINGS] All stored Bybit & AI settings have been reset.")
     return {"status": "success", "message": "All settings have been reset to defaults."}
 
