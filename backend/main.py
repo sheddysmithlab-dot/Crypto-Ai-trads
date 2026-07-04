@@ -32,6 +32,11 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+@app.get("/health")
+async def health_check():
+    """Render's health check target - just confirms the process is alive."""
+    return {"status": "ok"}
+
 # ==========================================
 # LIVE NOTIFICATION CENTER (bell dropdown wiring)
 # ==========================================
@@ -690,5 +695,7 @@ async def trades_feed(websocket: WebSocket):
         print("POLICY 4: Trades WS Client Disconnected. System tracking preserved.")
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload="PORT" not in os.environ)
