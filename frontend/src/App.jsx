@@ -39,11 +39,9 @@ export default function App() {
 
   const chartContainerRef = useRef(null);
   const volumeContainerRef = useRef(null);
-  const rsiContainerRef = useRef(null);
   const { timeframe, switchTimeframe, readouts } = useTradingChart({
     chartContainerRef,
     volumeContainerRef,
-    rsiContainerRef,
     pairLabel: pairSelector.activePairLabel,
     pairPrice: pairSelector.activePair.price,
     externalTradingMode: portfolio.tradingMode,
@@ -85,6 +83,32 @@ export default function App() {
     clearTrades();
   }
 
+  async function handleManualBuy() {
+    debugLog('Manual BUY button clicked. Sending POST /open-trade to Backend...');
+    try {
+      const res = await fetch(`${API_BASE}/open-trade`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ side: 'LONG' }),
+      });
+      const data = await res.json();
+      debugLog(data.message || 'Manual BUY executed.');
+    } catch (err) {
+      console.error('Manual buy failed:', err);
+    }
+  }
+
+  async function handleManualSell() {
+    debugLog('Manual SELL button clicked. Sending POST /manual-sell to Backend...');
+    try {
+      const res = await fetch(`${API_BASE}/manual-sell`, { method: 'POST' });
+      const data = await res.json();
+      debugLog(data.message || 'Manual SELL executed.');
+    } catch (err) {
+      console.error('Manual sell failed:', err);
+    }
+  }
+
   async function handleRiskContinue() {
     setRiskModal((r) => ({ ...r, open: false }));
     try {
@@ -122,7 +146,6 @@ export default function App() {
           pairSelector={pairSelector}
           chartContainerRef={chartContainerRef}
           volumeContainerRef={volumeContainerRef}
-          rsiContainerRef={rsiContainerRef}
           timeframe={timeframe}
           switchTimeframe={switchTimeframe}
           readouts={readouts}
@@ -136,6 +159,8 @@ export default function App() {
         uptime={uptime}
         lastUpdated={readouts.lastUpdated}
         onClick={handleControlClick}
+        onManualBuy={handleManualBuy}
+        onManualSell={handleManualSell}
       />
 
       <PaperTradingModal

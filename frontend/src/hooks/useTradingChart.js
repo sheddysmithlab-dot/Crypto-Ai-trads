@@ -17,6 +17,10 @@ const BINANCE_KLINE_INTERVAL = { '1M': '1m', '5M': '5m', '15M': '15m', '1H': '1h
 const MA_PERIODS = [5, 10, 20, 30];
 const MA_COLORS = { 5: '#facc15', 10: '#ec4899', 20: '#38bdf8', 30: '#a855f7' };
 const VOLUME_MA_PERIOD = 20;
+// Default zoom: only the most recent candles are visible, on both the main
+// chart and the volume panel (they're time-synced), instead of the whole
+// fetched history all at once.
+const DEFAULT_VISIBLE_CANDLES = 10;
 
 function generateMockData(basePrice, intervalSeconds) {
   const data = [];
@@ -118,40 +122,6 @@ function computeExtremeMarkers(data) {
   return markers.sort((a, b) => a.time - b.time);
 }
 
-function calcRSI(data, period = 14) {
-  let gains = 0,
-    losses = 0;
-  const result = [];
-  for (let i = 1; i < data.length; i++) {
-    const change = data[i].close - data[i - 1].close;
-    const gain = Math.max(change, 0);
-    const loss = Math.max(-change, 0);
-
-    if (i <= period) {
-      gains += gain;
-      losses += loss;
-      if (i === period) {
-        const avgGain = gains / period;
-        const avgLoss = losses / period;
-        const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
-        const rsi = avgLoss === 0 ? 100 : 100 - 100 / (1 + rs);
-        result.push({ time: data[i].time, value: rsi });
-      }
-    } else {
-      const prevAvgGain = gains / period;
-      const prevAvgLoss = losses / period;
-      const avgGain = (prevAvgGain * (period - 1) + gain) / period;
-      const avgLoss = (prevAvgLoss * (period - 1) + loss) / period;
-      gains = avgGain * period;
-      losses = avgLoss * period;
-      const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
-      const rsi = avgLoss === 0 ? 100 : 100 - 100 / (1 + rs);
-      result.push({ time: data[i].time, value: rsi });
-    }
-  }
-  return result;
-}
-
 const darkThemeConfig = {
   layout: { background: { type: 'solid', color: '#161A1E' }, textColor: '#9ca3af' },
   grid: { vertLines: { color: '#1E2329' }, horzLines: { color: '#1E2329' } },
@@ -160,31 +130,21 @@ const darkThemeConfig = {
   timeScale: { borderColor: '#1E2329' },
 };
 
-// Candlestick + MA(5,10,20,30) overlay chart, Volume histogram sub-panel,
-// RSI sub-panel, live OHLC/Change/Range readouts, real Binance historical
-// candles + live public feed (paper trading), and the backend/Bybit feed
-// (live trading).
-export function useTradingChart({
-  chartContainerRef,
-  volumeContainerRef,
-  rsiContainerRef,
-  pairLabel,
-  pairPrice,
-  externalTradingMode,
-  setConnected,
-}) {
+// Candlestick + MA(5,10,20,30) overlay chart with a Volume histogram
+// sub-panel, real Binance historical candles + live public feed (paper
+// trading), and the backend/Bybit feed (live trading). Defaults to showing
+// only the last 10 candles, zoomed in, instead of the whole history at once.
+export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLabel, pairPrice, externalTradingMode, setConnected }) {
   const chartRef = useRef(null);
   const volumeChartRef = useRef(null);
-  const rsiChartRef = useRef(null);
   const candleSeriesRef = useRef(null);
   const maSeriesRef = useRef({});
   const volumeSeriesRef = useRef(null);
   const volumeMaSeriesRef = useRef(null);
-  const rsiSeriesRef = useRef(null);
   const trailingLockLineRef = useRef(null);
   const mockDataRef = useRef([]);
   const entryPriceRef = useRef(pairPrice);
-  const currentIntervalRef = useRef(TIMEFRAME_SECONDS['1H']);
+  const currentIntervalRef = useRef(TIMEFRAME_SECONDS['30S']);
   const tradingModeRef = useRef(null);
   const freeSourceWsRef = useRef(null);
   const pairLabelRef = useRef(pairLabel);
@@ -194,55 +154,27 @@ export function useTradingChart({
   const loadGenerationRef = useRef(0);
   pairLabelRef.current = pairLabel;
 
-  const [timeframe, setTimeframe] = useState('1H');
+  const [timeframe, setTimeframe] = useState('30S');
   const [readouts, setReadouts] = useState({
-    open: pairPrice,
-    high: pairPrice,
-    low: pairPrice,
-    close: pairPrice,
-    changeAbs: 0,
-    changePct: 0,
-    rangeAbs: 0,
-    rangePct: 0,
-    isUp: true,
-    ma5: pairPrice,
-    ma10: pairPrice,
-    ma20: pairPrice,
-    ma30: pairPrice,
     vol: 0,
     volMA: 0,
-    rsi: 50,
     lastUpdated: '--:-- UTC',
-    label: `Candlestick · 1H · ${pairLabel}`,
   });
 
-  const updateReadouts = useCallback((bar, data) => {
-    const changeAbs = bar.close - bar.open;
-    const changePct = (changeAbs / bar.open) * 100;
-    const rangeAbs = bar.high - bar.low;
-    const rangePct = (rangeAbs / bar.low) * 100;
-    const now = new Date();
-
-    const maValues = {};
-    MA_PERIODS.forEach((period) => {
-      const series = calcSMA(data.slice(-(period + 5)), period);
-      maValues[`ma${period}`] = series.length ? series[series.length - 1].value : bar.close;
+  const zoomToRecentCandles = useCallback((dataLength) => {
+    if (!chartRef.current || dataLength === 0) return;
+    chartRef.current.timeScale().setVisibleLogicalRange({
+      from: Math.max(0, dataLength - DEFAULT_VISIBLE_CANDLES),
+      to: dataLength,
     });
+  }, []);
 
+  const updateReadouts = useCallback((bar, data) => {
+    const now = new Date();
     const volSeries = calcVolumeSMA(data.slice(-(VOLUME_MA_PERIOD + 5)), VOLUME_MA_PERIOD);
 
     setReadouts((prev) => ({
       ...prev,
-      open: bar.open,
-      high: bar.high,
-      low: bar.low,
-      close: bar.close,
-      changeAbs,
-      changePct,
-      rangeAbs,
-      rangePct,
-      isUp: bar.close >= bar.open,
-      ...maValues,
       vol: bar.volume,
       volMA: volSeries.length ? volSeries[volSeries.length - 1].value : bar.volume,
       lastUpdated: `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')} UTC`,
@@ -260,24 +192,14 @@ export function useTradingChart({
 
   // Pushes a full dataset (synthetic or real) into every series + the readouts.
   const applyDataset = useCallback(
-    (data, { fitContent = false, tf } = {}) => {
+    (data, { zoomToRecent = false } = {}) => {
       mockDataRef.current = data;
       candleSeriesRef.current?.setData(data);
       applyAllOverlays(data);
-
-      const rsiData = calcRSI(data, 14);
-      rsiSeriesRef.current?.setData(rsiData);
-
-      if (fitContent) chartRef.current?.timeScale().fitContent();
-
+      if (zoomToRecent) zoomToRecentCandles(data.length);
       updateReadouts(data[data.length - 1], data);
-      setReadouts((prev) => ({
-        ...prev,
-        rsi: rsiData.length ? rsiData[rsiData.length - 1].value : prev.rsi,
-        label: `Candlestick · ${tf ?? prev.label.split(' · ')[1]} · ${pairLabelRef.current}`,
-      }));
     },
-    [updateReadouts, applyAllOverlays]
+    [updateReadouts, applyAllOverlays, zoomToRecentCandles]
   );
 
   // Kicks off the async real-history fetch and swaps it in once ready, unless
@@ -287,7 +209,7 @@ export function useTradingChart({
       const myGeneration = ++loadGenerationRef.current;
       loadHistoricalData(pairLabelArg, tfKey, basePrice).then((data) => {
         if (myGeneration !== loadGenerationRef.current) return; // superseded - drop it
-        applyDataset(data, { fitContent: true, tf: tfKey });
+        applyDataset(data, { zoomToRecent: true });
       });
     },
     [applyDataset]
@@ -335,12 +257,6 @@ export function useTradingChart({
       candleSeriesRef.current.update(updated);
       updateReadouts(updated, mockData);
       applyAllOverlays(mockData);
-
-      const rsiTail = calcRSI(mockData.slice(-30), 14);
-      if (rsiTail.length) {
-        rsiSeriesRef.current.update(rsiTail[rsiTail.length - 1]);
-        setReadouts((prev) => ({ ...prev, rsi: rsiTail[rsiTail.length - 1].value }));
-      }
     },
     [updateReadouts, applyAllOverlays]
   );
@@ -407,7 +323,7 @@ export function useTradingChart({
     (basePrice) => {
       entryPriceRef.current = basePrice;
       // Instant synthetic placeholder so the chart never sits blank...
-      applyDataset(generateMockData(basePrice, currentIntervalRef.current), { fitContent: true });
+      applyDataset(generateMockData(basePrice, currentIntervalRef.current), { zoomToRecent: true });
       trailingLockLineRef.current.applyOptions({ price: basePrice * 1.0008, title: 'Lock +0.08', color: '#3b82f6' });
       // ...then swap in real Binance history for this pair once it arrives.
       loadRealHistoryInBackground(pairLabelRef.current, timeframe, basePrice);
@@ -420,7 +336,7 @@ export function useTradingChart({
       setTimeframe(tf);
       currentIntervalRef.current = TIMEFRAME_SECONDS[tf] || 3600;
       // Instant synthetic placeholder, then swap in real history for the new timeframe.
-      applyDataset(generateMockData(entryPriceRef.current, currentIntervalRef.current), { fitContent: true, tf });
+      applyDataset(generateMockData(entryPriceRef.current, currentIntervalRef.current), { zoomToRecent: true });
       loadRealHistoryInBackground(pairLabelRef.current, tf, entryPriceRef.current);
 
       // RULE 2: Dynamic Timeframe Syncing - tell the backend AI Agent to read
@@ -438,8 +354,7 @@ export function useTradingChart({
   useEffect(() => {
     const chartContainer = chartContainerRef.current;
     const volumeContainer = volumeContainerRef.current;
-    const rsiContainer = rsiContainerRef.current;
-    if (!chartContainer || !volumeContainer || !rsiContainer) return;
+    if (!chartContainer || !volumeContainer) return;
 
     const chart = createChart(chartContainer, {
       width: chartContainer.clientWidth,
@@ -481,29 +396,12 @@ export function useTradingChart({
     const volumeMaSeries = volumeChart.addLineSeries({ color: '#f59e0b', lineWidth: 1.5, lastValueVisible: false });
     volumeMaSeriesRef.current = volumeMaSeries;
 
-    // RSI Sub-panel Chart (separate synced chart instance)
-    const rsiChart = createChart(rsiContainer, {
-      width: rsiContainer.clientWidth,
-      height: rsiContainer.clientHeight,
-      ...darkThemeConfig,
-    });
-    rsiChartRef.current = rsiChart;
-
-    const rsiSeries = rsiChart.addLineSeries({ color: '#a855f7', lineWidth: 2 });
-    rsiSeriesRef.current = rsiSeries;
-    rsiChart.addLineSeries({ color: '#4b5563', lineWidth: 1, lineStyle: LineStyle.Dashed }).setData([]);
-
     const entryPrice = entryPriceRef.current;
     // Instant synthetic placeholder so something renders immediately...
     const placeholderData = generateMockData(entryPrice, currentIntervalRef.current);
     mockDataRef.current = placeholderData;
     candleSeries.setData(placeholderData);
     applyAllOverlays(placeholderData);
-
-    const placeholderRsi = calcRSI(placeholderData, 14);
-    rsiSeries.setData(placeholderRsi);
-    rsiSeries.createPriceLine({ price: 70, color: '#4b5563', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '70' });
-    rsiSeries.createPriceLine({ price: 30, color: '#4b5563', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '30' });
 
     trailingLockLineRef.current = candleSeries.createPriceLine({
       price: entryPrice * 1.0008,
@@ -514,17 +412,27 @@ export function useTradingChart({
       title: 'Lock +0.08',
     });
 
-    // Sync time scales between the main chart, volume panel, and RSI panel
+    // Sync time scales between the main chart and the volume panel
     chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
       volumeChart.timeScale().setVisibleLogicalRange(range);
-      rsiChart.timeScale().setVisibleLogicalRange(range);
     });
 
+    zoomToRecentCandles(placeholderData.length);
     updateReadouts(placeholderData[placeholderData.length - 1], placeholderData);
-    if (placeholderRsi.length) setReadouts((prev) => ({ ...prev, rsi: placeholderRsi[placeholderRsi.length - 1].value }));
 
-    // ...then swap in real Binance history for the initial pair/timeframe once it arrives.
-    loadRealHistoryInBackground(pairLabelRef.current, '1H', entryPrice);
+    // ...then swap in real Binance history for the initial pair/timeframe once it arrives
+    // (30S has no Binance kline equivalent, so this stays on synthetic data until the user
+    // picks a timeframe Binance actually supports).
+    loadRealHistoryInBackground(pairLabelRef.current, '30S', entryPrice);
+
+    // RULE 2: Sync the default timeframe to the backend on load too, not just on every
+    // subsequent switchTimeframe click, so a fresh page load and a fresh backend start
+    // agree on the candle interval from the very first tick.
+    fetch(`${API_BASE}/set-timeframe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seconds: currentIntervalRef.current }),
+    }).catch((err) => console.error('Failed to sync initial timeframe with backend:', err));
 
     // Live crosshair OHLC readout (hover to inspect any candle). Reads mockDataRef.current
     // (not a local variable) so it stays correct after switchSymbol/switchTimeframe/real-history
@@ -538,7 +446,6 @@ export function useTradingChart({
     const handleResize = () => {
       chart.applyOptions({ width: chartContainer.clientWidth, height: chartContainer.clientHeight });
       volumeChart.applyOptions({ width: volumeContainer.clientWidth, height: volumeContainer.clientHeight });
-      rsiChart.applyOptions({ width: rsiContainer.clientWidth, height: rsiContainer.clientHeight });
     };
     window.addEventListener('resize', handleResize);
 
@@ -613,7 +520,6 @@ export function useTradingChart({
       disconnectFreeSource();
       chart.remove();
       volumeChart.remove();
-      rsiChart.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

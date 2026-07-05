@@ -126,6 +126,78 @@ class SettingsStore:
 settings_store = SettingsStore()
 
 # ==========================================
+# AI PROVIDER: real confirmation layer for RULE 3 signals
+# ==========================================
+# Per-provider defaults - only the API key is mandatory; base_url/model can
+# be overridden from the Settings form. Azure OpenAI has no universal base
+# URL (it's resource-specific), so it always requires ai_base_url to be set.
+AI_PROVIDER_DEFAULTS = {
+    "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini", "auth_header": "bearer"},
+    "zhipu-glm": {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4.5-flash", "auth_header": "bearer"},
+    "azure-openai": {"base_url": None, "model": "gpt-4o-mini", "auth_header": "api-key"},
+    "custom": {"base_url": None, "model": "gpt-4o-mini", "auth_header": "bearer"},
+}
+
+async def consult_ai_provider(context):
+    """ Asks the configured AI provider (OpenAI-compatible chat completions) whether to
+    proceed with a RULE-3-triggered trade. Returns:
+      True  - AI confirms, proceed with the trade
+      False - AI rejects, skip this entry
+      None  - no AI configured, or the provider is unreachable/errored - callers must
+              fail OPEN (proceed as if no AI were configured) so a flaky third-party
+              API can never be the reason the bot misses a real-time signal. """
+    provider = settings_store.ai_provider
+    if provider == "none" or not settings_store.ai_api_key:
+        return None
+
+    defaults = AI_PROVIDER_DEFAULTS.get(provider, AI_PROVIDER_DEFAULTS["custom"])
+    base_url = (settings_store.ai_base_url or defaults["base_url"] or "").rstrip("/")
+    if not base_url:
+        print(f"[AI AGENT] No base URL configured for provider '{provider}' - skipping AI confirmation this tick.")
+        return None
+    model = settings_store.ai_model or defaults["model"]
+
+    headers = {"Content-Type": "application/json"}
+    if defaults["auth_header"] == "api-key":
+        headers["api-key"] = settings_store.ai_api_key
+    else:
+        headers["Authorization"] = f"Bearer {settings_store.ai_api_key}"
+
+    prompt = (
+        "You are a risk-confirmation layer for an algorithmic crypto trading bot. "
+        f"A rule-based volume-anomaly signal just fired on {context['pair']} "
+        f"[Condition {context['condition']}]: current candle volume {context['candle_volume']:.1f} "
+        f"vs previous candle {context['prev_candle_volume']:.1f} (2x+ trigger), candle height "
+        f"{context['candle_height']:.2f} vs previous {context['prev_candle_height']:.2f}, "
+        f"current price {context['current_price']:.2f}. "
+        "Reply with ONLY the single word YES to confirm this BUY signal, or NO to reject it."
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.post(
+                f"{base_url}/chat/completions",
+                headers=headers,
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 5,
+                    "temperature": 0,
+                },
+            )
+        if resp.status_code != 200:
+            print(f"[AI AGENT] Provider '{provider}' returned HTTP {resp.status_code} - failing open (proceeding with trade).")
+            return None
+        data = resp.json()
+        reply = data["choices"][0]["message"]["content"].strip().upper()
+        decision = reply.startswith("YES")
+        print(f"[AI AGENT] Provider '{provider}' confirmation reply: '{reply}' -> {'PROCEED' if decision else 'REJECTED'}")
+        return decision
+    except Exception as exc:
+        print(f"[AI AGENT] Provider '{provider}' request failed ({exc}) - failing open (proceeding with trade).")
+        return None
+
+# ==========================================
 # PILLAR 4 & 5: API & BYBIT EXECUTION GROUND
 # ==========================================
 class BybitAPIWrapper:
@@ -293,7 +365,7 @@ class AITradingAgent:
         self.trades = []  # list of {id, pair, side, entry, margin, position_size, entry_fee_usd}
 
         # RULE 2: Dynamic Timeframe Syncing (Front-end -> Back-end)
-        self.timeframe_seconds = 60  # default "1 minute", synced live from the UI
+        self.timeframe_seconds = 30  # default "30 seconds" (matches the chart's default), synced live from the UI
 
         # RULE 3: Volume Anomaly entry condition - live candle simulation state
         self.candle_open_time = None
@@ -366,9 +438,12 @@ class AITradingAgent:
         self.volume_signal_used = False
         print(f"[RULE 2: TIMEFRAME SYNC] Backend now reading {seconds}s candles (synced from Front-end).")
 
-    def open_trade(self, side="LONG", reason="Manual"):
+    def open_trade(self, side="LONG", reason="Manual", source="auto"):
         """ RULE 1: Opens a position sized at EXACTLY 1% margin of current total capital,
-        with 100x leverage, filled as a Market Order (RULE 7) with simulated minor slippage. """
+        with 100x leverage, filled as a Market Order (RULE 7) with simulated minor slippage.
+        `source` tags who opened it - "auto" (RULE 3 volume-anomaly pyramiding) or "manual"
+        (the dashboard's manual BUY button) - so the manual SELL button can tell them apart
+        and only ever close manually-opened positions. """
         if not self.is_active or self.emergency_triggered:
             return None
 
@@ -394,13 +469,37 @@ class AITradingAgent:
             "position_size": position_size,
             "entry_fee_pct": entry_fee_pct,
             "entry_fee_usd": entry_fee_usd,
+            "source": source,
         }
         self.trades.append(trade)
         bybit_api.execute_market_buy(self.active_pair, f"{reason} | Margin=${margin} (1% of capital) x{self.leverage} leverage -> Position=${position_size}")
         print(f"[PILLAR 3: AI AGENT] Opened new {side} position #{trade['id']} on {self.active_pair} @ {filled_price} "
-              f"(margin=${margin}, position=${position_size}, entry_fee=${entry_fee_usd})")
+              f"(margin=${margin}, position=${position_size}, entry_fee=${entry_fee_usd}, source={source})")
         notifications.push(f"Order Filled: {self.active_pair} {side} @ {filled_price:,.4f} (Margin ${margin:,.2f} x{self.leverage})", "success")
         return trade
+
+    def manual_close_best(self, reason="Manual SELL button"):
+        """ Manual SELL button: closes exactly ONE position among the manually-opened
+        trades (never touches the auto/RULE-3 pyramided ones) - specifically whichever
+        manual trade currently has the highest True Net Profit (or, if all manual trades
+        are underwater, whichever has the smallest loss - the same "pick the max net_pct"
+        comparison covers both cases). """
+        manual_trades = [t for t in self.trades if t.get("source") == "manual"]
+        if not manual_trades:
+            return None
+
+        best = max(manual_trades, key=lambda t: self._trade_metrics(t)["net_pct"])
+        m = self._trade_metrics(best)
+        self.current_capital += m["net_usd"]
+        self.trades = [t for t in self.trades if t["id"] != best["id"]]
+        bybit_api.execute_market_sell(best["pair"], f"{reason} | Realized Net P&L: ${m['net_usd']:.2f} ({m['net_pct']:.3f}%)")
+        print(f"[PILLAR 3: AI AGENT] Manual SELL closed position #{best['id']} on {best['pair']} "
+              f"(net_pct={m['net_pct']:.3f}%, net_usd=${m['net_usd']:.2f})")
+        notifications.push(
+            f"Manual SELL: Position #{best['id']} closed on {best['pair']} | Net P&L: ${m['net_usd']:.2f} ({m['net_pct']:.3f}%)",
+            "success" if m["net_usd"] >= 0 else "error",
+        )
+        return best
 
     def set_active_pair(self, pair, price):
         """ Switching the focused coin closes any prior positions - one coin at a time rule. """
@@ -440,7 +539,7 @@ class AITradingAgent:
             })
         return snapshot
 
-    def process_tick(self, new_price, volume_increment):
+    async def process_tick(self, new_price, volume_increment):
         """ Runs on EVERY simulated market tick, independent of any connected UI client
         (RULE 3: 'no lag', 'do not wait', continuous millisecond-level monitoring). """
         self.current_price = new_price
@@ -487,7 +586,26 @@ class AITradingAgent:
                 and self.prev_candle_volume > self.min_base_volume
                 and self.candle_volume >= (self.prev_candle_volume * 2)):
             self.volume_signal_used = True
-            if candle_height >= self.prev_candle_height:
+            is_condition_a = candle_height >= self.prev_candle_height
+
+            # AI CONFIRMATION LAYER: if an AI provider is configured (Settings), the
+            # RULE 3 signal is sent to it for a real yes/no confirmation before any
+            # order is placed. No provider configured, or the provider errors/times
+            # out, -> fails OPEN and behaves exactly like the pure rule-based system.
+            ai_decision = await consult_ai_provider({
+                "pair": self.active_pair,
+                "condition": "A (Normal Breakout)" if is_condition_a else "B (Volume Anomaly/Accumulation)",
+                "candle_volume": self.candle_volume,
+                "prev_candle_volume": self.prev_candle_volume,
+                "candle_height": candle_height,
+                "prev_candle_height": self.prev_candle_height,
+                "current_price": self.current_price,
+            })
+
+            if ai_decision is False:
+                print(f"[AI AGENT] AI provider REJECTED the RULE 3 signal on {self.active_pair}. Entry skipped.")
+                notifications.push(f"AI provider rejected a RULE 3 buy signal on {self.active_pair} - entry skipped.", "info")
+            elif is_condition_a:
                 # Condition A: Normal Breakout - volume AND range both expanding -> 1 order, 1% margin
                 self.open_trade("LONG", reason=(
                     f"RULE 3A: Normal Breakout (Vol {self.candle_volume:.1f} >= 2x{self.prev_candle_volume:.1f}, "
@@ -623,7 +741,7 @@ async def market_simulator():
         volume_increment = random.uniform(0.5, 3.0)
         if random.random() < 0.03:  # occasional volume spike burst
             volume_increment *= random.uniform(3, 6)
-        agent.process_tick(new_price, volume_increment)
+        await agent.process_tick(new_price, volume_increment)
         await asyncio.sleep(0.5)
 
 async def bybit_balance_refresher():
@@ -707,13 +825,25 @@ class CloseTradePayload(BaseModel):
 
 @app.post("/open-trade")
 async def open_trade(payload: OpenTradePayload):
-    """ Opens an additional REAL-TIME position on the currently active pair only
-    (enforces: one coin at a time, but multiple stacked trades allowed). """
+    """ Manual BUY button: opens an additional 1%-margin/100x position on the currently
+    active pair (single-coin focus, but multiple stacked trades allowed). Every click
+    books one more trade - tagged "manual" so the SELL button only ever closes these,
+    never the RULE-3 auto-pyramided trades. """
     side = payload.side.upper() if payload.side.upper() in ("LONG", "SHORT") else "LONG"
-    trade = agent.open_trade(side)
+    trade = agent.open_trade(side, reason="Manual BUY button", source="manual")
     if trade is None:
         return {"status": "error", "message": "Start the bot before opening a position."}
     return {"status": "success", "trade": trade, "pair": agent.active_pair}
+
+@app.post("/manual-sell")
+async def manual_sell():
+    """ Manual SELL button: closes exactly the ONE manually-opened trade with the
+    highest True Net Profit (or smallest loss, if none are in profit) - never the
+    auto/RULE-3 trades, and never more than one position per click. """
+    closed = agent.manual_close_best()
+    if closed is None:
+        return {"status": "error", "message": "No manually-opened positions to sell."}
+    return {"status": "success", "message": f"Manual SELL executed - position #{closed['id']} closed.", "trade": closed}
 
 @app.post("/close-trade")
 async def close_trade(payload: CloseTradePayload):
@@ -797,7 +927,19 @@ async def test_ai_connection():
         return {"success": False, "message": f"Test failed: No API key configured for provider '{settings_store.ai_provider}'."}
 
     print(f"[SETTINGS] Testing AI provider '{settings_store.ai_provider}' (model={settings_store.ai_model or 'default'})...")
-    return {"success": True, "message": f"AI provider '{settings_store.ai_provider}' credentials look valid."}
+    decision = await consult_ai_provider({
+        "pair": "TEST/USDT", "condition": "Test Ping", "candle_volume": 100, "prev_candle_volume": 40,
+        "candle_height": 5, "prev_candle_height": 3, "current_price": 100,
+    })
+    if decision is None:
+        return {
+            "success": False,
+            "message": f"Test failed: could not reach '{settings_store.ai_provider}' - check the API key/base URL and try again.",
+        }
+    return {
+        "success": True,
+        "message": f"AI provider '{settings_store.ai_provider}' responded successfully (test decision: {'YES' if decision else 'NO'}). It will now confirm/reject live RULE 3 signals.",
+    }
 
 @app.post("/settings/reset")
 async def reset_settings():
