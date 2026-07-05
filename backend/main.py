@@ -9,6 +9,7 @@ import random
 import sys
 import time
 import httpx
+import websockets
 
 # Windows' default console codepage (cp1252) can't encode emoji used in log
 # messages below; force UTF-8 stdout/stderr so print() never crashes the app.
@@ -374,7 +375,6 @@ class AITradingAgent:
         self.candle_high = None
         self.candle_low = None
         self.prev_candle_height = 0.0
-        self.volume_signal_used = False
         # Previous candle's volume must clear this floor before the 2x check even applies,
         # so a 2x jump in a dead/thin market doesn't false-trigger an entry.
         self.min_base_volume = 50.0
@@ -435,7 +435,6 @@ class AITradingAgent:
         self.candle_high = None
         self.candle_low = None
         self.prev_candle_height = 0.0
-        self.volume_signal_used = False
         print(f"[RULE 2: TIMEFRAME SYNC] Backend now reading {seconds}s candles (synced from Front-end).")
 
     def open_trade(self, side="LONG", reason="Manual", source="auto"):
@@ -514,7 +513,6 @@ class AITradingAgent:
         self.candle_high = None
         self.candle_low = None
         self.prev_candle_height = 0.0
-        self.volume_signal_used = False
         print(f"[PILLAR 3: AI AGENT] Active pair switched to {pair}. Previous positions cleared (single-coin focus).")
 
     def get_trades_snapshot(self):
@@ -572,20 +570,22 @@ class AITradingAgent:
             self.candle_volume = 0.0
             self.candle_high = new_price
             self.candle_low = new_price
-            self.volume_signal_used = False
 
         self.candle_volume += volume_increment
         self.candle_high = max(self.candle_high, new_price)
         self.candle_low = min(self.candle_low, new_price)
         candle_height = self.candle_high - self.candle_low
 
-        # RULE 3: Volume Anomaly Trigger -> immediate Market BUY(s), mid-candle, no waiting.
-        # Base Volume Filter: the previous candle must clear MIN_BASE_VOLUME before the 2x
-        # check even applies, so a 2x jump in a dead/thin market can't false-trigger an entry.
-        if (self.is_active and not self.emergency_triggered and not self.volume_signal_used
+        # RULE 3: Intra-Candle Tick-Level Execution - ultra-fast, zero-delay. Does NOT
+        # wait for the candle to close, and does NOT stop after firing once: as long as
+        # the forming candle stays alive and V_live >= 2x V_prev remains true, every
+        # single qualifying tick re-evaluates height and fires another round of orders
+        # (Bybit merges these into an Average Entry Price). Base Volume Filter: the
+        # previous candle must clear MIN_BASE_VOLUME before the 2x check even applies,
+        # so a 2x jump in a dead/thin market can't false-trigger an entry.
+        if (self.is_active and not self.emergency_triggered
                 and self.prev_candle_volume > self.min_base_volume
                 and self.candle_volume >= (self.prev_candle_volume * 2)):
-            self.volume_signal_used = True
             is_condition_a = candle_height >= self.prev_candle_height
 
             # AI CONFIRMATION LAYER: if an AI provider is configured (Settings), the
@@ -733,16 +733,75 @@ agent = AITradingAgent()
 # Runs regardless of whether any browser tab is connected - satisfies the
 # "no lag / do not wait" requirement for the 2x volume surge trigger.
 # ==========================================
+# Same symbol map the frontend chart uses for its own free Binance feed, so
+# agent.current_price and the chart always agree on the SAME real price -
+# previously the backend ran an independent random walk from a stale
+# hardcoded baseline while the chart showed real Binance data, so trade
+# entry/current prices could drift far away from what the chart displayed.
+BINANCE_SYMBOL_MAP = {"BTC": "btcusdt", "ETH": "ethusdt", "SOL": "solusdt", "BNB": "bnbusdt"}
+
+def get_binance_symbol(pair_label):
+    symbol = (pair_label or "").split("/")[0]
+    return BINANCE_SYMBOL_MAP.get(symbol)
+
 async def market_simulator():
+    """ Legacy synthetic random-walk price - used ONLY while the active pair has
+    no Binance listing (the frontend chart has no real feed for these either,
+    so both sides stay consistently simulated together). """
     while True:
-        volatility = random.uniform(-10, 10)
-        new_price = agent.current_price + volatility
-        # Simulate a live trade-volume tick (baseline + occasional surges to demonstrate Rule 3)
-        volume_increment = random.uniform(0.5, 3.0)
-        if random.random() < 0.03:  # occasional volume spike burst
-            volume_increment *= random.uniform(3, 6)
-        await agent.process_tick(new_price, volume_increment)
+        if get_binance_symbol(agent.active_pair) is None:
+            volatility = random.uniform(-10, 10)
+            new_price = agent.current_price + volatility
+            # Simulate a live trade-volume tick (baseline + occasional surges to demonstrate Rule 3)
+            volume_increment = random.uniform(0.5, 3.0)
+            if random.random() < 0.03:  # occasional volume spike burst
+                volume_increment *= random.uniform(3, 6)
+            await agent.process_tick(new_price, volume_increment)
         await asyncio.sleep(0.5)
+
+async def binance_price_feed():
+    """ Keeps agent.current_price tracking REAL Binance trade prices (and real
+    trade quantities as the volume signal for RULE 3) for whichever
+    Binance-listed pair is currently active - so simulated trade entry/current
+    prices always match what the paper-trading chart shows. Reconnects
+    automatically on pair switch or connection drop. """
+    current_symbol = None
+    ws = None
+    while True:
+        target_symbol = get_binance_symbol(agent.active_pair)
+        if target_symbol is None:
+            await asyncio.sleep(2)
+            continue
+
+        if target_symbol != current_symbol or ws is None:
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+            try:
+                ws = await websockets.connect(f"wss://stream.binance.com:9443/ws/{target_symbol}@trade")
+                current_symbol = target_symbol
+                print(f"[MARKET FEED] Connected to Binance real trade feed for {agent.active_pair}.")
+            except Exception as exc:
+                print(f"[MARKET FEED] Failed to connect to Binance for {agent.active_pair}: {exc}")
+                ws = None
+                await asyncio.sleep(2)
+                continue
+
+        try:
+            message = await asyncio.wait_for(ws.recv(), timeout=5.0)
+            data = json.loads(message)
+            price = float(data["p"])
+            qty = float(data["q"])
+            await agent.process_tick(price, qty)
+        except asyncio.TimeoutError:
+            continue  # no trade in the last 5s - loop back and re-check pair/connection
+        except Exception as exc:
+            print(f"[MARKET FEED] Connection error ({exc}), reconnecting...")
+            ws = None
+            current_symbol = None
+            await asyncio.sleep(2)
 
 async def bybit_balance_refresher():
     """ Keeps bybit_api.last_known_balance fresh while LIVE_TRADING, so
@@ -756,6 +815,7 @@ async def bybit_balance_refresher():
 @app.on_event("startup")
 async def start_background_tasks():
     asyncio.create_task(market_simulator())
+    asyncio.create_task(binance_price_feed())
     asyncio.create_task(bybit_balance_refresher())
 
 # ==========================================

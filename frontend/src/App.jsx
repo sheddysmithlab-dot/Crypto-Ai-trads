@@ -8,6 +8,7 @@ import { useNotifications } from './hooks/useNotifications';
 import { usePortfolio } from './hooks/usePortfolio';
 import { useTradingChart } from './hooks/useTradingChart';
 import { useUptime } from './hooks/useUptime';
+import { useDayStats } from './hooks/useDayStats';
 
 import Header from './components/Header';
 import MobilePortfolioCard from './components/MobilePortfolioCard';
@@ -36,6 +37,7 @@ export default function App() {
   });
 
   const uptime = useUptime(portfolio.isActive);
+  const dayStats = useDayStats(pairSelector.activePairLabel);
 
   const chartContainerRef = useRef(null);
   const volumeContainerRef = useRef(null);
@@ -132,6 +134,8 @@ export default function App() {
         tradesCount={trades.length}
         apiStatus={apiStatus}
         tradingMode={portfolio.tradingMode}
+        dayHigh={dayStats.high}
+        dayLow={dayStats.low}
         notifications={notifications}
         unreadCount={unreadCount}
         markAllRead={markAllRead}

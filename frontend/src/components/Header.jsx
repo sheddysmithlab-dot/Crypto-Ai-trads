@@ -1,4 +1,5 @@
 import NotificationsDropdown from './NotificationsDropdown';
+import { fmtNum } from '../data/pairs';
 
 const STATUS_COLOR = {
   green: 'text-green-500',
@@ -18,6 +19,8 @@ export default function Header({
   tradesCount,
   apiStatus,
   tradingMode,
+  dayHigh,
+  dayLow,
   notifications,
   unreadCount,
   markAllRead,
@@ -54,6 +57,20 @@ export default function Header({
           <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Open Positions</span>
           <span className="font-bold text-sm">
             {tradesCount} <span className="text-xs font-normal text-gray-400">(Active)</span>
+          </span>
+        </div>
+        <div className="flex flex-col">
+          <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">24H High / Low</span>
+          <span className="font-bold text-sm">
+            {dayHigh != null ? (
+              <>
+                <span className="text-green-500">{fmtNum(dayHigh)}</span>
+                <span className="text-gray-400 font-normal"> / </span>
+                <span className="text-red-500">{fmtNum(dayLow)}</span>
+              </>
+            ) : (
+              <span className="text-gray-400 font-normal">--</span>
+            )}
           </span>
         </div>
         <div className="flex flex-col">
