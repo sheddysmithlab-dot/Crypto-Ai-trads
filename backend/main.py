@@ -9,7 +9,6 @@ import random
 import sys
 import time
 import httpx
-import websockets
 
 # Windows' default console codepage (cp1252) can't encode emoji used in log
 # messages below; force UTF-8 stdout/stderr so print() never crashes the app.
@@ -548,10 +547,12 @@ class AITradingAgent:
             and not self.emergency_auto_kill_executed):
             seconds_elapsed = now - self.emergency_trigger_time
             if seconds_elapsed >= 30:
-                # User didn't respond within 30 seconds -> backend auto-executes emergency exit
+                # User didn't respond within 30 seconds -> backend auto-executes emergency exit,
+                # actually selling positions now (they were left running during the 30s window).
                 print(f"[RULE 8: AUTO-KILL] 30-second countdown expired. Backend auto-executing EMERGENCY EXIT.")
                 self.emergency_auto_kill_executed = True
                 self.emergency_awaiting_decision = False  # decision defaulted to Exit - stop showing the popup
+                self._close_all_positions("EMERGENCY SELL ALL TRIGGERED | RULE 8 30s auto-kill (no response)")
                 self.is_active = False  # Stop all processing
                 notifications.push("⚠️ RULE 8: 30-second timeout reached. System auto-halted.", "error")
                 return
@@ -683,26 +684,25 @@ class AITradingAgent:
 
     def trigger_emergency_exit(self, reason="Manual Master Switch Action"):
         """ RULE 8: Called ONLY by the automatic 2.5%+ portfolio-loss detector in process_tick.
-        Sells everything, halts the bot, and arms the 30-second decision window - the popup
-        stays visible until the user chooses, or the backend/frontend timer expires. """
-        print(f"[RULE 8: EMERGENCY KILL SWITCH TRIGGERED]: {reason}")
+        Per policy this PAUSES new entries and arms the 30-second decision window - it does
+        NOT sell existing positions. Trades keep running normally (trailing lock etc. still
+        active) while the popup is up, so a CONTINUE choice truly means "keep going exactly
+        as before" with nothing force-closed. Positions are only actually sold if the user
+        confirms EMERGENCY EXIT (button click or the 30s timeout) - see confirm_emergency_exit(). """
+        print(f"[RULE 8: EMERGENCY POPUP TRIGGERED]: {reason}")
         # RULE 8: Backend Timer - Source of Truth starts counting (30-second auto-exit countdown)
         self.emergency_trigger_time = time.time()
-        self._close_all_positions(f"EMERGENCY SELL ALL TRIGGERED | {reason}")
-
-        # RULE 5: Halt System - stop all further trading until user chooses action
-        self.is_active = False
-        self.emergency_triggered = True
+        self.emergency_triggered = True  # blocks NEW entries (open_trade checks this) - existing ones are untouched
         self.emergency_awaiting_decision = True
-        print("[RULE 8: SYSTEM PAUSED] Waiting for user choice (EMERGENCY EXIT or CONTINUE) within 30 seconds...")
+        print("[RULE 8: NEW ENTRIES PAUSED] Waiting for user choice (EMERGENCY EXIT or CONTINUE) within 30 seconds...")
         notifications.push(f"⏰ RULE 8: 30-second Emergency Exit countdown started. {reason}", "error")
 
     def confirm_emergency_exit(self):
         """ User clicked 'EMERGENCY EXIT' on an ACTIVE RULE 8 popup (or the frontend's 30s
-        fallback timer fired) - positions are already closed by trigger_emergency_exit();
-        this just resolves the decision so a page reload doesn't re-show the popup for an
-        emergency that's already over. """
-        print("[RULE 8: EMERGENCY EXIT CONFIRMED] User chose to stay halted.")
+        fallback timer fired) - THIS is where positions actually get sold, not at the
+        initial 2.5% detection. """
+        print("[RULE 8: EMERGENCY EXIT CONFIRMED] Selling all positions and halting.")
+        self._close_all_positions("EMERGENCY SELL ALL TRIGGERED | RULE 8 confirmed by user")
         self.emergency_awaiting_decision = False
         self.is_active = False
 
@@ -770,93 +770,54 @@ async def market_simulator():
             await agent.process_tick(new_price, volume_increment)
         await asyncio.sleep(0.5)
 
-async def binance_rest_poll_fallback(target_symbol):
-    """ Used when the raw WebSocket can't connect at all (some hosts' egress
-    firewalls block long-lived WS upgrades while still allowing plain HTTPS
-    GETs) - polls Binance's public REST ticker every 2s via httpx, which we
-    already know works from this backend (Bybit/AI calls use the same
-    client). Keeps agent.current_price genuinely real even without a
-    streaming connection; volume is a light synthetic signal since REST
-    doesn't expose individual trade sizes like the WS feed does. """
-    global _last_real_feed_update
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={target_symbol.upper()}"
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        while get_binance_symbol(agent.active_pair) == target_symbol:
-            try:
-                resp = await client.get(url)
-                if resp.status_code == 200:
-                    price = float(resp.json()["price"])
-                    await agent.process_tick(price, random.uniform(0.5, 3.0))
-                    _last_real_feed_update = time.time()
-            except Exception as exc:
-                print(f"[MARKET FEED] REST poll fallback error for {target_symbol}: {exc}")
-            await asyncio.sleep(2)
-
 async def binance_price_feed():
-    """ Keeps agent.current_price tracking REAL Binance trade prices (and real
-    trade quantities as the volume signal for RULE 3) for whichever
-    Binance-listed pair is currently active - so simulated trade entry/current
-    prices always match what the paper-trading chart shows. Reconnects
-    automatically on pair switch or connection drop. Falls back to REST
-    polling (binance_rest_poll_fallback) if the WebSocket can't connect at
-    all after several attempts, e.g. an egress firewall blocking WS upgrades. """
+    """ Keeps agent.current_price tracking REAL Binance market prices (and real
+    recent trade volume as RULE 3's volume signal) for whichever Binance-listed
+    pair is currently active, via REST polling rather than a raw WebSocket.
+    A raw WS to stream.binance.com repeatedly "connected" on this host but
+    never actually delivered a single message (silently stalled at the data
+    plane - a common symptom of restrictive egress proxies that allow the
+    handshake but filter the ongoing stream), even on the standard port 443.
+    httpx GETs, by contrast, already work reliably from this backend for
+    Bybit/AI calls, so polling sidesteps the issue entirely instead of
+    fighting it. Verified this delivers real price/volume within ~1.5s. """
     global _last_real_feed_update
-    print("[MARKET FEED] Background task starting...")
+    print("[MARKET FEED] Background task starting (REST polling mode).")
+    last_seen_trade_id = None
     current_symbol = None
-    ws = None
-    consecutive_ws_failures = 0
-    MAX_WS_FAILURES_BEFORE_REST_FALLBACK = 3
 
-    while True:
-        target_symbol = get_binance_symbol(agent.active_pair)
-        if target_symbol is None:
-            await asyncio.sleep(2)
-            continue
-
-        if target_symbol != current_symbol or ws is None:
-            if ws is not None:
-                try:
-                    await ws.close()
-                except Exception:
-                    pass
-            try:
-                # Port 443 (not Binance's alternate 9443) - the standard HTTPS/WSS port
-                # that hosting providers' egress firewalls essentially never block.
-                ws = await asyncio.wait_for(
-                    websockets.connect(f"wss://stream.binance.com:443/ws/{target_symbol}@trade"), timeout=8.0
-                )
-                current_symbol = target_symbol
-                consecutive_ws_failures = 0
-                print(f"[MARKET FEED] Connected to Binance real trade feed for {agent.active_pair}.")
-            except Exception as exc:
-                consecutive_ws_failures += 1
-                print(
-                    f"[MARKET FEED] Failed to connect to Binance WS for {agent.active_pair} "
-                    f"(attempt {consecutive_ws_failures}): {exc}"
-                )
-                ws = None
-                if consecutive_ws_failures >= MAX_WS_FAILURES_BEFORE_REST_FALLBACK:
-                    print(f"[MARKET FEED] WS unreachable after {consecutive_ws_failures} tries - falling back to REST polling.")
-                    await binance_rest_poll_fallback(target_symbol)
-                    consecutive_ws_failures = 0  # give WS another chance once the pair/mode changes
-                    continue
+    async with httpx.AsyncClient(timeout=6.0) as client:
+        while True:
+            target_symbol = get_binance_symbol(agent.active_pair)
+            if target_symbol is None:
                 await asyncio.sleep(2)
                 continue
 
-        try:
-            message = await asyncio.wait_for(ws.recv(), timeout=5.0)
-            data = json.loads(message)
-            price = float(data["p"])
-            qty = float(data["q"])
-            await agent.process_tick(price, qty)
-            _last_real_feed_update = time.time()
-        except asyncio.TimeoutError:
-            continue  # no trade in the last 5s - loop back and re-check pair/connection
-        except Exception as exc:
-            print(f"[MARKET FEED] Connection error ({exc}), reconnecting...")
-            ws = None
-            current_symbol = None
-            await asyncio.sleep(2)
+            if target_symbol != current_symbol:
+                current_symbol = target_symbol
+                last_seen_trade_id = None  # fresh pair - don't diff against the old symbol's trade IDs
+
+            try:
+                url = f"https://api.binance.com/api/v3/aggTrades?symbol={target_symbol.upper()}&limit=20"
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    trades = resp.json()
+                    if trades:
+                        # Only fold in trades newer than the last poll, so volume reflects
+                        # genuine recent activity instead of re-counting the same trades.
+                        new_trades = [t for t in trades if last_seen_trade_id is None or t["a"] > last_seen_trade_id]
+                        if new_trades:
+                            total_qty = sum(float(t["q"]) for t in new_trades)
+                            last_price = float(new_trades[-1]["p"])
+                            await agent.process_tick(last_price, total_qty)
+                            last_seen_trade_id = trades[-1]["a"]
+                            _last_real_feed_update = time.time()
+                else:
+                    print(f"[MARKET FEED] Binance REST returned HTTP {resp.status_code} for {target_symbol}")
+            except Exception as exc:
+                print(f"[MARKET FEED] REST poll error for {target_symbol}: {exc}")
+
+            await asyncio.sleep(1.5)
 
 async def bybit_balance_refresher():
     """ Keeps bybit_api.last_known_balance fresh while LIVE_TRADING, so
