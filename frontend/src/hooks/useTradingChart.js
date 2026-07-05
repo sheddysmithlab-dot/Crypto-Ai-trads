@@ -62,15 +62,47 @@ async function fetchRealHistory(binanceSymbol, klineInterval, limit = 150) {
   }));
 }
 
+// Binance has no kline granularity below 1 minute, so for the custom 10S/30S
+// timeframes we bucket the most recent REAL trades ourselves instead of
+// falling back to fully synthetic data. Covers a few real minutes of actual
+// price action (exact span depends on how actively that pair is trading).
+async function fetchRealTradesAsCandles(binanceSymbol, intervalSeconds, limit = 1000) {
+  const url = `https://api.binance.com/api/v3/aggTrades?symbol=${binanceSymbol.toUpperCase()}&limit=${limit}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const trades = await res.json();
+  if (!Array.isArray(trades) || trades.length === 0) throw new Error('Empty trades response');
+
+  const buckets = new Map();
+  for (const t of trades) {
+    const price = parseFloat(t.p);
+    const qty = parseFloat(t.q);
+    const bucketTime = Math.floor(t.T / 1000 / intervalSeconds) * intervalSeconds;
+    let bucket = buckets.get(bucketTime);
+    if (!bucket) {
+      bucket = { time: bucketTime, open: price, high: price, low: price, close: price, volume: 0 };
+      buckets.set(bucketTime, bucket);
+    }
+    bucket.high = Math.max(bucket.high, price);
+    bucket.low = Math.min(bucket.low, price);
+    bucket.close = price;
+    bucket.volume += qty;
+  }
+  const candles = Array.from(buckets.values()).sort((a, b) => a.time - b.time);
+  if (candles.length === 0) throw new Error('No candles bucketed from trades');
+  return candles;
+}
+
 async function loadHistoricalData(pairLabelArg, tfKey, basePrice) {
   const binanceSymbol = getBinanceSymbol(pairLabelArg);
+  if (!binanceSymbol) return generateMockData(basePrice, TIMEFRAME_SECONDS[tfKey] || 3600);
+
   const klineInterval = BINANCE_KLINE_INTERVAL[tfKey];
-  if (binanceSymbol && klineInterval) {
-    try {
-      return await fetchRealHistory(binanceSymbol, klineInterval);
-    } catch (err) {
-      console.warn(`[CHART] Failed to fetch real history for ${pairLabelArg} (${tfKey}), using synthetic data:`, err);
-    }
+  try {
+    if (klineInterval) return await fetchRealHistory(binanceSymbol, klineInterval);
+    return await fetchRealTradesAsCandles(binanceSymbol, TIMEFRAME_SECONDS[tfKey]);
+  } catch (err) {
+    console.warn(`[CHART] Failed to fetch real history for ${pairLabelArg} (${tfKey}), using synthetic data:`, err);
   }
   return generateMockData(basePrice, TIMEFRAME_SECONDS[tfKey] || 3600);
 }
@@ -163,10 +195,20 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
 
   const zoomToRecentCandles = useCallback((dataLength) => {
     if (!chartRef.current || dataLength === 0) return;
-    chartRef.current.timeScale().setVisibleLogicalRange({
-      from: Math.max(0, dataLength - DEFAULT_VISIBLE_CANDLES),
-      to: dataLength,
-    });
+    const applyZoom = () => {
+      chartRef.current?.timeScale().setVisibleLogicalRange({
+        from: Math.max(0, dataLength - DEFAULT_VISIBLE_CANDLES),
+        to: dataLength,
+      });
+    };
+    // A single call right after setData() can be a no-op if the chart's canvas
+    // hasn't been laid out at its final size yet (e.g. on first mount, before
+    // fonts/CSS finish settling) - double rAF plus a short delayed re-apply
+    // makes the initial zoom land reliably instead of silently falling back
+    // to showing the whole dataset zoomed out.
+    applyZoom();
+    requestAnimationFrame(() => requestAnimationFrame(applyZoom));
+    setTimeout(applyZoom, 300);
   }, []);
 
   const updateReadouts = useCallback((bar, data) => {
@@ -434,13 +476,14 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       body: JSON.stringify({ seconds: currentIntervalRef.current }),
     }).catch((err) => console.error('Failed to sync initial timeframe with backend:', err));
 
-    // Live crosshair OHLC readout (hover to inspect any candle). Reads mockDataRef.current
-    // (not a local variable) so it stays correct after switchSymbol/switchTimeframe/real-history
-    // swaps replace the underlying array with a new one.
+    // Live crosshair OHLC readout (hover to inspect any candle). lightweight-charts'
+    // own seriesData only carries {time,open,high,low,close} - it strips our custom
+    // `volume` field - so look the full bar up in mockDataRef.current by time instead
+    // of using param.seriesData.get() directly (that was producing "NaN" volume).
     chart.subscribeCrosshairMove((param) => {
       if (!param.time) return;
-      const bar = param.seriesData.get(candleSeries);
-      if (bar) updateReadouts(bar, mockDataRef.current);
+      const fullBar = mockDataRef.current.find((d) => d.time === param.time);
+      if (fullBar) updateReadouts(fullBar, mockDataRef.current);
     });
 
     const handleResize = () => {
