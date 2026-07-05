@@ -239,7 +239,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       candleSeriesRef.current?.setData(data);
       applyAllOverlays(data);
       if (zoomToRecent) zoomToRecentCandles(data.length);
-      updateReadouts(data[data.length - 1], data);
+      if (data.length > 0) updateReadouts(data[data.length - 1], data);
     },
     [updateReadouts, applyAllOverlays, zoomToRecentCandles]
   );
@@ -366,10 +366,10 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
   const switchSymbol = useCallback(
     (basePrice) => {
       entryPriceRef.current = basePrice;
-      // Instant synthetic placeholder so the chart never sits blank...
-      applyDataset(generateMockData(basePrice, currentIntervalRef.current), { zoomToRecent: true });
+      // Clear the chart rather than showing a fake synthetic placeholder -
+      // everything displayed should be real, wired data or nothing at all.
+      applyDataset([]);
       trailingLockLineRef.current.applyOptions({ price: basePrice * 1.0008, title: 'Lock +0.08', color: '#3b82f6' });
-      // ...then swap in real Binance history for this pair once it arrives.
       loadRealHistoryInBackground(pairLabelRef.current, timeframe, basePrice);
     },
     [applyDataset, loadRealHistoryInBackground, timeframe]
@@ -379,8 +379,8 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     (tf) => {
       setTimeframe(tf);
       currentIntervalRef.current = TIMEFRAME_SECONDS[tf] || 3600;
-      // Instant synthetic placeholder, then swap in real history for the new timeframe.
-      applyDataset(generateMockData(entryPriceRef.current, currentIntervalRef.current), { zoomToRecent: true });
+      // Clear the chart rather than showing a fake synthetic placeholder.
+      applyDataset([]);
       loadRealHistoryInBackground(pairLabelRef.current, tf, entryPriceRef.current);
 
       // RULE 2: Dynamic Timeframe Syncing - tell the backend AI Agent to read
@@ -441,11 +441,8 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     volumeMaSeriesRef.current = volumeMaSeries;
 
     const entryPrice = entryPriceRef.current;
-    // Instant synthetic placeholder so something renders immediately...
-    const placeholderData = generateMockData(entryPrice, currentIntervalRef.current);
-    mockDataRef.current = placeholderData;
-    candleSeries.setData(placeholderData);
-    applyAllOverlays(placeholderData);
+    // Chart starts empty - no fake synthetic placeholder - until real data arrives below.
+    mockDataRef.current = [];
 
     trailingLockLineRef.current = candleSeries.createPriceLine({
       price: entryPrice * 1.0008,
@@ -461,12 +458,8 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       volumeChart.timeScale().setVisibleLogicalRange(range);
     });
 
-    zoomToRecentCandles(placeholderData.length);
-    updateReadouts(placeholderData[placeholderData.length - 1], placeholderData);
-
-    // ...then swap in real Binance history for the initial pair/timeframe once it arrives
-    // (30S has no Binance kline equivalent, so this stays on synthetic data until the user
-    // picks a timeframe Binance actually supports).
+    // Fetch real Binance history for the initial pair/timeframe (30S has no kline
+    // equivalent, so it falls back to bucketed real trades - see loadHistoricalData).
     loadRealHistoryInBackground(pairLabelRef.current, '30S', entryPrice);
 
     // RULE 2: Sync the default timeframe to the backend on load too, not just on every

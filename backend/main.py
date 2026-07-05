@@ -734,32 +734,37 @@ agent = AITradingAgent()
 # Runs regardless of whether any browser tab is connected - satisfies the
 # "no lag / do not wait" requirement for the 2x volume surge trigger.
 # ==========================================
-# Same symbol map the frontend chart uses for its own free Binance feed, so
-# agent.current_price and the chart always agree on the SAME real price -
-# previously the backend ran an independent random walk from a stale
-# hardcoded baseline while the chart showed real Binance data, so trade
-# entry/current prices could drift far away from what the chart displayed.
-BINANCE_SYMBOL_MAP = {"BTC": "btcusdt", "ETH": "ethusdt", "SOL": "solusdt", "BNB": "bnbusdt"}
+# Bybit's own public market data (no API key needed) - this is a Bybit bot,
+# so its real-price source should be Bybit itself. This also sidesteps a
+# real finding: Binance's endpoints (both WebSocket, on ports 9443 AND 443,
+# and REST) never delivered a single real tick when called FROM this Render
+# backend, despite working perfectly from a local machine and from the
+# user's own browser (the frontend chart, which fetches Binance directly
+# client-side, always showed correct real data) - strongly suggesting
+# Binance blocks/throttles this hosting provider's server IP range
+# specifically, not a protocol/port issue. Bybit's public API has no such
+# problem, verified working from this exact backend.
+BYBIT_SYMBOL_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT", "BNB": "BNBUSDT"}
 
-def get_binance_symbol(pair_label):
+def get_bybit_symbol(pair_label):
     symbol = (pair_label or "").split("/")[0]
-    return BINANCE_SYMBOL_MAP.get(symbol)
+    return BYBIT_SYMBOL_MAP.get(symbol)
 
 # Tracks the last time binance_price_feed successfully processed a REAL tick,
 # so market_simulator can tell "actively receiving real data" apart from
-# "silently stuck" (network hiccup, DNS issue, host blocking outbound WS,
-# etc.) and self-heal by taking over with synthetic movement instead of
-# leaving current_price frozen forever.
+# "silently stuck" (network hiccup, DNS issue, host blocking outbound, etc.)
+# and self-heal by taking over with synthetic movement instead of leaving
+# current_price frozen forever.
 _last_real_feed_update = 0.0
 REAL_FEED_STALE_AFTER_SECONDS = 10
 
 async def market_simulator():
     """ Synthetic random-walk price - runs whenever the active pair has no
-    Binance listing, AND as a self-healing fallback if binance_price_feed
-    hasn't delivered a real tick recently (so current_price can never stay
+    real market-data mapping, AND as a self-healing fallback if the real
+    feed hasn't delivered a tick recently (so current_price can never stay
     permanently frozen even if the real feed silently breaks). """
     while True:
-        no_real_feed = get_binance_symbol(agent.active_pair) is None
+        no_real_feed = get_bybit_symbol(agent.active_pair) is None
         real_feed_stale = (time.time() - _last_real_feed_update) > REAL_FEED_STALE_AFTER_SECONDS
         if no_real_feed or real_feed_stale:
             volatility = random.uniform(-10, 10)
@@ -772,24 +777,18 @@ async def market_simulator():
         await asyncio.sleep(0.5)
 
 async def binance_price_feed():
-    """ Keeps agent.current_price tracking REAL Binance market prices (and real
-    recent trade volume as RULE 3's volume signal) for whichever Binance-listed
-    pair is currently active, via REST polling rather than a raw WebSocket.
-    A raw WS to stream.binance.com repeatedly "connected" on this host but
-    never actually delivered a single message (silently stalled at the data
-    plane - a common symptom of restrictive egress proxies that allow the
-    handshake but filter the ongoing stream), even on the standard port 443.
-    httpx GETs, by contrast, already work reliably from this backend for
-    Bybit/AI calls, so polling sidesteps the issue entirely instead of
-    fighting it. Verified this delivers real price/volume within ~1.5s. """
+    """ Keeps agent.current_price tracking REAL market prices (and real recent
+    trade volume as RULE 3's volume signal), polling Bybit's public
+    recent-trades endpoint every ~1.5s for whichever mapped pair is active.
+    Verified this delivers real price/volume from this exact backend. """
     global _last_real_feed_update
-    print("[MARKET FEED] Background task starting (REST polling mode).")
+    print("[MARKET FEED] Background task starting (Bybit REST polling mode).")
     last_seen_trade_id = None
     current_symbol = None
 
     async with httpx.AsyncClient(timeout=6.0) as client:
         while True:
-            target_symbol = get_binance_symbol(agent.active_pair)
+            target_symbol = get_bybit_symbol(agent.active_pair)
             if target_symbol is None:
                 await asyncio.sleep(2)
                 continue
@@ -799,22 +798,24 @@ async def binance_price_feed():
                 last_seen_trade_id = None  # fresh pair - don't diff against the old symbol's trade IDs
 
             try:
-                url = f"https://api.binance.com/api/v3/aggTrades?symbol={target_symbol.upper()}&limit=20"
+                url = f"https://api.bybit.com/v5/market/recent-trade?category=spot&symbol={target_symbol}&limit=20"
                 resp = await client.get(url)
                 if resp.status_code == 200:
-                    trades = resp.json()
+                    body = resp.json()
+                    trades = body.get("result", {}).get("list", [])
                     if trades:
-                        # Only fold in trades newer than the last poll, so volume reflects
-                        # genuine recent activity instead of re-counting the same trades.
-                        new_trades = [t for t in trades if last_seen_trade_id is None or t["a"] > last_seen_trade_id]
+                        # Bybit returns newest-first; only fold in trades newer than the
+                        # last poll, so volume reflects genuine recent activity instead
+                        # of re-counting the same trades.
+                        new_trades = [t for t in trades if last_seen_trade_id is None or t["seq"] > last_seen_trade_id]
                         if new_trades:
-                            total_qty = sum(float(t["q"]) for t in new_trades)
-                            last_price = float(new_trades[-1]["p"])
+                            total_qty = sum(float(t["size"]) for t in new_trades)
+                            last_price = float(new_trades[0]["price"])  # newest-first -> index 0 is latest
                             await agent.process_tick(last_price, total_qty)
-                            last_seen_trade_id = trades[-1]["a"]
+                            last_seen_trade_id = trades[0]["seq"]
                             _last_real_feed_update = time.time()
                 else:
-                    print(f"[MARKET FEED] Binance REST returned HTTP {resp.status_code} for {target_symbol}")
+                    print(f"[MARKET FEED] Bybit REST returned HTTP {resp.status_code} for {target_symbol}")
             except Exception as exc:
                 print(f"[MARKET FEED] REST poll error for {target_symbol}: {exc}")
 
