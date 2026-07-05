@@ -770,16 +770,43 @@ async def market_simulator():
             await agent.process_tick(new_price, volume_increment)
         await asyncio.sleep(0.5)
 
+async def binance_rest_poll_fallback(target_symbol):
+    """ Used when the raw WebSocket can't connect at all (some hosts' egress
+    firewalls block long-lived WS upgrades while still allowing plain HTTPS
+    GETs) - polls Binance's public REST ticker every 2s via httpx, which we
+    already know works from this backend (Bybit/AI calls use the same
+    client). Keeps agent.current_price genuinely real even without a
+    streaming connection; volume is a light synthetic signal since REST
+    doesn't expose individual trade sizes like the WS feed does. """
+    global _last_real_feed_update
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={target_symbol.upper()}"
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        while get_binance_symbol(agent.active_pair) == target_symbol:
+            try:
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    price = float(resp.json()["price"])
+                    await agent.process_tick(price, random.uniform(0.5, 3.0))
+                    _last_real_feed_update = time.time()
+            except Exception as exc:
+                print(f"[MARKET FEED] REST poll fallback error for {target_symbol}: {exc}")
+            await asyncio.sleep(2)
+
 async def binance_price_feed():
     """ Keeps agent.current_price tracking REAL Binance trade prices (and real
     trade quantities as the volume signal for RULE 3) for whichever
     Binance-listed pair is currently active - so simulated trade entry/current
     prices always match what the paper-trading chart shows. Reconnects
-    automatically on pair switch or connection drop. """
+    automatically on pair switch or connection drop. Falls back to REST
+    polling (binance_rest_poll_fallback) if the WebSocket can't connect at
+    all after several attempts, e.g. an egress firewall blocking WS upgrades. """
     global _last_real_feed_update
     print("[MARKET FEED] Background task starting...")
     current_symbol = None
     ws = None
+    consecutive_ws_failures = 0
+    MAX_WS_FAILURES_BEFORE_REST_FALLBACK = 3
+
     while True:
         target_symbol = get_binance_symbol(agent.active_pair)
         if target_symbol is None:
@@ -793,12 +820,26 @@ async def binance_price_feed():
                 except Exception:
                     pass
             try:
-                ws = await websockets.connect(f"wss://stream.binance.com:9443/ws/{target_symbol}@trade")
+                # Port 443 (not Binance's alternate 9443) - the standard HTTPS/WSS port
+                # that hosting providers' egress firewalls essentially never block.
+                ws = await asyncio.wait_for(
+                    websockets.connect(f"wss://stream.binance.com:443/ws/{target_symbol}@trade"), timeout=8.0
+                )
                 current_symbol = target_symbol
+                consecutive_ws_failures = 0
                 print(f"[MARKET FEED] Connected to Binance real trade feed for {agent.active_pair}.")
             except Exception as exc:
-                print(f"[MARKET FEED] Failed to connect to Binance for {agent.active_pair}: {exc}")
+                consecutive_ws_failures += 1
+                print(
+                    f"[MARKET FEED] Failed to connect to Binance WS for {agent.active_pair} "
+                    f"(attempt {consecutive_ws_failures}): {exc}"
+                )
                 ws = None
+                if consecutive_ws_failures >= MAX_WS_FAILURES_BEFORE_REST_FALLBACK:
+                    print(f"[MARKET FEED] WS unreachable after {consecutive_ws_failures} tries - falling back to REST polling.")
+                    await binance_rest_poll_fallback(target_symbol)
+                    consecutive_ws_failures = 0  # give WS another chance once the pair/mode changes
+                    continue
                 await asyncio.sleep(2)
                 continue
 

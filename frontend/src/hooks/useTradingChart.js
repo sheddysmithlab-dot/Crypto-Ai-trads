@@ -312,7 +312,9 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
         return;
       }
 
-      const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${binanceSymbol}@trade`);
+      // Port 443 (not Binance's alternate 9443) - the standard HTTPS/WSS port that's
+      // essentially never blocked by restrictive networks/browsers/proxies.
+      const ws = new WebSocket(`wss://stream.binance.com:443/ws/${binanceSymbol}@trade`);
       freeSourceWsRef.current = ws;
 
       ws.onopen = () => {
