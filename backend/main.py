@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 import random
 import sys
 import time
@@ -828,11 +829,36 @@ async def bybit_balance_refresher():
             await bybit_api.fetch_real_balance()
         await asyncio.sleep(3)
 
+# Render's free tier spins a web service down after ~15 minutes with no
+# inbound HTTP traffic, so the next real request pays a cold-start delay
+# (up to ~50s). RENDER_EXTERNAL_URL is set automatically by Render on every
+# web service - self-pinging it periodically (safely under 15 minutes)
+# generates real inbound traffic so the service never silently goes to
+# sleep. No-op for local dev, where that env var isn't set.
+KEEPALIVE_INTERVAL_SECONDS = 11 * 60  # 11 minutes - safely inside the 10-14 minute window asked for
+
+async def self_ping_keepalive():
+    self_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not self_url:
+        print("[KEEPALIVE] RENDER_EXTERNAL_URL not set (local dev) - keepalive disabled.")
+        return
+
+    print(f"[KEEPALIVE] Will self-ping {self_url}/health every {KEEPALIVE_INTERVAL_SECONDS // 60} minutes to prevent Render's free-tier sleep.")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while True:
+            await asyncio.sleep(KEEPALIVE_INTERVAL_SECONDS)
+            try:
+                resp = await client.get(f"{self_url}/health")
+                print(f"[KEEPALIVE] Self-ping OK (HTTP {resp.status_code}) - service stays awake.")
+            except Exception as exc:
+                print(f"[KEEPALIVE] Self-ping failed ({exc}) - will retry next interval.")
+
 @app.on_event("startup")
 async def start_background_tasks():
     asyncio.create_task(market_simulator())
     asyncio.create_task(binance_price_feed())
     asyncio.create_task(bybit_balance_refresher())
+    asyncio.create_task(self_ping_keepalive())
 
 # ==========================================
 # 2. REST API COMMAND "WIRES"
