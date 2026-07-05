@@ -744,12 +744,23 @@ def get_binance_symbol(pair_label):
     symbol = (pair_label or "").split("/")[0]
     return BINANCE_SYMBOL_MAP.get(symbol)
 
+# Tracks the last time binance_price_feed successfully processed a REAL tick,
+# so market_simulator can tell "actively receiving real data" apart from
+# "silently stuck" (network hiccup, DNS issue, host blocking outbound WS,
+# etc.) and self-heal by taking over with synthetic movement instead of
+# leaving current_price frozen forever.
+_last_real_feed_update = 0.0
+REAL_FEED_STALE_AFTER_SECONDS = 10
+
 async def market_simulator():
-    """ Legacy synthetic random-walk price - used ONLY while the active pair has
-    no Binance listing (the frontend chart has no real feed for these either,
-    so both sides stay consistently simulated together). """
+    """ Synthetic random-walk price - runs whenever the active pair has no
+    Binance listing, AND as a self-healing fallback if binance_price_feed
+    hasn't delivered a real tick recently (so current_price can never stay
+    permanently frozen even if the real feed silently breaks). """
     while True:
-        if get_binance_symbol(agent.active_pair) is None:
+        no_real_feed = get_binance_symbol(agent.active_pair) is None
+        real_feed_stale = (time.time() - _last_real_feed_update) > REAL_FEED_STALE_AFTER_SECONDS
+        if no_real_feed or real_feed_stale:
             volatility = random.uniform(-10, 10)
             new_price = agent.current_price + volatility
             # Simulate a live trade-volume tick (baseline + occasional surges to demonstrate Rule 3)
@@ -765,6 +776,8 @@ async def binance_price_feed():
     Binance-listed pair is currently active - so simulated trade entry/current
     prices always match what the paper-trading chart shows. Reconnects
     automatically on pair switch or connection drop. """
+    global _last_real_feed_update
+    print("[MARKET FEED] Background task starting...")
     current_symbol = None
     ws = None
     while True:
@@ -795,6 +808,7 @@ async def binance_price_feed():
             price = float(data["p"])
             qty = float(data["q"])
             await agent.process_tick(price, qty)
+            _last_real_feed_update = time.time()
         except asyncio.TimeoutError:
             continue  # no trade in the last 5s - loop back and re-check pair/connection
         except Exception as exc:
