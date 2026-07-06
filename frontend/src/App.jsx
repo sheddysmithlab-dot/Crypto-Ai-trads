@@ -19,6 +19,7 @@ import PaperTradingModal from './components/PaperTradingModal';
 import RiskAlertModal from './components/RiskAlertModal';
 import AlertModal from './components/AlertModal';
 import SettingsModal from './components/SettingsModal';
+import AgentInstructionsModal from './components/AgentInstructionsModal';
 
 export default function App() {
   const { status: apiStatus, setConnected } = useApiStatus();
@@ -30,6 +31,7 @@ export default function App() {
   const [alertOpen, setAlertOpen] = useState(false);
   const [paperModalOpen, setPaperModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [agentModalOpen, setAgentModalOpen] = useState(false);
   const [manualCapital, setManualCapital] = useState(null);
 
   const portfolio = usePortfolio(setConnected, {
@@ -52,14 +54,11 @@ export default function App() {
 
   async function handleControlClick() {
     if (!portfolio.isActive) {
-      debugLog('User clicked START TRADING. Sending POST /start-bot to Backend...');
-      try {
-        const res = await fetch(`${API_BASE}/start-bot`, { method: 'POST' });
-        const data = await res.json();
-        debugLog('Bot started successfully:', data.message);
-      } catch (err) {
-        console.error('Failed to start bot:', err);
-      }
+      // START AI AUTOMATION opens the AI Agent Instructions pre-start popup first.
+      // The actual /start-bot call happens inside handleAgentStart once the user
+      // confirms stop-loss / daily-profit and clicks Start.
+      debugLog('User clicked START AI AUTOMATION. Opening AI Agent Instructions modal...');
+      setAgentModalOpen(true);
     } else {
       // Plain voluntary stop - no loss event, so no "EMERGENCY EXIT TRIGGERED" modal here.
       // That wording is reserved for a genuine RULE 5 auto-kill resolved via handleRiskExit.
@@ -70,6 +69,24 @@ export default function App() {
       } catch (err) {
         console.error('Emergency exit failed:', err);
       }
+    }
+  }
+
+  async function handleAgentStart({ stopLossPct, dailyProfitPct }) {
+    debugLog(`Applying agent config (stopLoss=${stopLossPct}%, dailyProfit=${dailyProfitPct}%) and starting bot...`);
+    try {
+      await fetch(`${API_BASE}/agent/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stop_loss_pct: stopLossPct, daily_profit_pct: dailyProfitPct }),
+      });
+      const res = await fetch(`${API_BASE}/start-bot`, { method: 'POST' });
+      const data = await res.json();
+      debugLog('Bot started successfully:', data.message);
+    } catch (err) {
+      console.error('Failed to start bot from agent modal:', err);
+    } finally {
+      setAgentModalOpen(false);
     }
   }
 
@@ -185,6 +202,12 @@ export default function App() {
       <AlertModal open={alertOpen} onClose={() => setAlertOpen(false)} />
 
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onLiveTradingConnected={() => {}} />
+
+      <AgentInstructionsModal
+        open={agentModalOpen}
+        onClose={() => setAgentModalOpen(false)}
+        onStart={handleAgentStart}
+      />
     </div>
   );
 }

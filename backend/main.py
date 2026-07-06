@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import math
 import os
 import random
 import sys
@@ -348,7 +349,17 @@ class AITradingAgent:
         # POLICY 2 / RULE 5 Config: Portfolio Kill Switch
         self.starting_capital = 142560.88
         self.current_capital = self.starting_capital
-        self.max_loss_pct = 2.5  
+        # Default 3.0% per the AI Agent Instructions setup modal; the modal's
+        # /agent/config call updates this to whatever the user picks before start.
+        self.max_loss_pct = 3.0
+        # AI Agent Instructions modal: max stacked trades the bot may hold at once,
+        # derived as half-up round(stop_loss_pct * 1.5). Default 3% -> round(4.5) = 5.
+        self.max_concurrent_trades = 5
+        # AI Agent Instructions modal: optional "Capital profit of the day" target.
+        # 0.0 means disabled. Once the day's profit % crosses this, new entries are
+        # halted (existing positions keep being managed by the trailing lock).
+        self.daily_profit_target_pct = 0.0
+        self.daily_target_reached = False
 
         # RULE 1: Position Sizing & Leverage (The "100/1" Rule)
         self.leverage = 100
@@ -444,6 +455,16 @@ class AITradingAgent:
         (the dashboard's manual BUY button) - so the manual SELL button can tell them apart
         and only ever close manually-opened positions. """
         if not self.is_active or self.emergency_triggered:
+            return None
+        # AI Agent Instructions modal: cap stacked positions at max_concurrent_trades.
+        if len(self.trades) >= self.max_concurrent_trades:
+            notifications.push(
+                f"Max concurrent trades ({self.max_concurrent_trades}) reached on {self.active_pair} - new entry skipped.",
+                "info",
+            )
+            return None
+        # Daily profit target reached -> no new entries (existing ones keep trailing).
+        if self.daily_target_reached:
             return None
 
         # RULE 1: 1% margin, 100x leverage -> position_size = margin * leverage
@@ -640,6 +661,21 @@ class AITradingAgent:
             and not self.emergency_triggered):
             self.trigger_emergency_exit(reason=f"RULE 5: {self.max_loss_pct:.1f}% Portfolio Stop-Loss Hit! (Total Value ${total_value:,.2f}). Selling All unconditionally.")
             return
+
+        # AI Agent Instructions modal: optional "Capital profit of the day" target.
+        # Once the day's profit % crosses it, halt NEW entries (existing positions
+        # keep being managed by the trailing lock and can still close on their own).
+        if (self.is_active and self.daily_profit_target_pct > 0
+                and not self.daily_target_reached and not self.emergency_triggered):
+            daily_profit_pct = ((total_value - self.starting_capital) / self.starting_capital) * 100
+            if daily_profit_pct >= self.daily_profit_target_pct:
+                self.daily_target_reached = True
+                print(f"[PILLAR 3: AI AGENT] Daily profit target {self.daily_profit_target_pct}% reached "
+                      f"(current {daily_profit_pct:.2f}%). New entries halted; existing positions remain open.")
+                notifications.push(
+                    f"🎯 Daily profit target of {self.daily_profit_target_pct}% reached! New entries halted.",
+                    "success",
+                )
 
         # RULE 4 & 6: Dynamic Trailing Lock, driven by TRUE NET PROFIT (post-fee), not gross
         net_pcts = [self._trade_metrics(t)["net_pct"] for t in self.trades]
@@ -899,6 +935,7 @@ async def start_bot():
     agent.emergency_awaiting_decision = False
     agent.emergency_trigger_time = None  # RULE 8: Reset timer
     agent.emergency_auto_kill_executed = False  # RULE 8: Reset auto-kill flag
+    agent.daily_target_reached = False  # fresh session -> clear any prior daily-target halt
     print("[PILLAR 2: BACKEND] Received 'START' from Frontend. AI Agent awakened.")
     notifications.push(f"AI Agent STARTED - now monitoring {agent.active_pair} live.", "success")
     return {"status": "success", "message": "Bot active & trailing logic initialized."}
@@ -1019,6 +1056,57 @@ async def set_paper_capital(payload: PaperCapitalPayload):
 
     agent.set_paper_capital(payload.amount)
     return {"status": "success", "message": f"Paper trading capital set to ${payload.amount:,.2f}.", "capital": agent.current_capital}
+
+# ==========================================
+# AI AGENT INSTRUCTIONS MODAL WIRING
+# ==========================================
+class AgentConfigPayload(BaseModel):
+    stop_loss_pct: float = 3.0
+    daily_profit_pct: float = 0.0
+
+
+def _half_up_round(value: float) -> int:
+    """ Round half UP (0.5 -> next integer), matching the modal's strict-integer
+    rule. Python's built-in round() uses banker's rounding (round(2.5) == 2),
+    which would break the UI's "0.5 or more rounds up" contract. """
+    return math.floor(value + 0.5)
+
+
+@app.post("/agent/config")
+async def set_agent_config(payload: AgentConfigPayload):
+    """ Applied from the "AI Agent Instructions" pre-start modal.
+    - stop_loss_pct  -> sets the RULE 5/8 portfolio kill-switch threshold
+      (agent.max_loss_pct) and drives the concurrent-trades cap via
+      round(stop_loss_pct * 1.5) (half-up).
+    - daily_profit_pct -> optional "Capital profit of the day" target; 0 disables.
+    Both are validated and stored before /start-bot is called by the frontend. """
+    if payload.stop_loss_pct < 0.5 or payload.stop_loss_pct > 50:
+        return {"status": "error", "message": "Stop loss must be between 0.5% and 50%."}
+    if payload.daily_profit_pct < 0 or payload.daily_profit_pct > 1000:
+        return {"status": "error", "message": "Daily profit target must be between 0% and 1000%."}
+
+    agent.max_loss_pct = payload.stop_loss_pct
+    agent.max_concurrent_trades = max(1, _half_up_round(payload.stop_loss_pct * 1.5))
+    agent.daily_profit_target_pct = payload.daily_profit_pct
+    agent.daily_target_reached = False
+    print(f"[AGENT CONFIG] stop_loss={agent.max_loss_pct}% | max_concurrent_trades="
+          f"{agent.max_concurrent_trades} | daily_profit_target={agent.daily_profit_target_pct}%")
+    return {
+        "status": "success",
+        "message": "Agent config applied.",
+        "max_loss_pct": agent.max_loss_pct,
+        "max_concurrent_trades": agent.max_concurrent_trades,
+        "daily_profit_target_pct": agent.daily_profit_target_pct,
+    }
+
+@app.get("/agent/config")
+async def get_agent_config():
+    """ Lets the modal show the currently-applied config when reopened. """
+    return {
+        "stop_loss_pct": agent.max_loss_pct,
+        "daily_profit_pct": agent.daily_profit_target_pct,
+        "max_concurrent_trades": agent.max_concurrent_trades,
+    }
 
 # ==========================================
 # INTEGRATION SETTINGS: Bybit & AI API Wiring
