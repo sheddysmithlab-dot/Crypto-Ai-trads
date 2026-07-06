@@ -20,6 +20,7 @@ import RiskAlertModal from './components/RiskAlertModal';
 import AlertModal from './components/AlertModal';
 import SettingsModal from './components/SettingsModal';
 import AgentInstructionsModal from './components/AgentInstructionsModal';
+import StartConfirmModal from './components/StartConfirmModal';
 
 export default function App() {
   const { status: apiStatus, setConnected } = useApiStatus();
@@ -32,6 +33,8 @@ export default function App() {
   const [paperModalOpen, setPaperModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
+  const [startConfirmOpen, setStartConfirmOpen] = useState(false);
+  const [pendingConfig, setPendingConfig] = useState(null);
   const [manualCapital, setManualCapital] = useState(null);
 
   const portfolio = usePortfolio(setConnected, {
@@ -72,8 +75,22 @@ export default function App() {
     }
   }
 
-  async function handleAgentStart({ stopLossPct, dailyProfitPct }) {
-    debugLog(`Applying agent config (stopLoss=${stopLossPct}%, dailyProfit=${dailyProfitPct}%) and starting bot...`);
+  // Step 3 -> Step 4 wiring: the AI Agent Instructions "Start AI Automation"
+  // button hands the chosen config here. We close that popup and immediately
+  // open the "Emergency Exit & Continue" final safety check with the config.
+  function handleAgentStartRequest(config) {
+    debugLog('AI Instructions confirmed. Opening Emergency Exit & Continue safety check...', config);
+    setAgentModalOpen(false);
+    setPendingConfig(config);
+    setStartConfirmOpen(true);
+  }
+
+  // Safety check -> Continue: actually apply the config and start the bot.
+  async function handleConfirmContinue() {
+    if (!pendingConfig) return;
+    const { stopLossPct, dailyProfitPct } = pendingConfig;
+    setStartConfirmOpen(false);
+    debugLog(`Safety check: Continue. Applying config (stopLoss=${stopLossPct}%, dailyProfit=${dailyProfitPct}%) and starting bot...`);
     try {
       await fetch(`${API_BASE}/agent/config`, {
         method: 'POST',
@@ -84,10 +101,17 @@ export default function App() {
       const data = await res.json();
       debugLog('Bot started successfully:', data.message);
     } catch (err) {
-      console.error('Failed to start bot from agent modal:', err);
+      console.error('Failed to start bot from safety check:', err);
     } finally {
-      setAgentModalOpen(false);
+      setPendingConfig(null);
     }
+  }
+
+  // Safety check -> Emergency Exit (or 30s auto-default): cancel, do NOT start.
+  function handleConfirmExit() {
+    debugLog('Safety check: Emergency Exit. Bot start cancelled.');
+    setStartConfirmOpen(false);
+    setPendingConfig(null);
   }
 
   async function handleRiskExit() {
@@ -206,7 +230,14 @@ export default function App() {
       <AgentInstructionsModal
         open={agentModalOpen}
         onClose={() => setAgentModalOpen(false)}
-        onStart={handleAgentStart}
+        onStart={handleAgentStartRequest}
+      />
+
+      <StartConfirmModal
+        open={startConfirmOpen}
+        config={pendingConfig}
+        onContinue={handleConfirmContinue}
+        onExit={handleConfirmExit}
       />
     </div>
   );

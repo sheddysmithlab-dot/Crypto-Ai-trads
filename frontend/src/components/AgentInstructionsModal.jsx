@@ -5,9 +5,9 @@ import { useState } from 'react';
 // (the bot is NOT started yet). The user picks a stop-loss % (and an optional
 // daily profit target). Two neon gauges - RISK and CONFIDENCE - update live off
 // the stop-loss value, and the whole popup recolours green->red as risk crosses
-// 50%. Clicking START AI AUTOMATION applies the config + starts the bot via the
-// parent's onStart; in the red zone a confirm step runs first (the "emergency
-// exit / continue" forward wiring - here reused as a high-risk proceed gate).
+// 50%. Clicking START AI AUTOMATION closes this popup and hands the chosen
+// config to the parent, which then opens the "Emergency Exit & Continue" safety
+// check popup (final confirmation before the bot actually starts).
 //
 // Algorithm (per spec):
 //   risk       = 45 + (stopLoss - 3) * 5     // base 3% -> 45%, +5% per +1% SL
@@ -61,8 +61,6 @@ function Gauge({ label, value, colorVar }) {
 export default function AgentInstructionsModal({ open, onClose, onStart }) {
   const [stopLoss, setStopLoss] = useState(3);
   const [dailyProfit, setDailyProfit] = useState(10);
-  const [confirming, setConfirming] = useState(false);
-  const [starting, setStarting] = useState(false);
 
   if (!open) return null;
 
@@ -79,28 +77,14 @@ export default function AgentInstructionsModal({ open, onClose, onStart }) {
   const connectorColor = isRed ? 'bg-red-500' : 'bg-green-500';
 
   function handleStartClick() {
-    if (isRed) {
-      // Red zone -> forward wiring: show the emergency-exit/continue style gate.
-      setConfirming(true);
-      return;
-    }
-    runStart();
-  }
-
-  async function runStart() {
-    setStarting(true);
-    try {
-      await onStart({ stopLossPct: stopLoss, dailyProfitPct: dailyProfit });
-    } finally {
-      setStarting(false);
-      setConfirming(false);
-    }
+    // Hand the full snapshot to the parent. The parent closes this popup and
+    // opens the "Emergency Exit & Continue" safety check with this config.
+    onStart({ stopLossPct: stopLoss, dailyProfitPct: dailyProfit, risk, confidence, trades, isRed });
   }
 
   function handleStopLossChange(e) {
     const v = parseFloat(e.target.value);
     setStopLoss(Number.isFinite(v) ? v : 0);
-    setConfirming(false);
   }
 
   function handleDailyProfitChange(e) {
@@ -171,42 +155,17 @@ export default function AgentInstructionsModal({ open, onClose, onStart }) {
             Ai bot can do <span className={`font-black ${isRed ? 'text-red-400' : 'text-green-400'}`}>{trades}</span> trades at a time as per your stop loss.
           </p>
 
-          {/* Action area */}
-          {confirming ? (
-            <div className="space-y-3">
-              <div className="text-center text-sm text-red-400 font-bold">
-                <i className="fas fa-exclamation-triangle mr-1.5"></i>
-                High risk: {Math.round(risk)}% risk / {Math.round(confidence)}% confidence. Proceed anyway?
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 rounded-lg uppercase tracking-wide text-xs"
-                  onClick={() => setConfirming(false)}
-                  disabled={starting}
-                >
-                  <i className="fas fa-times mr-1.5"></i> Emergency Exit
-                </button>
-                <button
-                  className="bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-lg uppercase tracking-wide text-xs"
-                  onClick={runStart}
-                  disabled={starting}
-                >
-                  {starting ? 'Starting...' : (<><i className="fas fa-play mr-1.5"></i> Continue</>)}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              className={`w-full ${solidColor} ${isRed ? 'text-white' : 'text-black'} font-black py-3.5 rounded-lg text-sm uppercase tracking-widest transition-all active:scale-95 disabled:opacity-60`}
-              style={{ boxShadow: `0 0 20px ${glowColor}` }}
-              onClick={handleStartClick}
-              disabled={starting}
-            >
-              {starting ? 'Starting...' : 'Start AI Automation'}
-            </button>
-          )}
+          {/* Big action button - opens the Emergency Exit & Continue safety check next */}
+          <button
+            className={`w-full ${solidColor} ${isRed ? 'text-white' : 'text-black'} font-black py-3.5 rounded-lg text-sm uppercase tracking-widest transition-all active:scale-95`}
+            style={{ boxShadow: `0 0 20px ${glowColor}` }}
+            onClick={handleStartClick}
+          >
+            Start AI Automation
+          </button>
         </div>
       </div>
     </div>
   );
 }
+
