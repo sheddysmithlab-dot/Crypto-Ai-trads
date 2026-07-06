@@ -12,10 +12,10 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
   const [bybitKey, setBybitKey] = useState('');
   const [bybitSecret, setBybitSecret] = useState('');
   const [bybitEnv, setBybitEnv] = useState('mainnet');
-  const [aiProvider, setAiProvider] = useState('none');
+  const [aiProvider, setAiProvider] = useState('z-ai');
   const [aiKey, setAiKey] = useState('');
-  const [aiModel, setAiModel] = useState('');
-  const [aiBaseUrl, setAiBaseUrl] = useState('');
+  const [aiModel, setAiModel] = useState('glm-4.5-flash');
+  const [aiBaseUrl, setAiBaseUrl] = useState('https://api.z.ai/api/paas/v4');
   const [banner, setBanner] = useState({ tone: 'neutral', message: 'Loading settings status...' });
   const [busy, setBusy] = useState({ save: false, testBybit: false, testAi: false, reset: false });
 
@@ -26,14 +26,18 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
 
       const bybitLabel = data.bybit_configured ? `Bybit: configured (${data.bybit_environment})` : 'Bybit: not configured';
       const aiLabel =
-        data.ai_provider && data.ai_provider !== 'none' ? `AI: ${data.ai_provider} (${data.ai_model || 'default model'})` : 'AI: built-in rule engine';
+        data.ai_configured
+          ? `AI: ${data.ai_provider} (${data.ai_model || 'glm-4.5-flash'})`
+          : data.ai_provider === 'z-ai'
+            ? 'AI: Z.ai GLM-4.5-Flash (add ZAI_API_KEY in backend/.env or paste key below)'
+            : 'AI: not configured';
 
       setBanner({ tone: 'neutral', message: `${bybitLabel} | ${aiLabel}. Keys stored locally; values never shown in the form.` });
 
       setBybitEnv(data.bybit_environment || 'mainnet');
-      setAiProvider(data.ai_provider || 'none');
-      setAiModel(data.ai_model || '');
-      setAiBaseUrl(data.ai_base_url || '');
+      setAiProvider(data.ai_provider || 'z-ai');
+      setAiModel(data.ai_model || 'glm-4.5-flash');
+      setAiBaseUrl(data.ai_base_url || 'https://api.z.ai/api/paas/v4');
     } catch {
       setBanner({ tone: 'error', message: 'Could not reach backend to load settings status.' });
     }
@@ -128,10 +132,10 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
       setBybitKey('');
       setBybitSecret('');
       setBybitEnv('mainnet');
-      setAiProvider('none');
+      setAiProvider('z-ai');
       setAiKey('');
-      setAiModel('');
-      setAiBaseUrl('');
+      setAiModel('glm-4.5-flash');
+      setAiBaseUrl('https://api.z.ai/api/paas/v4');
       setBanner({ tone: 'info', message: data.message });
     } catch {
       setBanner({ tone: 'error', message: 'Connection to backend failed while resetting settings.' });
@@ -208,13 +212,21 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
                 <label className="block text-xs font-semibold text-gray-300 mb-1.5">AI provider</label>
                 <select
                   value={aiProvider}
-                  onChange={(e) => setAiProvider(e.target.value)}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setAiProvider(next);
+                    if (next === 'z-ai') {
+                      if (!aiModel) setAiModel('glm-4.5-flash');
+                      if (!aiBaseUrl) setAiBaseUrl('https://api.z.ai/api/paas/v4');
+                    }
+                  }}
                   className="w-full bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none focus:border-blue-500"
                 >
-                  <option value="none">None (built-in rule engine)</option>
+                  <option value="z-ai">Z.ai — GLM-4.5-Flash (default)</option>
+                  <option value="none">None (disable AI)</option>
                   <option value="openai">OpenAI</option>
                   <option value="azure-openai">Azure OpenAI</option>
-                  <option value="zhipu-glm">Zhipu GLM</option>
+                  <option value="zhipu-glm">Zhipu GLM (China endpoint)</option>
                   <option value="custom">Custom / Other</option>
                 </select>
               </div>
@@ -223,7 +235,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
                 <input
                   type="password"
                   autoComplete="off"
-                  placeholder="AI API key"
+                  placeholder="Paste Z.ai API key (or set ZAI_API_KEY in backend/.env)"
                   value={aiKey}
                   onChange={(e) => setAiKey(e.target.value)}
                   className="w-full bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
@@ -235,7 +247,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
                 <label className="block text-xs font-semibold text-gray-300 mb-1.5">Model</label>
                 <input
                   type="text"
-                  placeholder="e.g. gpt-4o-mini / glm-4.6"
+                  placeholder="glm-4.5-flash"
                   value={aiModel}
                   onChange={(e) => setAiModel(e.target.value)}
                   className="w-full bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
@@ -245,7 +257,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
                 <label className="block text-xs font-semibold text-gray-300 mb-1.5">Base URL (optional)</label>
                 <input
                   type="text"
-                  placeholder="Leave blank for default endpoint"
+                  placeholder="https://api.z.ai/api/paas/v4"
                   value={aiBaseUrl}
                   onChange={(e) => setAiBaseUrl(e.target.value)}
                   className="w-full bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"

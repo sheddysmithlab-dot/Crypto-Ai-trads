@@ -11,6 +11,11 @@ import random
 import sys
 import time
 import httpx
+from dotenv import load_dotenv
+
+# Load backend/.env on startup (local dev). On Render, set ZAI_API_KEY in the
+# service environment — values there override / supplement the file.
+load_dotenv()
 
 # Windows' default console codepage (cp1252) can't encode emoji used in log
 # messages below; force UTF-8 stdout/stderr so print() never crashes the app.
@@ -80,15 +85,44 @@ class SettingsPayload(BaseModel):
 
 class SettingsStore:
     """ In-memory credential store for the local session.
-    Secrets are NEVER logged in plaintext and NEVER echoed back to the frontend. """
+    Secrets are NEVER logged in plaintext and NEVER echoed back to the frontend.
+    Z.ai (GLM-4.5-Flash) is the permanent default AI provider — loaded from
+    ZAI_API_KEY in backend/.env or the host environment on every start/reset. """
     def __init__(self):
         self.bybit_api_key = ""
         self.bybit_api_secret = ""
         self.bybit_environment = "mainnet"
-        self.ai_provider = "none"
+        self.ai_provider = "z-ai"
         self.ai_api_key = ""
-        self.ai_model = ""
-        self.ai_base_url = ""
+        self.ai_model = "glm-4.5-flash"
+        self.ai_base_url = "https://api.z.ai/api/paas/v4"
+        self._load_from_env()
+
+    def _load_from_env(self):
+        """ Apply permanent Z.ai defaults + any secrets from .env / Render env vars. """
+        zai_key = (os.environ.get("ZAI_API_KEY") or os.environ.get("AI_API_KEY") or "").strip()
+        if zai_key:
+            self.ai_api_key = zai_key
+        self.ai_provider = (os.environ.get("AI_PROVIDER") or "z-ai").strip() or "z-ai"
+        self.ai_model = (os.environ.get("ZAI_MODEL") or os.environ.get("AI_MODEL") or "glm-4.5-flash").strip()
+        self.ai_base_url = (
+            os.environ.get("ZAI_BASE_URL") or os.environ.get("AI_BASE_URL") or "https://api.z.ai/api/paas/v4"
+        ).strip().rstrip("/")
+
+        bybit_key = (os.environ.get("BYBIT_API_KEY") or "").strip()
+        bybit_secret = (os.environ.get("BYBIT_API_SECRET") or "").strip()
+        if bybit_key:
+            self.bybit_api_key = bybit_key
+        if bybit_secret:
+            self.bybit_api_secret = bybit_secret
+        env_mode = (os.environ.get("BYBIT_ENVIRONMENT") or "").strip()
+        if env_mode in ("mainnet", "testnet"):
+            self.bybit_environment = env_mode
+
+        if self.is_ai_configured():
+            print(f"[SETTINGS] Z.ai AI loaded from environment (model={self.ai_model}, provider={self.ai_provider}).")
+        else:
+            print("[SETTINGS] Z.ai is the default AI provider — set ZAI_API_KEY in backend/.env to enable.")
 
     def save(self, payload: SettingsPayload):
         # Only overwrite secret fields if the user actually typed a new value
@@ -101,12 +135,16 @@ class SettingsStore:
 
         # Non-secret fields are always safe to overwrite
         self.bybit_environment = payload.bybit_environment or "mainnet"
-        self.ai_provider = payload.ai_provider or "none"
-        self.ai_model = payload.ai_model
-        self.ai_base_url = payload.ai_base_url
+        self.ai_provider = payload.ai_provider or "z-ai"
+        self.ai_model = payload.ai_model or "glm-4.5-flash"
+        if payload.ai_base_url:
+            self.ai_base_url = payload.ai_base_url.rstrip("/")
+        elif not self.ai_base_url:
+            self.ai_base_url = "https://api.z.ai/api/paas/v4"
 
     def reset(self):
         self.__init__()
+        # __init__ already re-applies Z.ai defaults + env secrets.
 
     def is_bybit_configured(self):
         return bool(self.bybit_api_key and self.bybit_api_secret)
@@ -134,10 +172,11 @@ settings_store = SettingsStore()
 # be overridden from the Settings form. Azure OpenAI has no universal base
 # URL (it's resource-specific), so it always requires ai_base_url to be set.
 AI_PROVIDER_DEFAULTS = {
+    "z-ai": {"base_url": "https://api.z.ai/api/paas/v4", "model": "glm-4.5-flash", "auth_header": "bearer"},
     "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini", "auth_header": "bearer"},
     "zhipu-glm": {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4.5-flash", "auth_header": "bearer"},
     "azure-openai": {"base_url": None, "model": "gpt-4o-mini", "auth_header": "api-key"},
-    "custom": {"base_url": None, "model": "gpt-4o-mini", "auth_header": "bearer"},
+    "custom": {"base_url": None, "model": "glm-4.5-flash", "auth_header": "bearer"},
 }
 
 async def consult_ai_provider(context):

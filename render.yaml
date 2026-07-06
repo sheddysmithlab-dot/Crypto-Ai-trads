@@ -10,6 +10,14 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
+      - key: AI_PROVIDER
+        value: z-ai
+      - key: ZAI_MODEL
+        value: glm-4.5-flash
+      - key: ZAI_BASE_URL
+        value: https://api.z.ai/api/paas/v4
+      - key: ZAI_API_KEY
+        sync: false
 
   - type: web
     name: sheddy-bybit
