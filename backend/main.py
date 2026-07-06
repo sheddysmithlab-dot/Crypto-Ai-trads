@@ -443,18 +443,31 @@ class AITradingAgent:
         with 100x leverage, filled as a Market Order (RULE 7) with simulated minor slippage.
         `source` tags who opened it - "auto" (the 10s unconditional auto-buy loop) or
         "manual" (the dashboard's manual BUY button) - so the manual SELL button can
-        tell them apart and only ever close manually-opened positions. """
-        if not self.is_active or self.emergency_triggered:
+        tell them apart and only ever close manually-opened positions.
+
+        Manual vs auto gating mirrors the ControlBar UI:
+          - manual BUY/SELL are enabled only while automation is OFF (not is_active)
+          - auto buys only fire while automation is ON (is_active) """
+        if self.emergency_triggered:
             return None
+
+        if source == "manual":
+            # Manual trading is the opposite of automation - only allowed while the bot
+            # is NOT running (START AI AUTOMATION has not been clicked / was stopped).
+            if self.is_active:
+                return None
+        else:
+            if not self.is_active:
+                return None
+            if self.daily_target_reached:
+                return None
+
         # AI Agent Instructions modal: cap stacked positions at max_concurrent_trades.
         if len(self.trades) >= self.max_concurrent_trades:
             notifications.push(
                 f"Max concurrent trades ({self.max_concurrent_trades}) reached on {self.active_pair} - new entry skipped.",
                 "info",
             )
-            return None
-        # Daily profit target reached -> no new entries (existing ones keep trailing).
-        if self.daily_target_reached:
             return None
 
         # RULE 1: 1% margin, 100x leverage -> position_size = margin * leverage
@@ -490,10 +503,11 @@ class AITradingAgent:
 
     def manual_close_best(self, reason="Manual SELL button"):
         """ Manual SELL button: closes exactly ONE position among the manually-opened
-        trades (never touches the auto/RULE-3 pyramided ones) - specifically whichever
-        manual trade currently has the highest True Net Profit (or, if all manual trades
-        are underwater, whichever has the smallest loss - the same "pick the max net_pct"
-        comparison covers both cases). """
+        trades (never touches auto trades) - specifically whichever manual trade
+        currently has the highest True Net Profit (or smallest loss if all underwater).
+        Only allowed while automation is OFF, matching the ControlBar UI. """
+        if self.is_active:
+            return None
         manual_trades = [t for t in self.trades if t.get("source") == "manual"]
         if not manual_trades:
             return None
@@ -962,20 +976,27 @@ class CloseTradePayload(BaseModel):
 @app.post("/open-trade")
 async def open_trade(payload: OpenTradePayload):
     """ Manual BUY button: opens an additional 1%-margin/100x position on the currently
-    active pair (single-coin focus, but multiple stacked trades allowed). Every click
-    books one more trade - tagged "manual" so the SELL button only ever closes these,
-    never the RULE-3 auto-pyramided trades. """
+    active pair while AI automation is OFF. Every click books one more trade tagged
+    "manual" so the SELL button only ever closes these, never auto trades. """
     side = payload.side.upper() if payload.side.upper() in ("LONG", "SHORT") else "LONG"
+    if agent.emergency_triggered:
+        return {"status": "error", "message": "Cannot open a position - emergency halt is active."}
+    if agent.is_active:
+        return {"status": "error", "message": "Stop AI automation before using manual BUY."}
+    if len(agent.trades) >= agent.max_concurrent_trades:
+        return {"status": "error", "message": f"Max concurrent trades ({agent.max_concurrent_trades}) reached."}
+
     trade = agent.open_trade(side, reason="Manual BUY button", source="manual")
     if trade is None:
-        return {"status": "error", "message": "Start the bot before opening a position."}
-    return {"status": "success", "trade": trade, "pair": agent.active_pair}
+        return {"status": "error", "message": "Could not open a manual position."}
+    return {"status": "success", "message": f"Manual BUY filled on {agent.active_pair}.", "trade": trade, "pair": agent.active_pair}
 
 @app.post("/manual-sell")
 async def manual_sell():
     """ Manual SELL button: closes exactly the ONE manually-opened trade with the
-    highest True Net Profit (or smallest loss, if none are in profit) - never the
-    auto/RULE-3 trades, and never more than one position per click. """
+    highest True Net Profit while AI automation is OFF. """
+    if agent.is_active:
+        return {"status": "error", "message": "Stop AI automation before using manual SELL."}
     closed = agent.manual_close_best()
     if closed is None:
         return {"status": "error", "message": "No manually-opened positions to sell."}

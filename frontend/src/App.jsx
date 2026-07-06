@@ -135,7 +135,11 @@ export default function App() {
         body: JSON.stringify({ side: 'LONG' }),
       });
       const data = await res.json();
-      debugLog(data.message || 'Manual BUY executed.');
+      if (data.status === 'error') {
+        console.error('Manual BUY failed:', data.message);
+      } else {
+        debugLog(data.message || 'Manual BUY executed.');
+      }
     } catch (err) {
       console.error('Manual buy failed:', err);
     }
@@ -146,7 +150,11 @@ export default function App() {
     try {
       const res = await fetch(`${API_BASE}/manual-sell`, { method: 'POST' });
       const data = await res.json();
-      debugLog(data.message || 'Manual SELL executed.');
+      if (data.status === 'error') {
+        console.error('Manual SELL failed:', data.message);
+      } else {
+        debugLog(data.message || 'Manual SELL executed.');
+      }
     } catch (err) {
       console.error('Manual sell failed:', err);
     }

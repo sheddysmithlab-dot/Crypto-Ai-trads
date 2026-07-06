@@ -259,6 +259,13 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
 
   const disconnectFreeSource = useCallback(() => {
     if (freeSourceWsRef.current) {
+      // Null out ALL handlers, not just onclose - otherwise a tick already in
+      // the event queue can still fire onmessage after we close, delivering the
+      // OLD pair's price into the NEW pair's chart and making the switch look
+      // like it didn't take effect.
+      freeSourceWsRef.current.onopen = null;
+      freeSourceWsRef.current.onmessage = null;
+      freeSourceWsRef.current.onerror = null;
       freeSourceWsRef.current.onclose = null;
       freeSourceWsRef.current.close();
       freeSourceWsRef.current = null;
@@ -563,6 +570,15 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
   }, []);
 
   // React to pair changes (skip the very first run since init already used the initial price)
+  // switchSymbol / connectFreeSource are stored in refs so this effect always calls the
+  // LATEST versions (switchSymbol is recreated whenever the timeframe changes). Without
+  // this, the effect could call a stale switchSymbol and the chart wouldn't reload for the
+  // newly selected pair - exactly the "pair changes in backend but chart doesn't update" bug.
+  const switchSymbolRef = useRef(null);
+  const connectFreeSourceRef = useRef(null);
+  switchSymbolRef.current = switchSymbol;
+  connectFreeSourceRef.current = connectFreeSource;
+
   useEffect(() => {
     if (skipFirstPairEffect.current) {
       skipFirstPairEffect.current = false;
@@ -570,10 +586,10 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     }
     if (!candleSeriesRef.current) return;
     debugLog(`[CHART] Regenerating candlestick data for ${pairLabel}`);
-    switchSymbol(pairPrice);
+    switchSymbolRef.current?.(pairPrice);
     if (tradingModeRef.current === 'PAPER_TRADING') {
       debugLog(`[FREE SOURCE] Re-subscribing to Binance feed for ${pairLabel}`);
-      connectFreeSource(pairLabel);
+      connectFreeSourceRef.current?.(pairLabel);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pairLabel, pairPrice]);
