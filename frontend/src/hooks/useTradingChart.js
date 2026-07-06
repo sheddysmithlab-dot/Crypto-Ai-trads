@@ -184,6 +184,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
   // Bumped on every switchSymbol/switchTimeframe call so a slow, superseded
   // real-history fetch can't clobber a newer switch when it finally resolves.
   const loadGenerationRef = useRef(0);
+  const zoomTimeoutRef = useRef(null);
   pairLabelRef.current = pairLabel;
 
   const [timeframe, setTimeframe] = useState('30S');
@@ -194,21 +195,28 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
   });
 
   const zoomToRecentCandles = useCallback((dataLength) => {
+    if (zoomTimeoutRef.current) {
+      clearTimeout(zoomTimeoutRef.current);
+      zoomTimeoutRef.current = null;
+    }
     if (!chartRef.current || dataLength === 0) return;
+
     const applyZoom = () => {
-      chartRef.current?.timeScale().setVisibleLogicalRange({
-        from: Math.max(0, dataLength - DEFAULT_VISIBLE_CANDLES),
-        to: dataLength,
-      });
+      // Pair/timeframe switches clear data first — a delayed zoom from the
+      // previous load must not run against an empty chart (throws on null.from).
+      if (!chartRef.current || mockDataRef.current.length === 0) return;
+      try {
+        chartRef.current.timeScale().setVisibleLogicalRange({
+          from: Math.max(0, dataLength - DEFAULT_VISIBLE_CANDLES),
+          to: dataLength,
+        });
+      } catch (err) {
+        console.warn('[CHART] Could not apply zoom range:', err);
+      }
     };
-    // A single call right after setData() can be a no-op if the chart's canvas
-    // hasn't been laid out at its final size yet (e.g. on first mount, before
-    // fonts/CSS finish settling) - double rAF plus a short delayed re-apply
-    // makes the initial zoom land reliably instead of silently falling back
-    // to showing the whole dataset zoomed out.
     applyZoom();
     requestAnimationFrame(() => requestAnimationFrame(applyZoom));
-    setTimeout(applyZoom, 300);
+    zoomTimeoutRef.current = setTimeout(applyZoom, 300);
   }, []);
 
   const updateReadouts = useCallback((bar, data) => {
@@ -376,7 +384,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       // Clear the chart rather than showing a fake synthetic placeholder -
       // everything displayed should be real, wired data or nothing at all.
       applyDataset([]);
-      trailingLockLineRef.current.applyOptions({ price: basePrice * 1.0008, title: 'Lock +0.08', color: '#3b82f6' });
+      trailingLockLineRef.current?.applyOptions({ price: basePrice * 1.0008, title: 'Lock +0.08', color: '#3b82f6' });
       loadRealHistoryInBackground(pairLabelRef.current, timeframe, basePrice);
     },
     [applyDataset, loadRealHistoryInBackground, timeframe]
@@ -460,9 +468,16 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       title: 'Lock +0.08',
     });
 
-    // Sync time scales between the main chart and the volume panel
+    // Sync time scales between the main chart and the volume panel.
+    // When data is cleared (pair/timeframe switch), lightweight-charts fires this
+    // callback with range=null — passing that through crashes setVisibleLogicalRange.
     chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-      volumeChart.timeScale().setVisibleLogicalRange(range);
+      if (!range || range.from == null || range.to == null) return;
+      try {
+        volumeChart.timeScale().setVisibleLogicalRange(range);
+      } catch (err) {
+        console.warn('[CHART] Could not sync volume chart zoom:', err);
+      }
     });
 
     // Fetch real Binance history for the initial pair/timeframe (30S has no kline
@@ -517,7 +532,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
           }
 
           if (data.lock_active) {
-            trailingLockLineRef.current.applyOptions({
+            trailingLockLineRef.current?.applyOptions({
               price: entryPriceRef.current + entryPriceRef.current * (data.peak_pct / 100),
               title: `Active Lock Peak (+${data.peak_pct.toFixed(2)}%)`,
               color: '#eab308',
@@ -558,6 +573,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     return () => {
       window.removeEventListener('resize', handleResize);
       clearTimeout(marketReconnectTimer);
+      if (zoomTimeoutRef.current) clearTimeout(zoomTimeoutRef.current);
       if (marketWs) {
         marketWs.onclose = null;
         marketWs.close();
