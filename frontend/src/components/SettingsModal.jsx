@@ -93,6 +93,26 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
   async function handleTestBybit() {
     setBusy((b) => ({ ...b, testBybit: true }));
     try {
+      // Apply environment + any newly typed keys before testing stored credentials.
+      const saveRes = await fetch(`${API_BASE}/settings/save`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bybit_api_key: bybitKey.trim(),
+          bybit_api_secret: bybitSecret.trim(),
+          bybit_environment: bybitEnv,
+          ai_provider: aiProvider,
+          ai_api_key: aiKey.trim(),
+          ai_model: aiModel.trim(),
+          ai_base_url: aiBaseUrl.trim(),
+        }),
+      });
+      if (!saveRes.ok) {
+        const saveData = await saveRes.json().catch(() => ({}));
+        setBanner({ tone: 'error', message: saveData.message || 'Save settings before testing Bybit.' });
+        return;
+      }
+
       const res = await fetch(`${API_BASE}/settings/test-bybit`, { method: 'POST' });
       const data = await res.json();
       setBanner({ tone: data.success ? 'success' : 'error', message: data.message });
@@ -201,6 +221,10 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
                 <option value="mainnet">Mainnet (real funds)</option>
                 <option value="testnet">Testnet (paper funds)</option>
               </select>
+              <p className="mt-2 text-[11px] text-gray-500 leading-relaxed">
+                Testnet keys come from testnet.bybit.com only. If Test Bybit returns 403, open API Management → Edit key →
+                add your backend server IP or choose &quot;No IP restriction&quot; (the test runs from the server, not your browser).
+              </p>
             </div>
           </div>
 

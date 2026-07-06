@@ -278,6 +278,86 @@ class BybitAPIWrapper:
         payload = f"{timestamp}{settings_store.bybit_api_key}{recv_window}{query_string}"
         return hmac.new(settings_store.bybit_api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
+    def _base_url(self):
+        return (
+            "https://api-testnet.bybit.com"
+            if settings_store.bybit_environment == "testnet"
+            else "https://api.bybit.com"
+        )
+
+    def _auth_headers(self, query_string):
+        timestamp = str(int(time.time() * 1000))
+        recv_window = "5000"
+        return {
+            "X-BAPI-API-KEY": settings_store.bybit_api_key,
+            # _sign() computes HMAC-SHA256 (hex), not RSA - sign-type must say "2" ONLY
+            # when actually RSA-signing (base64 output). Sending "2" here while
+            # signing with HMAC tells Bybit to verify against the wrong algorithm
+            # entirely, which fails auth regardless of whether the key/secret are
+            # correct - was hardcoded wrong, always claiming RSA.
+            "X-BAPI-SIGN-TYPE": "1",
+            "X-BAPI-SIGN": self._sign(timestamp, recv_window, query_string),
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": recv_window,
+        }
+
+    async def _get_outbound_ip(self):
+        try:
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                resp = await client.get("https://api.ipify.org?format=json")
+            if resp.status_code == 200:
+                return resp.json().get("ip")
+        except Exception:
+            pass
+        return None
+
+    async def _format_http_error(self, status_code, resp):
+        body_text = (resp.text or "").strip()
+        ret_msg = None
+        if body_text:
+            try:
+                payload = resp.json()
+                ret_msg = payload.get("retMsg") or payload.get("message")
+            except Exception:
+                ret_msg = body_text[:200]
+
+        if status_code == 401:
+            return "Invalid API key or secret (Bybit returned 401 Unauthorized)."
+
+        if status_code == 403:
+            outbound_ip = await self._get_outbound_ip()
+            parts = ["Bybit returned HTTP 403 (Forbidden)."]
+            if ret_msg:
+                parts.append(str(ret_msg))
+            parts.append(
+                "The API call is made from your backend server, not your browser. "
+                "In Bybit → API Management → Edit key → add that server's public IP or choose 'No IP restriction'."
+            )
+            if outbound_ip:
+                parts.append(f"Backend outbound IP: {outbound_ip} (whitelist this in Bybit).")
+            if settings_store.bybit_environment == "testnet":
+                parts.append("Testnet keys must be created at testnet.bybit.com and Environment must be Testnet.")
+            else:
+                parts.append("Mainnet keys must be created at bybit.com and Environment must be Mainnet.")
+            return " ".join(parts)
+
+        if ret_msg:
+            return f"Bybit API HTTP {status_code}: {ret_msg}"
+        return f"Bybit API returned HTTP {status_code}."
+
+    def _format_ret_error(self, data, outbound_ip=None):
+        ret_code = data.get("retCode")
+        ret_msg = data.get("retMsg", "Unknown Bybit API error.")
+        if ret_code in (10007, 10010, 10024):
+            hint = (
+                " IP whitelist mismatch — add your backend server's public IP in Bybit API Management "
+                "or disable IP restriction."
+            )
+            if outbound_ip:
+                hint += f" Backend outbound IP: {outbound_ip}."
+            return f"{ret_msg} (code {ret_code}).{hint}"
+        return ret_msg
+
     async def fetch_real_balance(self):
         """ RULE 5 wiring: pull the REAL unified-account total equity from Bybit's v5 API.
         Used both by 'Test Bybit' (to actually verify credentials) and by the background
@@ -287,57 +367,57 @@ class BybitAPIWrapper:
             self.last_error = "No Bybit API Key/Secret configured."
             return None
 
-        base_url = (
-            "https://api-testnet.bybit.com"
-            if settings_store.bybit_environment == "testnet"
-            else "https://api.bybit.com"
-        )
-        query_string = "accountType=UNIFIED"
-        timestamp = str(int(time.time() * 1000))
-        recv_window = "5000"
-        headers = {
-            "X-BAPI-API-KEY": settings_store.bybit_api_key,
-            "X-BAPI-SIGN": self._sign(timestamp, recv_window, query_string),
-            "X-BAPI-SIGN-TYPE": "2",
-            "X-BAPI-TIMESTAMP": timestamp,
-            "X-BAPI-RECV-WINDOW": recv_window,
-        }
-
         try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                resp = await client.get(f"{base_url}/v5/account/wallet-balance?{query_string}", headers=headers)
+            for account_type in ("UNIFIED", "SPOT"):
+                query_string = f"accountType={account_type}"
+                headers = self._auth_headers(query_string)
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    resp = await client.get(
+                        f"{self._base_url()}/v5/account/wallet-balance?{query_string}",
+                        headers=headers,
+                    )
 
-            # Bybit returns a bare 401 with an empty body for invalid/expired API keys -
-            # there's no JSON to parse in that case, so check the status first.
-            if resp.status_code == 401:
-                self.last_error = "Invalid API key/secret (Bybit returned 401 Unauthorized)."
-                self._note_failure()
-                return None
-            if resp.status_code != 200:
-                self.last_error = f"Bybit API returned HTTP {resp.status_code}."
-                self._note_failure()
-                return None
+                if resp.status_code == 401:
+                    self.last_error = "Invalid API key/secret (Bybit returned 401 Unauthorized)."
+                    self._note_failure()
+                    return None
+                if resp.status_code == 403:
+                    self.last_error = await self._format_http_error(403, resp)
+                    self._note_failure()
+                    return None
+                if resp.status_code != 200:
+                    self.last_error = await self._format_http_error(resp.status_code, resp)
+                    self._note_failure()
+                    return None
 
-            data = resp.json()
+                data = resp.json()
+                if data.get("retCode") != 0:
+                    if account_type == "SPOT":
+                        outbound_ip = await self._get_outbound_ip()
+                        self.last_error = self._format_ret_error(data, outbound_ip)
+                        self._note_failure()
+                        return None
+                    continue
 
-            if data.get("retCode") != 0:
-                self.last_error = data.get("retMsg", "Unknown Bybit API error.")
-                self._note_failure()
-                return None
+                account_list = data.get("result", {}).get("list", [])
+                if not account_list:
+                    if account_type == "SPOT":
+                        self.last_error = "Bybit returned no account data for this key."
+                        self._note_failure()
+                        return None
+                    continue
 
-            account_list = data.get("result", {}).get("list", [])
-            if not account_list:
-                self.last_error = "Bybit returned no account data for this key."
-                self._note_failure()
-                return None
+                equity = float(account_list[0]["totalEquity"])
+                self.last_known_balance = equity
+                self.last_error = None
+                if self._was_failing:
+                    notifications.push("Bybit connection restored - live balance is syncing again.", "success")
+                self._was_failing = False
+                return equity
 
-            equity = float(account_list[0]["totalEquity"])
-            self.last_known_balance = equity
-            self.last_error = None
-            if self._was_failing:
-                notifications.push("Bybit connection restored - live balance is syncing again.", "success")
-            self._was_failing = False
-            return equity
+            self.last_error = "Bybit returned no account data for this key."
+            self._note_failure()
+            return None
         except Exception as exc:
             self.last_error = f"Bybit request failed: {exc}"
             self._note_failure()
@@ -538,6 +618,10 @@ class AITradingAgent:
             )
             return None
 
+        if self.current_price <= 0:
+            print(f"[PILLAR 3: AI AGENT] Skipping entry — invalid current_price ({self.current_price}) on {self.active_pair}.")
+            return None
+
         # RULE 1: 1% margin, 100x leverage -> position_size = margin * leverage
         margin = round(self.current_capital * self.margin_pct, 2)
         position_size = round(margin * self.leverage, 2)
@@ -632,7 +716,19 @@ class AITradingAgent:
         timer, the RULE 5 portfolio kill switch, the optional daily-profit
         target, and the RULE 4/6 trailing-lock exit (net-of-fees profit booking).
         `volume_increment` is accepted for feed compatibility but unused now. """
-        self.current_price = new_price
+        clean_price = _sanitize_market_price(new_price)
+        if clean_price is None:
+            print(f"[PILLAR 3: AI AGENT] Ignoring invalid market tick: {new_price!r}")
+            return
+        self.current_price = clean_price
+
+        corrupt = [t for t in self.trades if t.get("entry", 0) <= 0]
+        if corrupt:
+            self.trades = [t for t in self.trades if t.get("entry", 0) > 0]
+            notifications.push(
+                f"Removed {len(corrupt)} corrupt position(s) with invalid entry prices on {self.active_pair}.",
+                "warning",
+            )
 
         # RULE 8: Backend Timer (Source of Truth) - Auto-execute emergency exit if 30 seconds pass with no response
         now = time.time()
@@ -850,6 +946,36 @@ def get_bybit_symbol(pair_label):
     symbol = (pair_label or "").split("/")[0]
     return BYBIT_SYMBOL_MAP.get(symbol)
 
+async def fetch_bybit_spot_price(pair_label):
+    """ Latest spot last price for pair switching / seeding current_price. """
+    symbol = get_bybit_symbol(pair_label)
+    if not symbol:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            resp = await client.get(
+                f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol}"
+            )
+        if resp.status_code != 200:
+            return None
+        body = resp.json()
+        item = body.get("result", {}).get("list", [{}])[0]
+        price = float(item.get("lastPrice", 0))
+        return price if price > 0 else None
+    except Exception as exc:
+        print(f"[MARKET FEED] Could not fetch spot price for {pair_label}: {exc}")
+        return None
+
+def _sanitize_market_price(price):
+    """ Reject corrupt ticks so entries/PnL never use zero or negative prices. """
+    try:
+        value = float(price)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
 # Tracks the last time binance_price_feed successfully processed a REAL tick,
 # so market_simulator can tell "actively receiving real data" apart from
 # "silently stuck" (network hiccup, DNS issue, host blocking outbound, etc.)
@@ -888,16 +1014,22 @@ async def market_simulator():
     """ Synthetic random-walk price - runs whenever the active pair has no
     real market-data mapping, AND as a self-healing fallback if the real
     feed hasn't delivered a tick recently (so current_price can never stay
-    permanently frozen even if the real feed silently breaks). """
+    permanently frozen even if the real feed silently breaks).
+
+    Uses percentage volatility (not fixed ±$10) so low-priced coins like SOL
+    cannot drift into zero/negative prices and corrupt entry levels. """
     while True:
         no_real_feed = get_bybit_symbol(agent.active_pair) is None
         real_feed_stale = (time.time() - _last_real_feed_update) > REAL_FEED_STALE_AFTER_SECONDS
         if no_real_feed or real_feed_stale:
-            volatility = random.uniform(-10, 10)
-            new_price = agent.current_price + volatility
-            # Simulate a live trade-volume tick (baseline + occasional surges to demonstrate Rule 3)
+            base = _sanitize_market_price(agent.current_price)
+            if base is None:
+                base = 1.0
+                agent.current_price = base
+            volatility_pct = random.uniform(-0.002, 0.002)
+            new_price = max(base * (1 + volatility_pct), base * 0.0001)
             volume_increment = random.uniform(0.5, 3.0)
-            if random.random() < 0.03:  # occasional volume spike burst
+            if random.random() < 0.03:
                 volume_increment *= random.uniform(3, 6)
             await agent.process_tick(new_price, volume_increment)
         await asyncio.sleep(0.5)
@@ -1097,8 +1229,20 @@ async def close_trade(payload: CloseTradePayload):
 @app.post("/set-pair")
 async def set_pair(payload: SetPairPayload):
     """ Switches the agent's single focused trading pair. Clears any prior positions. """
-    agent.set_active_pair(payload.pair, payload.price)
-    return {"status": "success", "message": f"Active trading pair set to {payload.pair}.", "pair": agent.active_pair}
+    global _last_real_feed_update
+    live_price = await fetch_bybit_spot_price(payload.pair)
+    seed_price = live_price if live_price is not None else _sanitize_market_price(payload.price)
+    if seed_price is None:
+        return {"status": "error", "message": f"Could not resolve a valid market price for {payload.pair}."}
+    agent.set_active_pair(payload.pair, seed_price)
+    _last_real_feed_update = time.time()
+    source = "Bybit live" if live_price is not None else "fallback"
+    return {
+        "status": "success",
+        "message": f"Active trading pair set to {payload.pair} @ ${seed_price:,.4f} ({source}).",
+        "pair": agent.active_pair,
+        "price": seed_price,
+    }
 
 class SetTimeframePayload(BaseModel):
     seconds: int
