@@ -660,18 +660,46 @@ class AITradingAgent:
                 self.execute_sell(f"RULE 4: Reversal Sell (Peak NET {self.peak_net_pct:.3f}% dropped 0.02%). Market SELL.")
 
     def execute_sell(self, reason):
-        # RULE 7: Exit orders are Market Orders. Realize TRUE NET P&L into current_capital.
+        # RULE 4/6 & 7: Profit-protection sell. Exit orders are Market Orders.
+        # ONLY trades currently in TRUE NET profit (green / net_pct > 0) are closed -
+        # their gains are realized into current_capital. Trades still in loss (red /
+        # net_pct <= 0) are LEFT OPEN so they have room to recover back into profit;
+        # selling them here would lock in a loss, which is the opposite of what a
+        # profit-protection trailing lock exists to do. The RULE 5/8 emergency kill
+        # switch uses _close_all_positions() instead, which still sells everything.
         print(f"[PILLAR 3: AI AGENT] Output -> SELL REQUIRED: {reason}")
-        for trade in self.trades:
-            m = self._trade_metrics(trade)
+
+        scored = [(t, self._trade_metrics(t)) for t in self.trades]
+        winners = [(t, m) for (t, m) in scored if m["net_pct"] > 0]
+        held = [t for (t, m) in scored if m["net_pct"] <= 0]
+
+        if not winners:
+            print("[PILLAR 3: AI AGENT] No trades currently in net profit - holding all red positions until they turn green.")
+            return
+
+        for trade, m in winners:
             self.current_capital += m["net_usd"]
             bybit_api.execute_market_sell(trade["pair"], f"{reason} | Realized Net P&L: ${m['net_usd']:.2f} ({m['net_pct']:.3f}%)")
             notifications.push(f"Position #{trade['id']} CLOSED on {trade['pair']} | Net P&L: ${m['net_usd']:.2f} ({m['net_pct']:.3f}%)",
                                 "success" if m["net_usd"] >= 0 else "error")
 
-        self.trades = []
-        self.is_lock_active = False
-        self.peak_net_pct = 0.0
+        # Keep only the still-red (losing) positions open for recovery.
+        self.trades = held
+
+        # Recompute trailing-lock state off whatever remains.
+        if not self.trades:
+            self.is_lock_active = False
+            self.peak_net_pct = 0.0
+        else:
+            remaining = [self._trade_metrics(t)["net_pct"] for t in self.trades]
+            new_avg = sum(remaining) / len(remaining)
+            if new_avg < 0.07:
+                # Everything left is under the activation line - drop the lock until
+                # the held positions climb back above +0.07 and start a fresh trail.
+                self.is_lock_active = False
+                self.peak_net_pct = 0.0
+            else:
+                self.peak_net_pct = min(self.peak_net_pct, new_avg)
 
     def _close_all_positions(self, reason):
         """ RULE 5 & 7: Unconditional 'SELL ALL' via Market Order, realizing whatever net P&L remains. """
