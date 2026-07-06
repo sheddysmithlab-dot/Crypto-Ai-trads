@@ -16,6 +16,9 @@ export default function Header({
   totalCapital,
   dailyProfit,
   dailyProfitPct,
+  seasonProfit,
+  seasonProfitPct,
+  seasonActive,
   tradesCount,
   apiStatus,
   tradingMode,
@@ -28,10 +31,16 @@ export default function Header({
   onOpenSettings,
 }) {
   const isProfit = dailyProfit >= 0;
+  const isSeasonProfit = seasonProfit >= 0;
   const capStr = totalCapital.toLocaleString('en-US', { minimumFractionDigits: 2 });
   const profitStr = `${isProfit ? '+' : '-'}$${Math.abs(dailyProfit).toLocaleString('en-US', {
     minimumFractionDigits: 2,
   })} (${isProfit ? '+' : ''}${dailyProfitPct.toFixed(2)}%)`;
+  const seasonStr = seasonActive
+    ? `${isSeasonProfit ? '+' : '-'}$${Math.abs(seasonProfit).toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+      })} (${isSeasonProfit ? '+' : ''}${seasonProfitPct.toFixed(2)}%)`
+    : '$0.00 (0.00%)';
   const isLive = tradingMode === 'LIVE_TRADING';
 
   return (
@@ -52,6 +61,16 @@ export default function Header({
         <div className="flex flex-col">
           <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Daily Profit</span>
           <span className={`font-bold text-sm ${isProfit ? 'text-green-500' : 'text-red-500'}`}>{profitStr}</span>
+        </div>
+        <div className="flex flex-col">
+          <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">AI Season Profit</span>
+          <span
+            className={`font-bold text-sm ${
+              !seasonActive ? 'text-gray-400' : isSeasonProfit ? 'text-green-500' : 'text-red-500'
+            }`}
+          >
+            {seasonStr}
+          </span>
         </div>
         <div className="flex flex-col">
           <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Open Positions</span>

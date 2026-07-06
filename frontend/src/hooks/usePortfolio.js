@@ -6,8 +6,11 @@ import { WS_BASE } from '../config/api';
 export function usePortfolio(setConnected, { onEmergencyTriggered } = {}) {
   const [portfolio, setPortfolio] = useState({
     totalCapital: 142560.88,
-    dailyProfit: 1894.45,
-    dailyProfitPct: 1.35,
+    dailyProfit: 0,
+    dailyProfitPct: 0,
+    seasonProfit: 0,
+    seasonProfitPct: 0,
+    seasonActive: false,
     isActive: false,
     tradingMode: null,
   });
@@ -29,7 +32,10 @@ export function usePortfolio(setConnected, { onEmergencyTriggered } = {}) {
           totalCapital: data.total_portfolio_value,
           dailyProfit: data.daily_profit,
           dailyProfitPct: data.daily_profit_pct,
-          isActive: data.emergency ? true : data.is_active,
+          seasonProfit: data.ai_season_profit ?? 0,
+          seasonProfitPct: data.ai_season_profit_pct ?? 0,
+          seasonActive: Boolean(data.ai_season_active),
+          isActive: data.is_active,
           tradingMode: data.trading_mode,
         });
 

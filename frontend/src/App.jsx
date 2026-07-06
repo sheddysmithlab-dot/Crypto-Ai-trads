@@ -180,6 +180,9 @@ export default function App() {
         totalCapital={displayCapital}
         dailyProfit={portfolio.dailyProfit}
         dailyProfitPct={portfolio.dailyProfitPct}
+        seasonProfit={portfolio.seasonProfit}
+        seasonProfitPct={portfolio.seasonProfitPct}
+        seasonActive={portfolio.seasonActive}
         tradesCount={trades.length}
         apiStatus={apiStatus}
         tradingMode={portfolio.tradingMode}
@@ -192,7 +195,13 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
       />
 
-      <MobilePortfolioCard totalCapital={displayCapital} dailyProfit={portfolio.dailyProfit} tradesCount={trades.length} />
+      <MobilePortfolioCard
+        totalCapital={displayCapital}
+        dailyProfit={portfolio.dailyProfit}
+        seasonProfit={portfolio.seasonProfit}
+        seasonActive={portfolio.seasonActive}
+        tradesCount={trades.length}
+      />
 
       <main className="flex-grow p-2 lg:p-4 space-y-3">
         <ChartPanel

@@ -404,6 +404,10 @@ class AITradingAgent:
         # halted (existing positions keep being managed by the trailing lock).
         self.daily_profit_target_pct = 0.0
         self.daily_target_reached = False
+        # AI Season: profit tracked from the moment START AI AUTOMATION is clicked
+        # until STOP / Emergency Exit. Used for header display AND as the RULE 5/8
+        # kill-switch baseline (so loss % is vs session start, not old paper capital).
+        self.ai_season_start_capital = None
 
         # RULE 1: Position Sizing & Leverage (The "100/1" Rule)
         self.leverage = 100
@@ -459,6 +463,31 @@ class AITradingAgent:
         if bybit_api.mode == "LIVE_TRADING" and bybit_api.last_known_balance is not None:
             return bybit_api.last_known_balance
         return self.current_capital + self.get_unrealized_net_usd()
+
+    def get_session_baseline(self):
+        """ Baseline for RULE 5/8 loss % while AI is running: the portfolio value at
+        AI season start. Falls back to paper starting_capital when no season is active. """
+        if self.ai_season_start_capital is not None:
+            return self.ai_season_start_capital
+        return self.starting_capital
+
+    def begin_ai_season(self):
+        """ Called when START AI AUTOMATION fires — resets season P&L and kill-switch baseline. """
+        self.ai_season_start_capital = self.get_total_portfolio_value()
+        print(f"[AI SEASON] Started. Baseline ${self.ai_season_start_capital:,.2f} (season profit + stop-loss tracking).")
+
+    def end_ai_season(self):
+        """ Called on STOP / Emergency Exit — clears season profit and kill-switch baseline. """
+        if self.ai_season_start_capital is not None:
+            print("[AI SEASON] Ended. Season profit tracking reset.")
+        self.ai_season_start_capital = None
+
+    def clear_emergency_state(self):
+        """ Fully clears RULE 8 emergency flags so the popup cannot re-fire on the next start. """
+        self.emergency_triggered = False
+        self.emergency_awaiting_decision = False
+        self.emergency_trigger_time = None
+        self.emergency_auto_kill_executed = False
 
     def set_paper_capital(self, amount):
         """ Resets the simulated PAPER_TRADING balance to a new starting amount.
@@ -615,27 +644,29 @@ class AITradingAgent:
                 # actually selling positions now (they were left running during the 30s window).
                 print(f"[RULE 8: AUTO-KILL] 30-second countdown expired. Backend auto-executing EMERGENCY EXIT.")
                 self.emergency_auto_kill_executed = True
-                self.emergency_awaiting_decision = False  # decision defaulted to Exit - stop showing the popup
                 self._close_all_positions("EMERGENCY SELL ALL TRIGGERED | RULE 8 30s auto-kill (no response)")
-                self.is_active = False  # Stop all processing
+                self.is_active = False
+                self.clear_emergency_state()
+                self.end_ai_season()
                 notifications.push("⚠️ RULE 8: 30-second timeout reached. System auto-halted.", "error")
                 return
 
         # (Entry logic removed - see auto_buy_loop() for the 10s unconditional fire & hold.)
 
-        if not self.trades:
+        total_value = self.get_total_portfolio_value()
+        baseline = self.get_session_baseline()
+        portfolio_drop = ((baseline - total_value) / baseline) * 100 if baseline else 0.0
+
+        # RULE 5/8: Kill switch vs AI-season baseline (not lifetime paper capital).
+        if (self.is_active and portfolio_drop >= self.max_loss_pct
+                and not self.emergency_triggered):
+            self.trigger_emergency_exit(
+                reason=f"RULE 5: {self.max_loss_pct:.1f}% Session Stop-Loss Hit! "
+                       f"(Total Value ${total_value:,.2f}, baseline ${baseline:,.2f})."
+            )
             return
 
-        # RULE 5: Master Kill Switch - checked against TOTAL portfolio value (realized + unrealized)
-        total_value = self.get_total_portfolio_value()
-        portfolio_drop = ((self.starting_capital - total_value) / self.starting_capital) * 100
-
-        # RULE 8: Only trigger emergency if:
-        # 1. Loss is >= threshold (not already triggered in this session)
-        # 2. We're not already in emergency state
-        if (portfolio_drop >= self.max_loss_pct
-            and not self.emergency_triggered):
-            self.trigger_emergency_exit(reason=f"RULE 5: {self.max_loss_pct:.1f}% Portfolio Stop-Loss Hit! (Total Value ${total_value:,.2f}). Selling All unconditionally.")
+        if not self.trades:
             return
 
         # AI Agent Instructions modal: optional "Capital profit of the day" target.
@@ -758,11 +789,15 @@ class AITradingAgent:
     def confirm_emergency_exit(self):
         """ User clicked 'EMERGENCY EXIT' on an ACTIVE RULE 8 popup (or the frontend's 30s
         fallback timer fired) - THIS is where positions actually get sold, not at the
-        initial 2.5% detection. """
+        initial stop-loss detection. Fully resets emergency + AI season so the popup
+        cannot immediately re-fire on the next page load or restart. """
         print("[RULE 8: EMERGENCY EXIT CONFIRMED] Selling all positions and halting.")
         self._close_all_positions("EMERGENCY SELL ALL TRIGGERED | RULE 8 confirmed by user")
-        self.emergency_awaiting_decision = False
         self.is_active = False
+        self.clear_emergency_state()
+        self.end_ai_season()
+        self.peak_net_pct = 0.0
+        self.is_lock_active = False
 
     def manual_stop(self, reason="Manual Kill Switch Activated from Frontend"):
         """ Plain STOP TRADING button click - a deliberate user action with NO portfolio-loss
@@ -771,15 +806,13 @@ class AITradingAgent:
         print(f"[PILLAR 2: BACKEND] {reason}")
         self._close_all_positions(reason)
         self.is_active = False
+        self.end_ai_season()
 
     def resume_trading_with_higher_buffer(self):
         """ User chose 'CONTINUE' on the risk popup: raise the cumulative stop-loss
         ceiling by another 2.5% (2.5% -> 5% -> 7.5% ...) and resume trading. """
         self.max_loss_pct += 2.5
-        self.emergency_triggered = False
-        self.emergency_awaiting_decision = False
-        self.emergency_trigger_time = None  # RULE 8: Reset the 30-second timer
-        self.emergency_auto_kill_executed = False  # RULE 8: Reset auto-kill flag
+        self.clear_emergency_state()
         self.is_active = True
         print(f"[RULE 8: CONTINUE CHOSEN] Trading resumed by user choice. New cumulative stop-loss threshold: {self.max_loss_pct}%.")
         notifications.push(f"✅ RULE 8: User chose CONTINUE. Trading resumed - stop-loss threshold raised to {self.max_loss_pct:.1f}%.", "warning")
@@ -951,12 +984,10 @@ async def start_background_tasks():
 # ==========================================
 @app.post("/start-bot")
 async def start_bot():
-    agent.is_active = True
-    agent.emergency_triggered = False
-    agent.emergency_awaiting_decision = False
-    agent.emergency_trigger_time = None  # RULE 8: Reset timer
-    agent.emergency_auto_kill_executed = False  # RULE 8: Reset auto-kill flag
+    agent.clear_emergency_state()
     agent.daily_target_reached = False  # fresh session -> clear any prior daily-target halt
+    agent.begin_ai_season()  # season P&L + kill-switch baseline = portfolio value right now
+    agent.is_active = True
     print("[PILLAR 2: BACKEND] Received 'START' from Frontend. AI Agent awakened.")
     notifications.push(f"AI Agent STARTED - now monitoring {agent.active_pair} live.", "success")
     return {"status": "success", "message": "Bot active & trailing logic initialized."}
@@ -1229,11 +1260,20 @@ async def portfolio_feed(websocket: WebSocket):
             # RULE 6: current_capital now only changes via REALIZED trade P&L (execute_sell /
             # trigger_emergency_exit), never a random walk - this is the true capital ledger.
             total_value = agent.get_total_portfolio_value()
+            # Daily profit = vs paper-account starting capital (lifetime account P&L).
             daily_profit = total_value - agent.starting_capital
-            daily_profit_pct = (daily_profit / agent.starting_capital) * 100
+            daily_profit_pct = (daily_profit / agent.starting_capital) * 100 if agent.starting_capital else 0
 
-            # RULE 5: Calculate actual portfolio loss percentage for emergency threshold display
-            portfolio_drop = ((agent.starting_capital - total_value) / agent.starting_capital) * 100
+            # AI Season profit = vs capital at the moment START AI AUTOMATION was clicked.
+            if agent.ai_season_start_capital is not None and agent.is_active:
+                ai_season_profit = total_value - agent.ai_season_start_capital
+                ai_season_profit_pct = (ai_season_profit / agent.ai_season_start_capital) * 100
+            else:
+                ai_season_profit = 0.0
+                ai_season_profit_pct = 0.0
+
+            baseline = agent.get_session_baseline()
+            portfolio_drop = ((baseline - total_value) / baseline) * 100 if baseline else 0
 
             payload = {
                 "capital": round(agent.current_capital, 2),
@@ -1241,7 +1281,10 @@ async def portfolio_feed(websocket: WebSocket):
                 "trading_mode": bybit_api.mode,
                 "daily_profit": round(daily_profit, 2),
                 "daily_profit_pct": round(daily_profit_pct, 2),
-                "portfolio_drop_pct": round(portfolio_drop, 2),  # RULE 8: Actual loss for emergency modal
+                "ai_season_profit": round(ai_season_profit, 2),
+                "ai_season_profit_pct": round(ai_season_profit_pct, 2),
+                "ai_season_active": agent.ai_season_start_capital is not None and agent.is_active,
+                "portfolio_drop_pct": round(portfolio_drop, 2),  # RULE 8: session loss for emergency modal
                 "is_active": agent.is_active,
                 # RULE 8: Only true while a decision is genuinely pending - NOT emergency_triggered,
                 # which stays true long after resolution and would otherwise re-pop the modal on
