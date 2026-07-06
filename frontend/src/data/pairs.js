@@ -10,7 +10,25 @@ export const TRADING_PAIRS = [
   { symbol: 'BNB', icon: 'B', color: '#f3ba2f', starred: false, price: 612.3 },
 ];
 
+// Primary chart feed — this bot trades on Bybit spot; all dropdown pairs are listed there.
+export const BYBIT_SYMBOL_MAP = {
+  BTC: 'BTCUSDT',
+  ETH: 'ETHUSDT',
+  SOL: 'SOLUSDT',
+  BNB: 'BNBUSDT',
+  MNT: 'MNTUSDT',
+  HYPE: 'HYPEUSDT',
+  SLX: 'SLXUSDT',
+  GRAM: 'GRAMUSDT',
+  CSPR: 'CSPRUSDT',
+};
+
 export const BINANCE_SYMBOL_MAP = { BTC: 'btcusdt', ETH: 'ethusdt', SOL: 'solusdt', BNB: 'bnbusdt' };
+
+export function getBybitSymbol(pairLabel) {
+  const symbol = (pairLabel || '').split('/')[0];
+  return BYBIT_SYMBOL_MAP[symbol] || null;
+}
 
 export function getBinanceSymbol(pairLabel) {
   const symbol = (pairLabel || '').split('/')[0];

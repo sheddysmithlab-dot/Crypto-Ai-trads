@@ -1,25 +1,36 @@
 import { useEffect, useState } from 'react';
-import { getBinanceSymbol } from '../data/pairs';
+import { getBinanceSymbol, getBybitSymbol } from '../data/pairs';
 
 const REFRESH_MS = 30000;
 
-// 24h high/low for the currently active pair, pulled from Binance's free
-// public 24hr ticker endpoint. Re-fetches whenever the pair changes (so
-// switching coins in the dropdown updates these too) and on a timer.
+// 24h high/low for the active pair from Bybit public tickers (Binance fallback).
 export function useDayStats(pairLabel) {
   const [stats, setStats] = useState({ high: null, low: null });
 
   useEffect(() => {
     let cancelled = false;
+    const bybitSymbol = getBybitSymbol(pairLabel);
     const binanceSymbol = getBinanceSymbol(pairLabel);
 
-    if (!binanceSymbol) {
+    if (!bybitSymbol && !binanceSymbol) {
       setStats({ high: null, low: null });
       return undefined;
     }
 
     async function fetchStats() {
       try {
+        if (bybitSymbol) {
+          const res = await fetch(`https://api.bybit.com/v5/market/tickers?category=spot&symbol=${bybitSymbol}`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const json = await res.json();
+          const item = json?.result?.list?.[0];
+          if (!item) throw new Error('Empty ticker');
+          if (!cancelled) {
+            setStats({ high: parseFloat(item.highPrice24h), low: parseFloat(item.lowPrice24h) });
+          }
+          return;
+        }
+
         const res = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${binanceSymbol.toUpperCase()}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();

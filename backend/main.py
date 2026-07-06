@@ -834,7 +834,17 @@ agent = AITradingAgent()
 # Binance blocks/throttles this hosting provider's server IP range
 # specifically, not a protocol/port issue. Bybit's public API has no such
 # problem, verified working from this exact backend.
-BYBIT_SYMBOL_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT", "BNB": "BNBUSDT"}
+BYBIT_SYMBOL_MAP = {
+    "BTC": "BTCUSDT",
+    "ETH": "ETHUSDT",
+    "SOL": "SOLUSDT",
+    "BNB": "BNBUSDT",
+    "MNT": "MNTUSDT",
+    "HYPE": "HYPEUSDT",
+    "SLX": "SLXUSDT",
+    "GRAM": "GRAMUSDT",
+    "CSPR": "CSPRUSDT",
+}
 
 def get_bybit_symbol(pair_label):
     symbol = (pair_label or "").split("/")[0]
