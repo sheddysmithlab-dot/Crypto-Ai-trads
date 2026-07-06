@@ -128,7 +128,7 @@ class SettingsStore:
 settings_store = SettingsStore()
 
 # ==========================================
-# AI PROVIDER: real confirmation layer for RULE 3 signals
+# AI PROVIDER: settings connectivity test (OpenAI-compatible chat completions)
 # ==========================================
 # Per-provider defaults - only the API key is mandatory; base_url/model can
 # be overridden from the Settings form. Azure OpenAI has no universal base
@@ -376,19 +376,9 @@ class AITradingAgent:
         self.trade_seq = 0
         self.trades = []  # list of {id, pair, side, entry, margin, position_size, entry_fee_usd}
 
-        # RULE 2: Dynamic Timeframe Syncing (Front-end -> Back-end)
-        self.timeframe_seconds = 30  # default "30 seconds" (matches the chart's default), synced live from the UI
-
-        # RULE 3: Volume Anomaly entry condition - live candle simulation state
-        self.candle_open_time = None
-        self.candle_volume = 0.0
-        self.prev_candle_volume = 0.0
-        self.candle_high = None
-        self.candle_low = None
-        self.prev_candle_height = 0.0
-        # Previous candle's volume must clear this floor before the 2x check even applies,
-        # so a 2x jump in a dead/thin market doesn't false-trigger an entry.
-        self.min_base_volume = 50.0
+        # Chart-only timeframe (kept so the frontend's /set-timeframe call still
+        # works). Entries no longer read candles - they fire on a 10s cadence.
+        self.timeframe_seconds = 30
 
     def _trade_metrics(self, t):
         """ RULE 6: True Net Profit = Gross Profit - (Entry Fee + Estimated Exit Fee).
@@ -437,23 +427,18 @@ class AITradingAgent:
         print(f"[PILLAR 3: AI AGENT] Paper trading capital reset to ${amount:,.2f}.")
 
     def set_timeframe(self, seconds):
-        """ RULE 2: Dynamic Timeframe Syncing - the UI's selected timeframe drives
-        exactly which candle interval the agent reads volume/price data on. """
+        """ Chart-only timeframe sync (frontend -> backend). The UI's selected
+        timeframe is stored for display purposes; entries no longer depend on
+        candles - they fire on a 10s unconditional cadence (auto_buy_loop). """
         self.timeframe_seconds = seconds
-        self.candle_open_time = None  # force a fresh candle bucket on the new interval
-        self.candle_volume = 0.0
-        self.prev_candle_volume = 0.0
-        self.candle_high = None
-        self.candle_low = None
-        self.prev_candle_height = 0.0
-        print(f"[RULE 2: TIMEFRAME SYNC] Backend now reading {seconds}s candles (synced from Front-end).")
+        print(f"[TIMEFRAME SYNC] Backend timeframe set to {seconds}s (chart-only; entries are 10s unconditional).")
 
     def open_trade(self, side="LONG", reason="Manual", source="auto"):
         """ RULE 1: Opens a position sized at EXACTLY 1% margin of current total capital,
         with 100x leverage, filled as a Market Order (RULE 7) with simulated minor slippage.
-        `source` tags who opened it - "auto" (RULE 3 volume-anomaly pyramiding) or "manual"
-        (the dashboard's manual BUY button) - so the manual SELL button can tell them apart
-        and only ever close manually-opened positions. """
+        `source` tags who opened it - "auto" (the 10s unconditional auto-buy loop) or
+        "manual" (the dashboard's manual BUY button) - so the manual SELL button can
+        tell them apart and only ever close manually-opened positions. """
         if not self.is_active or self.emergency_triggered:
             return None
         # AI Agent Instructions modal: cap stacked positions at max_concurrent_trades.
@@ -528,12 +513,6 @@ class AITradingAgent:
         self.trades = []
         self.peak_net_pct = 0.0
         self.is_lock_active = False
-        self.candle_open_time = None
-        self.candle_volume = 0.0
-        self.prev_candle_volume = 0.0
-        self.candle_high = None
-        self.candle_low = None
-        self.prev_candle_height = 0.0
         print(f"[PILLAR 3: AI AGENT] Active pair switched to {pair}. Previous positions cleared (single-coin focus).")
 
     def get_trades_snapshot(self):
@@ -559,8 +538,13 @@ class AITradingAgent:
         return snapshot
 
     async def process_tick(self, new_price, volume_increment):
-        """ Runs on EVERY simulated market tick, independent of any connected UI client
-        (RULE 3: 'no lag', 'do not wait', continuous millisecond-level monitoring). """
+        """ Runs on EVERY market tick (real Bybit feed or synthetic fallback).
+        NEW POLICY: entries are NO LONGER driven by candles/volume/indicators -
+        they fire on a strict 10-second cadence from auto_buy_loop(). This tick
+        handler now only: updates the live price, runs the RULE 8 30s auto-kill
+        timer, the RULE 5 portfolio kill switch, the optional daily-profit
+        target, and the RULE 4/6 trailing-lock exit (net-of-fees profit booking).
+        `volume_increment` is accepted for feed compatibility but unused now. """
         self.current_price = new_price
 
         # RULE 8: Backend Timer (Source of Truth) - Auto-execute emergency exit if 30 seconds pass with no response
@@ -579,73 +563,7 @@ class AITradingAgent:
                 notifications.push("⚠️ RULE 8: 30-second timeout reached. System auto-halted.", "error")
                 return
 
-        # RULE 2: Candle bucketing strictly on the currently synced timeframe
-        bucket_start = int(now // self.timeframe_seconds) * self.timeframe_seconds
-        if self.candle_open_time is None:
-            self.candle_open_time = bucket_start
-            self.candle_high = new_price
-            self.candle_low = new_price
-        elif bucket_start > self.candle_open_time:
-            # Candle closed -> its volume AND height become the new baseline for the next check
-            self.prev_candle_volume = self.candle_volume
-            self.prev_candle_height = self.candle_high - self.candle_low
-            self.candle_open_time = bucket_start
-            self.candle_volume = 0.0
-            self.candle_high = new_price
-            self.candle_low = new_price
-
-        self.candle_volume += volume_increment
-        self.candle_high = max(self.candle_high, new_price)
-        self.candle_low = min(self.candle_low, new_price)
-        candle_height = self.candle_high - self.candle_low
-
-        # RULE 3: Intra-Candle Tick-Level Execution - ultra-fast, zero-delay. Does NOT
-        # wait for the candle to close, and does NOT stop after firing once: as long as
-        # the forming candle stays alive and V_live >= 2x V_prev remains true, every
-        # single qualifying tick re-evaluates height and fires another round of orders
-        # (Bybit merges these into an Average Entry Price). Base Volume Filter: the
-        # previous candle must clear MIN_BASE_VOLUME before the 2x check even applies,
-        # so a 2x jump in a dead/thin market can't false-trigger an entry.
-        if (self.is_active and not self.emergency_triggered
-                and self.prev_candle_volume > self.min_base_volume
-                and self.candle_volume >= (self.prev_candle_volume * 2)):
-            is_condition_a = candle_height >= self.prev_candle_height
-
-            # AI CONFIRMATION LAYER: if an AI provider is configured (Settings), the
-            # RULE 3 signal is sent to it for a real yes/no confirmation before any
-            # order is placed. No provider configured, or the provider errors/times
-            # out, -> fails OPEN and behaves exactly like the pure rule-based system.
-            ai_decision = await consult_ai_provider({
-                "pair": self.active_pair,
-                "condition": "A (Normal Breakout)" if is_condition_a else "B (Volume Anomaly/Accumulation)",
-                "candle_volume": self.candle_volume,
-                "prev_candle_volume": self.prev_candle_volume,
-                "candle_height": candle_height,
-                "prev_candle_height": self.prev_candle_height,
-                "current_price": self.current_price,
-            })
-
-            if ai_decision is False:
-                print(f"[AI AGENT] AI provider REJECTED the RULE 3 signal on {self.active_pair}. Entry skipped.")
-                notifications.push(f"AI provider rejected a RULE 3 buy signal on {self.active_pair} - entry skipped.", "info")
-            elif is_condition_a:
-                # Condition A: Normal Breakout - volume AND range both expanding -> 1 order, 1% margin
-                self.open_trade("LONG", reason=(
-                    f"RULE 3A: Normal Breakout (Vol {self.candle_volume:.1f} >= 2x{self.prev_candle_volume:.1f}, "
-                    f"Height {candle_height:.2f} >= {self.prev_candle_height:.2f})"
-                ))
-            else:
-                # Condition B: Volume Anomaly/Accumulation - huge volume but a tight range implies
-                # accumulation rather than a clean breakout -> stack 3 orders (3% margin combined)
-                notifications.push(
-                    f"RULE 3B: Volume Anomaly on {self.active_pair} (Vol {self.candle_volume:.1f} >= "
-                    f"2x{self.prev_candle_volume:.1f}, tight range {candle_height:.2f} < {self.prev_candle_height:.2f}) "
-                    f"- stacking 3x entries.", "info")
-                for i in range(3):
-                    self.open_trade("LONG", reason=(
-                        f"RULE 3B: Volume Anomaly/Accumulation Entry {i + 1}/3 "
-                        f"(Vol {self.candle_volume:.1f} >= 2x{self.prev_candle_volume:.1f})"
-                    ))
+        # (Entry logic removed - see auto_buy_loop() for the 10s unconditional fire & hold.)
 
         if not self.trades:
             return
@@ -794,9 +712,9 @@ class AITradingAgent:
 agent = AITradingAgent()
 
 # ==========================================
-# BACKGROUND MARKET SIMULATOR (RULE 3: continuous, UI-independent monitoring)
-# Runs regardless of whether any browser tab is connected - satisfies the
-# "no lag / do not wait" requirement for the 2x volume surge trigger.
+# BACKGROUND MARKET SIMULATOR (price feed; entries now run in auto_buy_loop)
+# Runs regardless of whether any browser tab is connected, keeping
+# current_price live for the trailing-lock exit math in process_tick.
 # ==========================================
 # Bybit's own public market data (no API key needed) - this is a Bybit bot,
 # so its real-price source should be Bybit itself. This also sidesteps a
@@ -822,6 +740,32 @@ def get_bybit_symbol(pair_label):
 _last_real_feed_update = 0.0
 REAL_FEED_STALE_AFTER_SECONDS = 10
 
+# ==========================================
+# NEW ENTRY POLICY: 10-SEC UNCONDITIONAL FIRE & HOLD
+# Replaces the old candle/volume (RULE 3) entry logic. Once the bot is active,
+# this loop fires ONE new BUY trade every 10 seconds - unconditionally, with no
+# technical-indicator gating. The max_concurrent_trades cap (Risk-based SL * 1.5,
+# set from the AI Agent Instructions modal) acts as the HOLD: when active trades
+# reach the cap, the loop skips firing; the moment a trade sells and frees a
+# slot, the next 10s tick resumes firing so the book refills to the cap.
+# Exit/profit-booking still runs in process_tick (trailing lock, kill switch).
+# ==========================================
+AUTO_BUY_INTERVAL_SECONDS = 10
+
+async def auto_buy_loop():
+    print(f"[AUTO BUY LOOP] Background task starting (every {AUTO_BUY_INTERVAL_SECONDS}s, unconditional fire & hold).")
+    while True:
+        await asyncio.sleep(AUTO_BUY_INTERVAL_SECONDS)
+        # No-op unless the bot is actively running and not in a protective halt.
+        if not agent.is_active or agent.emergency_triggered or agent.daily_target_reached:
+            continue
+        # HOLD: max capacity reached - wait for a slot to free (a sell in process_tick).
+        if len(agent.trades) >= agent.max_concurrent_trades:
+            continue
+        # FIRE: open one 1%-margin / 100x LONG. open_trade() re-checks the cap too,
+        # so a race between this loop and a manual BUY can never exceed the limit.
+        agent.open_trade("LONG", reason="10s Unconditional Auto-Buy (Time-Based Fire & Hold)")
+
 async def market_simulator():
     """ Synthetic random-walk price - runs whenever the active pair has no
     real market-data mapping, AND as a self-healing fallback if the real
@@ -841,10 +785,11 @@ async def market_simulator():
         await asyncio.sleep(0.5)
 
 async def binance_price_feed():
-    """ Keeps agent.current_price tracking REAL market prices (and real recent
-    trade volume as RULE 3's volume signal), polling Bybit's public
-    recent-trades endpoint every ~1.5s for whichever mapped pair is active.
-    Verified this delivers real price/volume from this exact backend. """
+    """ Keeps agent.current_price tracking REAL market prices, polling Bybit's
+    public recent-trades endpoint every ~1.5s for whichever mapped pair is
+    active. (Volume is folded through to process_tick for feed compatibility
+    but is no longer used for entries - those fire on a 10s cadence now.)
+    Verified this delivers real price from this exact backend. """
     global _last_real_feed_update
     print("[MARKET FEED] Background task starting (Bybit REST polling mode).")
     last_seen_trade_id = None
@@ -924,6 +869,7 @@ async def start_background_tasks():
     asyncio.create_task(binance_price_feed())
     asyncio.create_task(bybit_balance_refresher())
     asyncio.create_task(self_ping_keepalive())
+    asyncio.create_task(auto_buy_loop())
 
 # ==========================================
 # 2. REST API COMMAND "WIRES"
@@ -1157,7 +1103,7 @@ async def test_ai_connection():
         }
     return {
         "success": True,
-        "message": f"AI provider '{settings_store.ai_provider}' responded successfully (test decision: {'YES' if decision else 'NO'}). It will now confirm/reject live RULE 3 signals.",
+        "message": f"AI provider '{settings_store.ai_provider}' responded successfully (test decision: {'YES' if decision else 'NO'}). Provider is reachable and ready.",
     }
 
 @app.post("/settings/reset")
@@ -1172,10 +1118,9 @@ async def reset_settings():
 # ==========================================
 @app.websocket("/ws/market")
 async def market_feed(websocket: WebSocket):
-    """ POLICY 3 / RULE 3: Millisecond latency WebSocket for Chart & Price execution.
-    NOTE: The actual price/volume simulation and Rule 3 (2x volume surge) logic now run in
-    the independent background market_simulator() task - this endpoint only PUSHES the
-    latest agent state to connected clients (LIVE_TRADING mode / backend-driven chart source). """
+    """ Pushes the latest agent state (price, lock, peak, mode) to connected
+    clients every 500ms. Entries fire in auto_buy_loop(); this endpoint is
+    read-only and only broadcasts state for the chart / price display. """
     await websocket.accept()
     try:
         while True:
