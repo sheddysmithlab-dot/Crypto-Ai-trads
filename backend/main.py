@@ -334,6 +334,11 @@ bybit_api = BybitAPIWrapper()
 # PILLAR 3: CORE AI AGENT LOGIC (State & Rules)
 # ==========================================
 class AITradingAgent:
+    # PROFIT BOOKING POLICY (updated): 0.40% strict floor + 30% dynamic trailing
+    # from the highest peak, with a floor override. See process_tick for the math.
+    PROFIT_FLOOR_PCT = 0.40      # never sell below this net profit %
+    TRAILING_DROP_PCT = 0.30     # sell when net drops 30% from its peak
+
     def __init__(self):
         self.is_active = False
         self.emergency_triggered = False
@@ -599,19 +604,36 @@ class AITradingAgent:
         net_pcts = [self._trade_metrics(t)["net_pct"] for t in self.trades]
         avg_net_pct = sum(net_pcts) / len(net_pcts)
 
-        if avg_net_pct >= 0.07:  # Net Profit Activation (RULE 6, updated 0.07+ rule)
+        # NEW PROFIT BOOKING POLICY: 0.40% strict floor + 30% dynamic trailing.
+        # Floor: never sell below PROFIT_FLOOR_PCT net profit (after Bybit's
+        # ~0.20% fee, real profit still remains). Trailing: sell when avg net
+        # drops TRAILING_DROP_PCT (30%) from its highest peak. Example: peak
+        # +1.00% -> 30% of 1.00 = 0.30 -> sell at +0.70%. Floor override: if the
+        # peak is small enough that 30% off it would land below 0.40%, ignore the
+        # 30% rule and sell strictly at 0.40%.
+        floor = self.PROFIT_FLOOR_PCT
+        trailing_target = self.peak_net_pct * (1 - self.TRAILING_DROP_PCT)
+        floor_override = trailing_target < floor
+        effective_target = floor if floor_override else trailing_target
+
+        if avg_net_pct >= floor:
             if not self.is_lock_active:
-                notifications.push(f"Trailing Lock ACTIVATED on {self.active_pair} at +{avg_net_pct:.3f}% net profit.", "success")
-            self.is_lock_active = True
+                notifications.push(f"Trailing Lock ACTIVATED on {self.active_pair} at +{avg_net_pct:.3f}% net profit (floor {floor}%).", "success")
+                self.is_lock_active = True
             if avg_net_pct > self.peak_net_pct:
                 self.peak_net_pct = avg_net_pct  # Trail Up
-                notifications.push(f"Trailing Lock shifted up to +{avg_net_pct:.3f}% peak.", "info")
+                notifications.push(f"Trailing Lock peak shifted up to +{avg_net_pct:.3f}%.", "info")
 
-        if self.is_lock_active:
-            if avg_net_pct <= 0.05:  # Net Profit Hard Floor
-                self.execute_sell(f"RULE 4/6: Hard Floor Hit at NET {avg_net_pct:.3f}% (Limit 0.05% net-of-fees). Market SELL.")
-            elif self.peak_net_pct - avg_net_pct >= 0.02:  # Reversal Sell
-                self.execute_sell(f"RULE 4: Reversal Sell (Peak NET {self.peak_net_pct:.3f}% dropped 0.02%). Market SELL.")
+        # Fire only once we've actually retreated from the peak (avg < peak), so
+        # the lock activating at exactly the floor doesn't instantly sell.
+        if self.is_lock_active and self.peak_net_pct >= floor:
+            if avg_net_pct < self.peak_net_pct and avg_net_pct <= effective_target:
+                if floor_override:
+                    reason = (f"Profit Book: Floor Override @ {floor:.2f}% net "
+                              f"(peak {self.peak_net_pct:.3f}%, 30% drop -> {trailing_target:.3f}% would breach floor). Market SELL.")
+                else:
+                    reason = (f"Profit Book: 30% Trailing Drop (peak {self.peak_net_pct:.3f}% -> target {effective_target:.3f}%). Market SELL.")
+                self.execute_sell(reason)
 
     def execute_sell(self, reason):
         # RULE 4/6 & 7: Profit-protection sell. Exit orders are Market Orders.
@@ -647,9 +669,9 @@ class AITradingAgent:
         else:
             remaining = [self._trade_metrics(t)["net_pct"] for t in self.trades]
             new_avg = sum(remaining) / len(remaining)
-            if new_avg < 0.07:
-                # Everything left is under the activation line - drop the lock until
-                # the held positions climb back above +0.07 and start a fresh trail.
+            if new_avg < self.PROFIT_FLOOR_PCT:
+                # Everything left is under the floor - drop the lock until the held
+                # positions climb back above 0.40% and start a fresh trail.
                 self.is_lock_active = False
                 self.peak_net_pct = 0.0
             else:
