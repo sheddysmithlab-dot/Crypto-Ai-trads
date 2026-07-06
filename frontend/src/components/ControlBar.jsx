@@ -1,7 +1,10 @@
-// Only two states ever for the main button: green START TRADING (inactive)
-// or red STOP TRADING (active) - no transient "starting/stopping/halted"
-// states in between. The small SELL/BUY buttons flank it and only work
-// while the bot is active (manual trading needs a running bot).
+// Only two states ever for the main button: green START AI AUTOMATION
+// (inactive) or red STOP AI AUTOMATION (active) - no transient
+// "starting/stopping/halted" states in between.
+// BUY/SELL flank buttons are the OPPOSITE of automation: enabled by default
+// (manual trading while automation is off), disabled once START is clicked
+// (automation is running, so manual entry/exit is locked out to avoid
+// conflicting with the bot). Their underlying working policy is unchanged.
 export default function ControlBar({ botIsActive, uptime, lastUpdated, onClick, onManualBuy, onManualSell }) {
   const colorClasses = botIsActive
     ? 'bg-red-600 hover:bg-red-700 active:bg-red-800 shadow-[0_0_20px_rgba(220,38,38,0.6)] hover:shadow-[0_0_25px_rgba(220,38,38,0.8)]'
@@ -15,9 +18,9 @@ export default function ControlBar({ botIsActive, uptime, lastUpdated, onClick, 
     <div className="bg-lightCard dark:bg-darkCard border-t border-gray-300 dark:border-gray-800 px-4 py-4 shrink-0 flex flex-col items-center justify-center space-y-3">
       <div className="w-full max-w-4xl flex items-stretch gap-2">
         <button
-          className={`${sideButtonBase} ${botIsActive ? 'bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600' : sideButtonDisabled}`}
+          className={`${sideButtonBase} ${botIsActive ? sideButtonDisabled : 'bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600'}`}
           onClick={onManualBuy}
-          disabled={!botIsActive}
+          disabled={botIsActive}
           title="Manual BUY - opens a new 1% margin position (100x leverage)"
         >
           <i className="fas fa-arrow-up"></i>
@@ -31,19 +34,19 @@ export default function ControlBar({ botIsActive, uptime, lastUpdated, onClick, 
           <i className={`fas ${botIsActive ? 'fa-stop-circle' : 'fa-play'} mr-1`}></i>
           {botIsActive ? (
             <>
-              STOP TRADING <span className="font-bold">(ACTIVE)</span>
+              STOP AI AUTOMATION <span className="font-bold">(ACTIVE)</span>
             </>
           ) : (
             <>
-              START TRADING <span className="font-bold">(INACTIVE)</span>
+              START AI AUTOMATION <span className="font-bold">(INACTIVE)</span>
             </>
           )}
         </button>
 
         <button
-          className={`${sideButtonBase} ${botIsActive ? 'bg-orange-500 hover:bg-orange-400 active:bg-orange-600' : sideButtonDisabled}`}
+          className={`${sideButtonBase} ${botIsActive ? sideButtonDisabled : 'bg-orange-500 hover:bg-orange-400 active:bg-orange-600'}`}
           onClick={onManualSell}
-          disabled={!botIsActive}
+          disabled={botIsActive}
           title="Manual SELL - closes your best-performing (or least-losing) manually-opened trade"
         >
           <i className="fas fa-arrow-down"></i>
