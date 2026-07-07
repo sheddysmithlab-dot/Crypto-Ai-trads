@@ -29,6 +29,7 @@ export default function Header({
   markAllRead,
   onOpenPaperModal,
   onOpenSettings,
+  onLogout,
 }) {
   const isProfit = dailyProfit >= 0;
   const isSeasonProfit = seasonProfit >= 0;
@@ -122,8 +123,18 @@ export default function Header({
           id="settings-gear-btn"
           onClick={onOpenSettings}
           className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 transition"
+          title="Settings"
         >
           <i className="fas fa-cog text-lg text-gray-600 dark:text-gray-300"></i>
+        </button>
+
+        <button
+          type="button"
+          onClick={onLogout}
+          className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 transition"
+          title="Sign out"
+        >
+          <i className="fas fa-right-from-bracket text-gray-600 dark:text-gray-300"></i>
         </button>
 
         <div className="w-8 h-8 rounded-full bg-gray-300 dark:bg-gray-700 flex items-center justify-center overflow-hidden border border-gray-300 dark:border-gray-600">

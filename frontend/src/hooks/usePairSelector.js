@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { API_BASE } from '../config/api';
+import { authFetch } from '../config/api';
 import { debugLog } from '../config/debug';
 import { TRADING_PAIRS } from '../data/pairs';
 
@@ -20,7 +20,7 @@ export function usePairSelector() {
       debugLog(`[PAIR SELECTOR] Switching to ${fullLabel} @ $${pair.price.toFixed(2)}`);
       setActiveSymbol(symbol);
 
-      fetch(`${API_BASE}/set-pair`, {
+      authFetch('/set-pair', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pair: fullLabel, price: pair.price }),

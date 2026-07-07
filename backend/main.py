@@ -1,5 +1,6 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import asyncio
 import hashlib
@@ -12,6 +13,18 @@ import sys
 import time
 import httpx
 from dotenv import load_dotenv
+
+from auth import (
+    auth_is_configured,
+    create_session,
+    extract_bearer_token,
+    get_session_username,
+    require_ws_token,
+    revoke_token,
+    verify_credentials,
+    verify_token,
+)
+from chart_24h import chart_24h_refresh_loop, chart_24h_store
 
 # Load backend/.env on startup (local dev). On Render, set ZAI_API_KEY in the
 # service environment — values there override / supplement the file.
@@ -46,6 +59,53 @@ app.add_middleware(
 async def health_check():
     """Render's health check target - just confirms the process is alive."""
     return {"status": "ok"}
+
+# ==========================================
+# SECURE LOGIN (credentials only in env — never logged or sent to frontend)
+# ==========================================
+class LoginPayload(BaseModel):
+    username: str = ""
+    password: str = ""
+
+PUBLIC_HTTP_PATHS = {"/health", "/auth/login", "/docs", "/openapi.json", "/redoc"}
+
+@app.middleware("http")
+async def require_auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if request.method == "OPTIONS" or path in PUBLIC_HTTP_PATHS:
+        return await call_next(request)
+    token = extract_bearer_token(request.headers.get("Authorization"))
+    if not verify_token(token):
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return await call_next(request)
+
+@app.post("/auth/login")
+async def auth_login(payload: LoginPayload):
+    if not auth_is_configured():
+        return JSONResponse(
+            status_code=503,
+            content={"message": "Login is not configured on the server. Set AUTH_USERNAME and AUTH_PASSWORD."},
+        )
+    if not verify_credentials(payload.username, payload.password):
+        print("[AUTH] Failed sign-in attempt.")
+        return JSONResponse(status_code=401, content={"message": "Invalid username or password."})
+    token = create_session(payload.username.strip())
+    print("[AUTH] Session created.")
+    return {"token": token, "username": payload.username.strip()}
+
+@app.get("/auth/session")
+async def auth_session(authorization: str | None = Header(None)):
+    token = extract_bearer_token(authorization)
+    username = get_session_username(token)
+    if not username:
+        return {"authenticated": False}
+    return {"authenticated": True, "username": username}
+
+@app.post("/auth/logout")
+async def auth_logout(authorization: str | None = Header(None)):
+    token = extract_bearer_token(authorization)
+    revoke_token(token)
+    return {"status": "success", "message": "Signed out."}
 
 # ==========================================
 # LIVE NOTIFICATION CENTER (bell dropdown wiring)
@@ -1120,6 +1180,7 @@ async def start_background_tasks():
     asyncio.create_task(bybit_balance_refresher())
     asyncio.create_task(self_ping_keepalive())
     asyncio.create_task(auto_buy_loop())
+    asyncio.create_task(chart_24h_refresh_loop(BYBIT_SYMBOL_MAP))
 
 # ==========================================
 # 2. REST API COMMAND "WIRES"
@@ -1329,6 +1390,23 @@ async def get_settings_status():
     """ Returns only non-secret configuration state. Keys/secrets are never returned. """
     return settings_store.status_dict()
 
+@app.get("/chart/24h")
+async def get_chart_24h(pair: str | None = Query(None, description="e.g. BTC/USDT")):
+    """ Latest backend-persisted 24h chart snapshot (high/low + 5m candles). Refreshed every 24h. """
+    if pair:
+        entry = chart_24h_store.get_pair(pair)
+        if not entry:
+            return {
+                "pair": pair,
+                "high": None,
+                "low": None,
+                "last_price": None,
+                "candles": [],
+                "updated_at": chart_24h_store.updated_at,
+            }
+        return {"updated_at": chart_24h_store.updated_at, **entry}
+    return chart_24h_store.get_snapshot()
+
 @app.post("/settings/save")
 async def save_settings(payload: SettingsPayload):
     settings_store.save(payload)
@@ -1388,6 +1466,8 @@ async def market_feed(websocket: WebSocket):
     """ Pushes the latest agent state (price, lock, peak, mode) to connected
     clients every 500ms. Entries fire in auto_buy_loop(); this endpoint is
     read-only and only broadcasts state for the chart / price display. """
+    if not await require_ws_token(websocket):
+        return
     await websocket.accept()
     try:
         while True:
@@ -1406,6 +1486,8 @@ async def market_feed(websocket: WebSocket):
 @app.websocket("/ws/portfolio")
 async def portfolio_feed(websocket: WebSocket):
     """ Real-time Portfolio monitor & PnL pipeline """
+    if not await require_ws_token(websocket):
+        return
     await websocket.accept()
     try:
         # POLICY 4: Check live portfolio balance and lock positions immediately on connect
@@ -1457,6 +1539,8 @@ async def portfolio_feed(websocket: WebSocket):
 async def notifications_feed(websocket: WebSocket):
     """ Live feed for the bell dropdown - pushes the rolling notification list
     generated by REAL backend events (trades, locks, emergencies, connections). """
+    if not await require_ws_token(websocket):
+        return
     await websocket.accept()
     try:
         while True:
@@ -1468,6 +1552,8 @@ async def notifications_feed(websocket: WebSocket):
 @app.websocket("/ws/trades")
 async def trades_feed(websocket: WebSocket):
     """ Real-time feed of ALL live trades for the single active trading pair. """
+    if not await require_ws_token(websocket):
+        return
     await websocket.accept()
     try:
         while True:

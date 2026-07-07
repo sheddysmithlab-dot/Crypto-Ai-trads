@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { WS_BASE } from '../config/api';
+import { backendWsUrl } from '../config/api';
 
 // Single source of truth for portfolio value, daily PnL, bot active state,
 // trading mode (paper/live) and the automatic emergency-exit trigger.
@@ -21,7 +21,7 @@ export function usePortfolio(setConnected, { onEmergencyTriggered } = {}) {
 
   useEffect(() => {
     function connect() {
-      const ws = new WebSocket(`${WS_BASE}/ws/portfolio`);
+      const ws = new WebSocket(backendWsUrl('/ws/portfolio'));
 
       ws.onopen = () => setConnected('portfolio', true);
 

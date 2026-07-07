@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react';
-import { API_BASE } from './config/api';
+import { useAuth } from './hooks/useAuth.jsx';
+import { authFetch } from './config/api';
 import { debugLog } from './config/debug';
 import { useApiStatus } from './hooks/useApiStatus';
 import { usePairSelector } from './hooks/usePairSelector';
@@ -23,6 +23,7 @@ import AgentInstructionsModal from './components/AgentInstructionsModal';
 import StartConfirmModal from './components/StartConfirmModal';
 
 export default function App() {
+  const { logout } = useAuth();
   const { status: apiStatus, setConnected } = useApiStatus();
   const pairSelector = usePairSelector();
   const { trades, activePair: activeTradesPair, closeTrade, clearTrades } = useTrades(setConnected);
@@ -67,7 +68,7 @@ export default function App() {
       // That wording is reserved for a genuine RULE 5 auto-kill resolved via handleRiskExit.
       debugLog('User clicked STOP TRADING. Sending POST /emergency-exit to Backend...');
       try {
-        await fetch(`${API_BASE}/emergency-exit`, { method: 'POST' });
+        await authFetch('/emergency-exit', { method: 'POST' });
         clearTrades();
       } catch (err) {
         console.error('Emergency exit failed:', err);
@@ -92,12 +93,12 @@ export default function App() {
     setStartConfirmOpen(false);
     debugLog(`Safety check: Continue. Applying config (stopLoss=${stopLossPct}%, dailyProfit=${dailyProfitPct}%) and starting bot...`);
     try {
-      await fetch(`${API_BASE}/agent/config`, {
+      await authFetch('/agent/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ stop_loss_pct: stopLossPct, daily_profit_pct: dailyProfitPct }),
       });
-      const res = await fetch(`${API_BASE}/start-bot`, { method: 'POST' });
+      const res = await authFetch('/start-bot', { method: 'POST' });
       const data = await res.json();
       debugLog('Bot started successfully:', data.message);
     } catch (err) {
@@ -118,7 +119,7 @@ export default function App() {
     setRiskModal((r) => ({ ...r, open: false }));
     try {
       debugLog('Emergency Exit button clicked from modal');
-      await fetch(`${API_BASE}/emergency-exit`, { method: 'POST' });
+      await authFetch('/emergency-exit', { method: 'POST' });
     } catch (err) {
       console.error('Emergency exit request failed:', err);
     }
@@ -129,7 +130,7 @@ export default function App() {
   async function handleManualBuy() {
     debugLog('Manual BUY button clicked. Sending POST /open-trade to Backend...');
     try {
-      const res = await fetch(`${API_BASE}/open-trade`, {
+      const res = await authFetch('/open-trade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ side: 'LONG' }),
@@ -148,7 +149,7 @@ export default function App() {
   async function handleManualSell() {
     debugLog('Manual SELL button clicked. Sending POST /manual-sell to Backend...');
     try {
-      const res = await fetch(`${API_BASE}/manual-sell`, { method: 'POST' });
+      const res = await authFetch('/manual-sell', { method: 'POST' });
       const data = await res.json();
       if (data.status === 'error') {
         console.error('Manual SELL failed:', data.message);
@@ -164,7 +165,7 @@ export default function App() {
     setRiskModal((r) => ({ ...r, open: false }));
     try {
       debugLog('Continue button clicked - raising stop-loss threshold');
-      const res = await fetch(`${API_BASE}/continue-trading`, { method: 'POST' });
+      const res = await authFetch('/continue-trading', { method: 'POST' });
       const data = await res.json();
       debugLog('[RULE 8] ' + data.message);
     } catch (err) {
@@ -193,6 +194,7 @@ export default function App() {
         markAllRead={markAllRead}
         onOpenPaperModal={() => setPaperModalOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
+        onLogout={logout}
       />
 
       <MobilePortfolioCard

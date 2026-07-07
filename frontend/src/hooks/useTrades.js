@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { API_BASE, WS_BASE } from '../config/api';
+import { authFetch, backendWsUrl } from '../config/api';
 import { debugLog } from '../config/debug';
 
 // Live trades - populated exclusively from the backend /ws/trades feed.
@@ -13,7 +13,7 @@ export function useTrades(setConnected) {
 
   useEffect(() => {
     function connect() {
-      const ws = new WebSocket(`${WS_BASE}/ws/trades`);
+      const ws = new WebSocket(backendWsUrl('/ws/trades'));
       wsRef.current = ws;
 
       ws.onopen = () => setConnected('trades', true);
@@ -43,7 +43,7 @@ export function useTrades(setConnected) {
 
   const closeTrade = useCallback(async (id) => {
     try {
-      await fetch(`${API_BASE}/close-trade`, {
+      await authFetch('/close-trade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id }),

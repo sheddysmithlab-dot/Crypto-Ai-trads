@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { WS_BASE } from '../config/api';
+import { backendWsUrl } from '../config/api';
 
 export function timeAgo(unixSeconds) {
   const seconds = Math.floor(Date.now() / 1000 - unixSeconds);
@@ -26,7 +26,7 @@ export function useNotifications() {
 
   useEffect(() => {
     function connect() {
-      const ws = new WebSocket(`${WS_BASE}/ws/notifications`);
+      const ws = new WebSocket(backendWsUrl('/ws/notifications'));
       ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
         setNotifications(data.notifications || []);

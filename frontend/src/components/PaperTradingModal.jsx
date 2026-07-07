@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { API_BASE } from '../config/api';
+import { authFetch } from '../config/api';
 
 const PRESETS = [
   { amount: 1000, label: '$1K' },
@@ -41,7 +41,7 @@ export default function PaperTradingModal({ open, onClose, currentCapital, onCap
 
     setSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/paper-trading/set-capital`, {
+      const res = await authFetch('/paper-trading/set-capital', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ amount: value }),

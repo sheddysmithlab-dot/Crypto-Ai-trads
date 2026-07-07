@@ -16,3 +16,50 @@ export const API_BASE =
     : `${pageProtocol}://${window.location.hostname}:8000`);
 
 export const WS_BASE = API_BASE.replace('http://', 'ws://').replace('https://', 'wss://');
+
+const AUTH_TOKEN_KEY = 'dashboard_auth_token';
+
+export function getAuthToken() {
+  try {
+    return sessionStorage.getItem(AUTH_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setAuthToken(token) {
+  try {
+    sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+  } catch {
+    // ignore storage failures
+  }
+}
+
+export function clearAuthToken() {
+  try {
+    sessionStorage.removeItem(AUTH_TOKEN_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export function backendWsUrl(path) {
+  const token = getAuthToken();
+  if (!token) return `${WS_BASE}${path}`;
+  const joiner = path.includes('?') ? '&' : '?';
+  return `${WS_BASE}${path}${joiner}token=${encodeURIComponent(token)}`;
+}
+
+export async function authFetch(path, options = {}) {
+  const { skipAuthRedirect, headers: extraHeaders, ...rest } = options;
+  const headers = { ...(extraHeaders || {}) };
+  const token = getAuthToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers });
+  if (res.status === 401 && token && !skipAuthRedirect) {
+    clearAuthToken();
+    window.location.reload();
+  }
+  return res;
+}

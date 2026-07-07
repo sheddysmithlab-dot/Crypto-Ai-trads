@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createChart, CrosshairMode, LineStyle } from 'lightweight-charts';
-import { API_BASE, WS_BASE } from '../config/api';
+import { authFetch, backendWsUrl } from '../config/api';
 import { debugLog } from '../config/debug';
 import { fmtNum, getBinanceSymbol, getBybitSymbol } from '../data/pairs';
 
@@ -136,6 +136,16 @@ async function fetchRealTradesAsCandles(binanceSymbol, intervalSeconds, limit = 
   return candles;
 }
 
+async function fetchBackend24hCandles(pairLabelArg) {
+  const res = await authFetch(`/chart/24h?pair=${encodeURIComponent(pairLabelArg)}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = await res.json();
+  if (!Array.isArray(json.candles) || json.candles.length === 0) {
+    throw new Error('Empty backend 24h candles');
+  }
+  return json.candles;
+}
+
 async function loadHistoricalData(pairLabelArg, tfKey, basePrice) {
   const bybitSymbol = getBybitSymbol(pairLabelArg);
   const binanceSymbol = getBinanceSymbol(pairLabelArg);
@@ -146,6 +156,11 @@ async function loadHistoricalData(pairLabelArg, tfKey, basePrice) {
   if (!bybitSymbol && !binanceSymbol) {
     return generateMockData(basePrice, intervalSecs);
   }
+
+  const tryBackend = async () => {
+    if (tfKey !== '5M') throw new Error('Backend snapshot is 5m / 24h only');
+    return fetchBackend24hCandles(pairLabelArg);
+  };
 
   const tryBybit = async () => {
     if (!bybitSymbol) throw new Error('No Bybit symbol');
@@ -160,6 +175,13 @@ async function loadHistoricalData(pairLabelArg, tfKey, basePrice) {
   };
 
   try {
+    if (tfKey === '5M') {
+      try {
+        return await tryBackend();
+      } catch (backendErr) {
+        console.warn(`[CHART] Backend 24h snapshot unavailable for ${pairLabelArg}:`, backendErr);
+      }
+    }
     return await tryBybit();
   } catch (bybitErr) {
     console.warn(`[CHART] Bybit history failed for ${pairLabelArg} (${tfKey}):`, bybitErr);
@@ -502,7 +524,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
 
       // RULE 2: Dynamic Timeframe Syncing - tell the backend AI Agent to read
       // volume/price data on this exact interval from now on.
-      fetch(`${API_BASE}/set-timeframe`, {
+      authFetch('/set-timeframe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ seconds: currentIntervalRef.current }),
@@ -589,7 +611,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     // RULE 2: Sync the default timeframe to the backend on load too, not just on every
     // subsequent switchTimeframe click, so a fresh page load and a fresh backend start
     // agree on the candle interval from the very first tick.
-    fetch(`${API_BASE}/set-timeframe`, {
+    authFetch('/set-timeframe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ seconds: currentIntervalRef.current }),
@@ -615,7 +637,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     let marketWs;
     let marketReconnectTimer;
     function connectMarketWS() {
-      const ws = new WebSocket(`${WS_BASE}/ws/market`);
+      const ws = new WebSocket(backendWsUrl('/ws/market'));
       marketWs = ws;
 
       ws.onopen = () => {
@@ -658,7 +680,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     connectMarketWS();
 
     // Determine the initial chart data source (Paper -> free feed, Live -> backend/Bybit)
-    fetch(`${API_BASE}/trading-mode`)
+    authFetch('/trading-mode')
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();

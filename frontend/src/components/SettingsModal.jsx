@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { API_BASE } from '../config/api';
+import { authFetch } from '../config/api';
 
 const TONE_CLASSES = {
   neutral: 'bg-emerald-900/20 border-emerald-700/40 text-emerald-300',
@@ -21,7 +21,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
 
   async function refreshStatus() {
     try {
-      const res = await fetch(`${API_BASE}/settings/status`);
+      const res = await authFetch('/settings/status');
       const data = await res.json();
 
       const bybitLabel = data.bybit_configured ? `Bybit: configured (${data.bybit_environment})` : 'Bybit: not configured';
@@ -67,7 +67,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
         ai_model: aiModel.trim(),
         ai_base_url: aiBaseUrl.trim(),
       };
-      const res = await fetch(`${API_BASE}/settings/save`, {
+      const res = await authFetch('/settings/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -94,7 +94,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
     setBusy((b) => ({ ...b, testBybit: true }));
     try {
       // Apply environment + any newly typed keys before testing stored credentials.
-      const saveRes = await fetch(`${API_BASE}/settings/save`, {
+      const saveRes = await authFetch('/settings/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -113,12 +113,12 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
         return;
       }
 
-      const res = await fetch(`${API_BASE}/settings/test-bybit`, { method: 'POST' });
+      const res = await authFetch('/settings/test-bybit', { method: 'POST' });
       const data = await res.json();
       setBanner({ tone: data.success ? 'success' : 'error', message: data.message });
 
       if (data.success) {
-        const connectRes = await fetch(`${API_BASE}/connect-bybit`, { method: 'POST' });
+        const connectRes = await authFetch('/connect-bybit', { method: 'POST' });
         const connectData = await connectRes.json();
         setBanner({ tone: 'success', message: `${data.message} ${connectData.message}` });
         onLiveTradingConnected?.();
@@ -133,7 +133,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
   async function handleTestAi() {
     setBusy((b) => ({ ...b, testAi: true }));
     try {
-      const res = await fetch(`${API_BASE}/settings/test-ai`, { method: 'POST' });
+      const res = await authFetch('/settings/test-ai', { method: 'POST' });
       const data = await res.json();
       setBanner({ tone: data.success ? 'success' : 'error', message: data.message });
     } catch {
@@ -147,7 +147,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
     if (!confirm('Reset all stored API settings? This cannot be undone.')) return;
     setBusy((b) => ({ ...b, reset: true }));
     try {
-      const res = await fetch(`${API_BASE}/settings/reset`, { method: 'POST' });
+      const res = await authFetch('/settings/reset', { method: 'POST' });
       const data = await res.json();
       setBybitKey('');
       setBybitSecret('');
