@@ -7,6 +7,7 @@ import { debugLog } from '../config/debug';
 // real-time state for the single active trading pair (multiple stacked trades allowed).
 export function useTrades(setConnected) {
   const [trades, setTrades] = useState([]);
+  const [activeCount, setActiveCount] = useState(0);
   const [activePair, setActivePair] = useState('BTC/USDT');
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
@@ -22,6 +23,7 @@ export function useTrades(setConnected) {
         const data = JSON.parse(event.data);
         setActivePair(data.pair);
         setTrades(data.trades);
+        setActiveCount(data.active_count ?? (data.trades || []).filter((t) => t.status !== 'sold').length);
       };
 
       ws.onclose = () => {
@@ -57,5 +59,5 @@ export function useTrades(setConnected) {
 
   const clearTrades = useCallback(() => setTrades([]), []);
 
-  return { trades, activePair, closeTrade, clearTrades };
+  return { trades, activeCount, activePair, closeTrade, clearTrades };
 }

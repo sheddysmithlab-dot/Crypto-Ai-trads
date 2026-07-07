@@ -1,6 +1,9 @@
 import { getPairMeta, fmtNum } from '../data/pairs';
 
 function StatusIcon({ trade }) {
+  if (trade.status === 'sold') {
+    return <i className="fas fa-check-double text-white/80" title="Sold"></i>;
+  }
   if (trade.status === 'locked') {
     return <i className="fas fa-lock text-blue-400" title="Trailing Lock Active"></i>;
   }
@@ -11,12 +14,12 @@ function StatusIcon({ trade }) {
   );
 }
 
-export default function LiveTradesPanel({ trades, activePair, closeTrade }) {
+export default function LiveTradesPanel({ trades, activeCount, activePair, closeTrade }) {
   return (
     <div className="bg-lightCard dark:bg-darkCard rounded-xl shadow border border-gray-200 dark:border-gray-800 overflow-hidden">
       <div className="flex justify-between items-center px-3 py-2 border-b border-gray-200 dark:border-gray-800">
         <h2 className="font-bold text-xs uppercase tracking-wide">
-          Live Trades <span className="text-blue-500">({trades.length} Active)</span>
+          Live Trades <span className="text-blue-500">({activeCount} Active)</span>
         </h2>
       </div>
 
@@ -43,9 +46,14 @@ export default function LiveTradesPanel({ trades, activePair, closeTrade }) {
             ) : (
               trades.map((trade) => {
                 const meta = getPairMeta(trade.pair);
+                const isSold = trade.status === 'sold';
                 const isProfit = trade.pnl >= 0;
-                const rowBg = isProfit ? 'bg-green-50 dark:bg-green-900/20' : 'bg-red-50 dark:bg-red-900/20';
-                const pnlColor = isProfit ? 'text-green-500' : 'text-red-500';
+                const rowBg = isSold
+                  ? 'bg-white/5 dark:bg-white/5'
+                  : isProfit
+                    ? 'bg-green-50 dark:bg-green-900/20'
+                    : 'bg-red-50 dark:bg-red-900/20';
+                const pnlColor = isSold ? 'text-white/90' : isProfit ? 'text-green-500' : 'text-red-500';
                 return (
                   <tr key={trade.id} className={`${rowBg} border-b border-gray-100 dark:border-gray-800 trade-row group`}>
                     <td className="px-3 py-1.5 font-semibold flex items-center gap-1.5">
@@ -57,8 +65,8 @@ export default function LiveTradesPanel({ trades, activePair, closeTrade }) {
                       </span>
                       {trade.pair}
                     </td>
-                    <td className={`px-3 py-1.5 ${trade.side === 'LONG' ? 'text-green-500' : 'text-red-500'} font-bold text-[10px]`}>
-                      {trade.side}
+                    <td className={`px-3 py-1.5 ${isSold ? 'text-white/80' : trade.side === 'LONG' ? 'text-green-500' : 'text-red-500'} font-bold text-[10px]`}>
+                      {trade.side} {isSold ? '(SOLD)' : ''}
                     </td>
                     <td className="px-3 py-1.5 font-mono">${fmtNum(trade.entry)}</td>
                     <td className="px-3 py-1.5 font-mono">${fmtNum(trade.current)}</td>
@@ -69,13 +77,15 @@ export default function LiveTradesPanel({ trades, activePair, closeTrade }) {
                     <td className="px-3 py-1.5">
                       <div className="flex items-center justify-end gap-1.5">
                         <StatusIcon trade={trade} />
-                        <button
-                          className="p-1 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded hover:bg-red-200 dark:hover:bg-red-900/50 transition opacity-0 group-hover:opacity-100"
-                          title="Force Close"
-                          onClick={() => closeTrade(trade.id)}
-                        >
-                          <i className="fas fa-trash text-[10px]"></i>
-                        </button>
+                        {!isSold && (
+                          <button
+                            className="p-1 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded hover:bg-red-200 dark:hover:bg-red-900/50 transition opacity-0 group-hover:opacity-100"
+                            title="Force Close"
+                            onClick={() => closeTrade(trade.id)}
+                          >
+                            <i className="fas fa-trash text-[10px]"></i>
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -93,9 +103,14 @@ export default function LiveTradesPanel({ trades, activePair, closeTrade }) {
         ) : (
           trades.map((trade) => {
             const meta = getPairMeta(trade.pair);
+            const isSold = trade.status === 'sold';
             const isProfit = trade.pnl >= 0;
-            const rowBg = isProfit ? 'bg-green-50 dark:bg-green-900/20' : 'bg-red-50 dark:bg-red-900/20';
-            const pnlColor = isProfit ? 'text-green-500' : 'text-red-500';
+            const rowBg = isSold
+              ? 'bg-white/5 dark:bg-white/5'
+              : isProfit
+                ? 'bg-green-50 dark:bg-green-900/20'
+                : 'bg-red-50 dark:bg-red-900/20';
+            const pnlColor = isSold ? 'text-white/90' : isProfit ? 'text-green-500' : 'text-red-500';
             return (
               <div key={trade.id} className={`${rowBg} p-2 flex items-center justify-between trade-row`}>
                 <div className="flex items-center gap-1.5">
@@ -107,8 +122,8 @@ export default function LiveTradesPanel({ trades, activePair, closeTrade }) {
                   </span>
                   <div>
                     <div className="font-semibold text-xs">{trade.pair}</div>
-                    <div className={`text-[10px] ${trade.side === 'LONG' ? 'text-green-500' : 'text-red-500'} font-bold`}>
-                      {trade.side}
+                    <div className={`text-[10px] ${isSold ? 'text-white/80' : trade.side === 'LONG' ? 'text-green-500' : 'text-red-500'} font-bold`}>
+                      {trade.side} {isSold ? '(SOLD)' : ''}
                     </div>
                   </div>
                 </div>

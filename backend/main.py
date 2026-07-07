@@ -559,6 +559,7 @@ class AITradingAgent:
         self.active_pair = "BTC/USDT"
         self.trade_seq = 0
         self.trades = []  # list of {id, pair, side, entry, margin, position_size, entry_fee_usd}
+        self.trade_history = []  # session list (active + sold), cleared only on START/STOP
 
         # Chart-only timeframe (kept so the frontend's /set-timeframe call still
         # works). Entries no longer read candles - they fire on a 10s cadence.
@@ -587,6 +588,36 @@ class AITradingAgent:
             "entry_fee_pct": entry_fee_pct, "exit_fee_pct": exit_fee_pct,
         }
 
+    def _append_trade_history(self, trade):
+        self.trade_history.append({
+            "id": trade["id"],
+            "pair": trade["pair"],
+            "side": trade["side"],
+            "entry": trade["entry"],
+            "current": trade["entry"],
+            "margin": trade["margin"],
+            "position_size": trade["position_size"],
+            "pnl": 0.0,
+            "gross_pnl_pct": 0.0,
+            "net_pnl_usd": 0.0,
+            "entry_fee_usd": trade["entry_fee_usd"],
+            "exit_fee_usd": 0.0,
+            "status": "active",
+            "closed_reason": None,
+        })
+
+    def _finalize_trade_history(self, trade, metrics, reason):
+        for row in self.trade_history:
+            if row["id"] == trade["id"]:
+                row["current"] = round(self.current_price, 4)
+                row["pnl"] = round(metrics["net_pct"], 4)
+                row["gross_pnl_pct"] = round(metrics["gross_pct"], 4)
+                row["net_pnl_usd"] = round(metrics["net_usd"], 2)
+                row["exit_fee_usd"] = round(metrics["exit_fee_usd"], 4)
+                row["status"] = "sold"
+                row["closed_reason"] = reason
+                return
+
     def get_unrealized_net_usd(self):
         return sum(self._trade_metrics(t)["net_usd"] for t in self.trades)
 
@@ -601,6 +632,7 @@ class AITradingAgent:
     def on_live_connected(self, equity: float):
         """ Paper credentials sleep: clear simulated state and bind ledger to Bybit equity. """
         self.trades = []
+        self.trade_history = []
         self.current_capital = equity
         self.starting_capital = equity
         self.ai_season_start_capital = None
@@ -659,6 +691,7 @@ class AITradingAgent:
         self.starting_capital = amount
         self.current_capital = amount
         self.trades = []
+        self.trade_history = []
         self.is_lock_active = False
         self.peak_net_pct = 0.0
         print(f"[PILLAR 3: AI AGENT] Paper trading capital reset to ${amount:,.2f}.")
@@ -743,6 +776,7 @@ class AITradingAgent:
             "source": source,
         }
         self.trades.append(trade)
+        self._append_trade_history(trade)
         bybit_api.execute_market_buy(self.active_pair, f"{reason} | Margin=${margin} (1% of capital) x{self.leverage} leverage -> Position=${position_size}")
         print(f"[PILLAR 3: AI AGENT] Opened new {side} position #{trade['id']} on {self.active_pair} @ {filled_price} "
               f"(margin=${margin}, position=${position_size}, entry_fee=${entry_fee_usd}, source={source})")
@@ -763,6 +797,7 @@ class AITradingAgent:
         best = max(manual_trades, key=lambda t: self._trade_metrics(t)["net_pct"])
         m = self._trade_metrics(best)
         self.current_capital += m["net_usd"]
+        self._finalize_trade_history(best, m, reason)
         self.trades = [t for t in self.trades if t["id"] != best["id"]]
         bybit_api.execute_market_sell(best["pair"], f"{reason} | Realized Net P&L: ${m['net_usd']:.2f} ({m['net_pct']:.3f}%)")
         print(f"[PILLAR 3: AI AGENT] Manual SELL closed position #{best['id']} on {best['pair']} "
@@ -774,9 +809,12 @@ class AITradingAgent:
         return best
 
     def set_active_pair(self, pair, price):
-        """ Switch pair for chart/trading. Only clears open trades when the coin actually changes. """
+        """ Switch pair for chart/trading while keeping session trade history intact. """
         pair_changed = pair != self.active_pair
         if pair_changed:
+            for t in self.trades:
+                m = self._trade_metrics(t)
+                self._finalize_trade_history(t, m, "Pair switched")
             self.trades = []
         self.active_pair = pair
         self.current_price = price
@@ -788,25 +826,23 @@ class AITradingAgent:
             print(f"[PILLAR 3: AI AGENT] Active pair refreshed to {pair} @ {price}.")
 
     def get_trades_snapshot(self):
-        """ Live GROSS vs TRUE NET PnL% per trade (RULE 6), computed off the real-time current_price. """
+        """ Session trade list (active + sold). Active rows keep updating live. """
+        active_by_id = {t["id"]: t for t in self.trades}
         snapshot = []
-        for t in self.trades:
-            m = self._trade_metrics(t)
-            snapshot.append({
-                "id": t["id"],
-                "pair": t["pair"],
-                "side": t["side"],
-                "entry": t["entry"],
-                "current": round(self.current_price, 4),
-                "margin": t["margin"],
-                "position_size": t["position_size"],
-                "gross_pnl_pct": round(m["gross_pct"], 4),
-                "pnl": round(m["net_pct"], 4),  # TRUE NET profit % (post-fee) - what the UI displays
-                "net_pnl_usd": round(m["net_usd"], 2),
-                "entry_fee_usd": t["entry_fee_usd"],
-                "exit_fee_usd": round(m["exit_fee_usd"], 4),
-                "status": "locked" if self.is_lock_active else "active",
-            })
+        for row in self.trade_history:
+            out = dict(row)
+            live_trade = active_by_id.get(row["id"])
+            if live_trade:
+                m = self._trade_metrics(live_trade)
+                out.update({
+                    "current": round(self.current_price, 4),
+                    "gross_pnl_pct": round(m["gross_pct"], 4),
+                    "pnl": round(m["net_pct"], 4),
+                    "net_pnl_usd": round(m["net_usd"], 2),
+                    "exit_fee_usd": round(m["exit_fee_usd"], 4),
+                    "status": "locked" if self.is_lock_active else "active",
+                })
+            snapshot.append(out)
         return snapshot
 
     async def process_tick(self, new_price, volume_increment):
@@ -936,6 +972,7 @@ class AITradingAgent:
 
         for trade, m in winners:
             self.current_capital += m["net_usd"]
+            self._finalize_trade_history(trade, m, reason)
             bybit_api.execute_market_sell(trade["pair"], f"{reason} | Realized Net P&L: ${m['net_usd']:.2f} ({m['net_pct']:.3f}%)")
             notifications.push(f"Position #{trade['id']} CLOSED on {trade['pair']} | Net P&L: ${m['net_usd']:.2f} ({m['net_pct']:.3f}%)",
                                 "success" if m["net_usd"] >= 0 else "error")
@@ -963,6 +1000,7 @@ class AITradingAgent:
         for trade in self.trades:
             m = self._trade_metrics(trade)
             self.current_capital += m["net_usd"]
+            self._finalize_trade_history(trade, m, reason)
             bybit_api.execute_market_sell(trade["pair"], f"{reason} | Realized Net P&L: ${m['net_usd']:.2f}")
         self.trades = []
         self.peak_net_pct = 0.0
@@ -1002,6 +1040,7 @@ class AITradingAgent:
         reserved for the automatic RULE 5 detector, not a voluntary stop. """
         print(f"[PILLAR 2: BACKEND] {reason}")
         self._close_all_positions(reason)
+        self.trade_history = []
         self.is_active = False
         self.end_ai_season()
 
@@ -1228,6 +1267,7 @@ async def start_background_tasks():
 # ==========================================
 @app.post("/start-bot")
 async def start_bot():
+    agent.trade_history = []
     agent.clear_emergency_state()
     agent.daily_target_reached = False  # fresh session -> clear any prior daily-target halt
     agent.begin_ai_season()  # season P&L + kill-switch baseline = portfolio value right now
@@ -1338,6 +1378,8 @@ async def close_trade(payload: CloseTradePayload):
     if not trade:
         return {"status": "error", "message": "Trade not found or already closed."}
 
+    m = agent._trade_metrics(trade)
+    agent._finalize_trade_history(trade, m, "Manual force-close")
     agent.trades = [t for t in agent.trades if t["id"] != payload.id]
     bybit_api.execute_market_sell(trade["pair"], f"Manual force-close of position #{trade['id']}")
     notifications.push(f"Position #{trade['id']} manually force-closed on {trade['pair']}.", "warning")
@@ -1616,6 +1658,7 @@ async def trades_feed(websocket: WebSocket):
             payload = {
                 "pair": agent.active_pair,
                 "trades": agent.get_trades_snapshot(),
+                "active_count": len(agent.trades),
                 "lock_active": agent.is_lock_active,
             }
             await websocket.send_json(payload)

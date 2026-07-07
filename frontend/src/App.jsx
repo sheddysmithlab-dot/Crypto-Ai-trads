@@ -27,7 +27,7 @@ export default function App() {
   const { logout } = useAuth();
   const { status: apiStatus, setConnected } = useApiStatus();
   const pairSelector = usePairSelector();
-  const { trades, activePair: activeTradesPair, closeTrade, clearTrades } = useTrades(setConnected);
+  const { trades, activeCount, activePair: activeTradesPair, closeTrade, clearTrades } = useTrades(setConnected);
   const { notifications, unreadCount, markAllRead } = useNotifications();
 
   const [riskModal, setRiskModal] = useState({ open: false, lossPct: 0, threshold: 2.5 });
@@ -101,6 +101,7 @@ export default function App() {
       });
       const res = await authFetch('/start-bot', { method: 'POST' });
       const data = await res.json();
+      clearTrades();
       debugLog('Bot started successfully:', data.message);
     } catch (err) {
       console.error('Failed to start bot from safety check:', err);
@@ -188,7 +189,7 @@ export default function App() {
         seasonProfit={portfolio.seasonProfit}
         seasonProfitPct={portfolio.seasonProfitPct}
         seasonActive={portfolio.seasonActive}
-        tradesCount={trades.length}
+        tradesCount={activeCount}
         apiStatus={apiStatus}
         tradingMode={portfolio.tradingMode}
         dayHigh={dayStats.high}
@@ -209,7 +210,7 @@ export default function App() {
         dailyProfit={portfolio.dailyProfit}
         seasonProfit={portfolio.seasonProfit}
         seasonActive={portfolio.seasonActive}
-        tradesCount={trades.length}
+        tradesCount={activeCount}
       />
 
       <main className="flex-grow p-2 lg:p-4 space-y-3">
@@ -222,7 +223,7 @@ export default function App() {
           readouts={readouts}
         />
 
-        <LiveTradesPanel trades={trades} activePair={activeTradesPair} closeTrade={closeTrade} />
+        <LiveTradesPanel trades={trades} activeCount={activeCount} activePair={activeTradesPair} closeTrade={closeTrade} />
       </main>
 
       <ControlBar
