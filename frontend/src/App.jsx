@@ -22,12 +22,13 @@ import AlertModal from './components/AlertModal';
 import SettingsModal from './components/SettingsModal';
 import AgentInstructionsModal from './components/AgentInstructionsModal';
 import StartConfirmModal from './components/StartConfirmModal';
+import TradeExitConfirmModal from './components/TradeExitConfirmModal';
 
 export default function App() {
   const { logout } = useAuth();
   const { status: apiStatus, setConnected } = useApiStatus();
   const pairSelector = usePairSelector();
-  const { trades, activeCount, activePair: activeTradesPair, closeTrade, clearTrades } = useTrades(setConnected);
+  const { trades, activeCount, activePair: activeTradesPair, closeTrade } = useTrades(setConnected);
   const { notifications, unreadCount, markAllRead } = useNotifications();
 
   const [riskModal, setRiskModal] = useState({ open: false, lossPct: 0, threshold: 2.5 });
@@ -38,6 +39,7 @@ export default function App() {
   const [startConfirmOpen, setStartConfirmOpen] = useState(false);
   const [pendingConfig, setPendingConfig] = useState(null);
   const [manualCapital, setManualCapital] = useState(null);
+  const [exitConfirm, setExitConfirm] = useState({ open: false, type: null, tradeId: null });
 
   const portfolio = usePortfolio(setConnected, {
     onEmergencyTriggered: (lossPct, threshold) => setRiskModal({ open: true, lossPct, threshold }),
@@ -65,15 +67,11 @@ export default function App() {
       debugLog('User clicked START AI AUTOMATION. Opening AI Agent Instructions modal...');
       setAgentModalOpen(true);
     } else {
-      // Plain voluntary stop - no loss event, so no "EMERGENCY EXIT TRIGGERED" modal here.
-      // That wording is reserved for a genuine RULE 5 auto-kill resolved via handleRiskExit.
-      debugLog('User clicked STOP TRADING. Sending POST /emergency-exit to Backend...');
-      try {
-        await authFetch('/emergency-exit', { method: 'POST' });
-        clearTrades();
-      } catch (err) {
-        console.error('Emergency exit failed:', err);
-      }
+      setExitConfirm({
+        open: true,
+        type: 'stop',
+        tradeId: null,
+      });
     }
   }
 
@@ -101,7 +99,6 @@ export default function App() {
       });
       const res = await authFetch('/start-bot', { method: 'POST' });
       const data = await res.json();
-      clearTrades();
       debugLog('Bot started successfully:', data.message);
     } catch (err) {
       console.error('Failed to start bot from safety check:', err);
@@ -126,8 +123,93 @@ export default function App() {
       console.error('Emergency exit request failed:', err);
     }
     setAlertOpen(true);
-    clearTrades();
   }
+
+  async function handleStopConfirm() {
+    setExitConfirm({ open: false, type: null, tradeId: null });
+    debugLog('User confirmed STOP AI AUTOMATION. Sending POST /stop-bot...');
+    try {
+      await authFetch('/stop-bot', { method: 'POST' });
+    } catch (err) {
+      console.error('Stop bot failed:', err);
+    }
+  }
+
+  function requestForceClose(tradeId) {
+    setExitConfirm({ open: true, type: 'force-close', tradeId });
+  }
+
+  async function handleForceCloseConfirm() {
+    const tradeId = exitConfirm.tradeId;
+    setExitConfirm({ open: false, type: null, tradeId: null });
+    if (!tradeId) return;
+    try {
+      await closeTrade(tradeId, true);
+    } catch (err) {
+      console.error('Force close failed:', err);
+    }
+  }
+
+  function requestManualSell() {
+    setExitConfirm({ open: true, type: 'manual-sell', tradeId: null });
+  }
+
+  async function handleManualSellConfirm() {
+    setExitConfirm({ open: false, type: null, tradeId: null });
+    debugLog('Manual SELL confirmed. Sending POST /manual-sell to Backend...');
+    try {
+      const res = await authFetch('/manual-sell', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmed: true }),
+      });
+      const data = await res.json();
+      if (data.status === 'error') {
+        console.error('Manual SELL failed:', data.message);
+      } else {
+        debugLog(data.message || 'Manual SELL executed.');
+      }
+    } catch (err) {
+      console.error('Manual sell failed:', err);
+    }
+  }
+
+  function handleExitConfirm() {
+    if (exitConfirm.type === 'stop') return handleStopConfirm();
+    if (exitConfirm.type === 'force-close') return handleForceCloseConfirm();
+    if (exitConfirm.type === 'manual-sell') return handleManualSellConfirm();
+  }
+
+  const exitConfirmCopy = (() => {
+    if (exitConfirm.type === 'stop') {
+      return {
+        title: 'Stop AI Automation?',
+        message: 'AI automation band ho jayegi. Aapki open positions list me protected rahengi — koi auto sell nahi hogi.',
+        detail: `${activeCount} active position(s) abhi bhi open rahenge.`,
+        confirmLabel: 'Stop AI Only',
+      };
+    }
+    if (exitConfirm.type === 'manual-sell') {
+      return {
+        title: 'Confirm Manual SELL?',
+        message: 'Yeh action aapki best manual position ko market par close karega. Profit ya loss lock ho jayega.',
+        detail: 'Sirf manually opened trades close hongi — AI trades touch nahi hongi.',
+        confirmLabel: 'Sell Position',
+      };
+    }
+    if (exitConfirm.type === 'force-close') {
+      const trade = trades.find((t) => t.id === exitConfirm.tradeId);
+      return {
+        title: 'Force Close Position?',
+        message: `Position #${exitConfirm.tradeId} ko abhi market price par close karna chahte hain?`,
+        detail: trade
+          ? `${trade.pair} ${trade.side} @ $${trade.entry} | Current PnL: ${trade.pnl >= 0 ? '+' : ''}${trade.pnl?.toFixed(2)}%`
+          : 'Yeh action undo nahi ho sakta.',
+        confirmLabel: 'Force Close',
+      };
+    }
+    return { title: '', message: '', confirmLabel: 'Confirm' };
+  })();
 
   async function handleManualBuy() {
     debugLog('Manual BUY button clicked. Sending POST /open-trade to Backend...');
@@ -152,18 +234,7 @@ export default function App() {
   }
 
   async function handleManualSell() {
-    debugLog('Manual SELL button clicked. Sending POST /manual-sell to Backend...');
-    try {
-      const res = await authFetch('/manual-sell', { method: 'POST' });
-      const data = await res.json();
-      if (data.status === 'error') {
-        console.error('Manual SELL failed:', data.message);
-      } else {
-        debugLog(data.message || 'Manual SELL executed.');
-      }
-    } catch (err) {
-      console.error('Manual sell failed:', err);
-    }
+    requestManualSell();
   }
 
   async function handleRiskContinue() {
@@ -223,7 +294,12 @@ export default function App() {
           readouts={readouts}
         />
 
-        <LiveTradesPanel trades={trades} activeCount={activeCount} activePair={activeTradesPair} closeTrade={closeTrade} />
+        <LiveTradesPanel
+          trades={trades}
+          activeCount={activeCount}
+          activePair={activeTradesPair}
+          onRequestClose={requestForceClose}
+        />
       </main>
 
       <ControlBar
@@ -264,8 +340,19 @@ export default function App() {
       <StartConfirmModal
         open={startConfirmOpen}
         config={pendingConfig}
+        activeCount={activeCount}
         onContinue={handleConfirmContinue}
         onExit={handleConfirmExit}
+      />
+
+      <TradeExitConfirmModal
+        open={exitConfirm.open}
+        title={exitConfirmCopy.title}
+        message={exitConfirmCopy.message}
+        detail={exitConfirmCopy.detail}
+        confirmLabel={exitConfirmCopy.confirmLabel}
+        onConfirm={handleExitConfirm}
+        onCancel={() => setExitConfirm({ open: false, type: null, tradeId: null })}
       />
     </div>
   );

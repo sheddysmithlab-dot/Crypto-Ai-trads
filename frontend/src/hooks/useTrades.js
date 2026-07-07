@@ -43,21 +43,26 @@ export function useTrades(setConnected) {
     };
   }, [setConnected]);
 
-  const closeTrade = useCallback(async (id) => {
+  const closeTrade = useCallback(async (id, confirmed = false) => {
     try {
-      await authFetch('/close-trade', {
+      const res = await authFetch('/close-trade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
+        body: JSON.stringify({ id, confirmed }),
       });
+      const data = await res.json();
+      if (data.status === 'error') {
+        console.error('Failed to close trade:', data.message);
+        return data;
+      }
       debugLog(`Closed position #${id} via backend REST API.`);
+      return data;
     } catch (err) {
       console.error('Failed to close trade:', err);
+      throw err;
     }
     // Next /ws/trades tick will refresh the table with the authoritative state
   }, []);
 
-  const clearTrades = useCallback(() => setTrades([]), []);
-
-  return { trades, activeCount, activePair, closeTrade, clearTrades };
+  return { trades, activeCount, activePair, closeTrade };
 }

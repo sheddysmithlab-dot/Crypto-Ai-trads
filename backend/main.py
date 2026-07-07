@@ -604,6 +604,8 @@ class AITradingAgent:
             "exit_fee_usd": 0.0,
             "status": "active",
             "closed_reason": None,
+            "source": trade.get("source", "auto"),
+            "protected": trade.get("source") == "manual",
         })
 
     def _finalize_trade_history(self, trade, metrics, reason):
@@ -809,19 +811,14 @@ class AITradingAgent:
         return best
 
     def set_active_pair(self, pair, price):
-        """ Switch pair for chart/trading while keeping session trade history intact. """
+        """ Switch pair for chart/trading while keeping open positions intact. """
         pair_changed = pair != self.active_pair
-        if pair_changed:
-            for t in self.trades:
-                m = self._trade_metrics(t)
-                self._finalize_trade_history(t, m, "Pair switched")
-            self.trades = []
         self.active_pair = pair
         self.current_price = price
-        self.peak_net_pct = 0.0
-        self.is_lock_active = False
         if pair_changed:
-            print(f"[PILLAR 3: AI AGENT] Active pair switched to {pair}. Open positions cleared.")
+            self.peak_net_pct = 0.0
+            self.is_lock_active = False
+            print(f"[PILLAR 3: AI AGENT] Active pair switched to {pair}. Open positions preserved.")
         else:
             print(f"[PILLAR 3: AI AGENT] Active pair refreshed to {pair} @ {price}.")
 
@@ -963,21 +960,21 @@ class AITradingAgent:
         print(f"[PILLAR 3: AI AGENT] Output -> SELL REQUIRED: {reason}")
 
         scored = [(t, self._trade_metrics(t)) for t in self.trades]
-        winners = [(t, m) for (t, m) in scored if m["net_pct"] > 0]
-        held = [t for (t, m) in scored if m["net_pct"] <= 0]
+        # Manual positions stay protected — only AI-opened winners may auto-close.
+        auto_winners = [(t, m) for (t, m) in scored if m["net_pct"] > 0 and t.get("source") != "manual"]
+        held = [t for (t, m) in scored if m["net_pct"] <= 0 or t.get("source") == "manual"]
 
-        if not winners:
-            print("[PILLAR 3: AI AGENT] No trades currently in net profit - holding all red positions until they turn green.")
+        if not auto_winners:
+            print("[PILLAR 3: AI AGENT] No auto trades in net profit to close — manual positions protected, losers held.")
             return
 
-        for trade, m in winners:
+        for trade, m in auto_winners:
             self.current_capital += m["net_usd"]
             self._finalize_trade_history(trade, m, reason)
             bybit_api.execute_market_sell(trade["pair"], f"{reason} | Realized Net P&L: ${m['net_usd']:.2f} ({m['net_pct']:.3f}%)")
             notifications.push(f"Position #{trade['id']} CLOSED on {trade['pair']} | Net P&L: ${m['net_usd']:.2f} ({m['net_pct']:.3f}%)",
                                 "success" if m["net_usd"] >= 0 else "error")
 
-        # Keep only the still-red (losing) positions open for recovery.
         self.trades = held
 
         # Recompute trailing-lock state off whatever remains.
@@ -1035,14 +1032,13 @@ class AITradingAgent:
         self.is_lock_active = False
 
     def manual_stop(self, reason="Manual Kill Switch Activated from Frontend"):
-        """ Plain STOP TRADING button click - a deliberate user action with NO portfolio-loss
-        event. Must NOT set emergency_triggered/emergency_awaiting_decision - that popup is
-        reserved for the automatic RULE 5 detector, not a voluntary stop. """
+        """ Plain STOP TRADING button — halts AI only. Open positions (manual + auto) stay
+        protected in the live list until the user explicitly confirms an exit action. """
         print(f"[PILLAR 2: BACKEND] {reason}")
-        self._close_all_positions(reason)
-        self.trade_history = []
         self.is_active = False
         self.end_ai_season()
+        self.is_lock_active = False
+        notifications.push("AI automation stopped. Open positions remain protected.", "warning")
 
     def resume_trading_with_higher_buffer(self):
         """ User chose 'CONTINUE' on the risk popup: raise the cumulative stop-loss
@@ -1267,14 +1263,25 @@ async def start_background_tasks():
 # ==========================================
 @app.post("/start-bot")
 async def start_bot():
-    agent.trade_history = []
+    open_count = len(agent.trades)
     agent.clear_emergency_state()
     agent.daily_target_reached = False  # fresh session -> clear any prior daily-target halt
     agent.begin_ai_season()  # season P&L + kill-switch baseline = portfolio value right now
     agent.is_active = True
     print("[PILLAR 2: BACKEND] Received 'START' from Frontend. AI Agent awakened.")
-    notifications.push(f"AI Agent STARTED - now monitoring {agent.active_pair} live.", "success")
-    return {"status": "success", "message": "Bot active & trailing logic initialized."}
+    if open_count:
+        notifications.push(
+            f"AI Agent STARTED on {agent.active_pair}. {open_count} open position(s) preserved (manual trades protected).",
+            "success",
+        )
+    else:
+        notifications.push(f"AI Agent STARTED - now monitoring {agent.active_pair} live.", "success")
+    return {
+        "status": "success",
+        "message": "Bot active & trailing logic initialized.",
+        "open_positions": open_count,
+        "trade_history_count": len(agent.trade_history),
+    }
 
 @app.post("/emergency-exit")
 async def emergency_exit():
@@ -1289,7 +1296,13 @@ async def emergency_exit():
     else:
         print("[PILLAR 2: BACKEND] Received manual STOP TRADING from Frontend control button.")
         agent.manual_stop()
-    return {"status": "success", "message": "All trades closed."}
+    return {"status": "success", "message": "AI automation stopped. Open positions protected."}
+
+@app.post("/stop-bot")
+async def stop_bot():
+    """ Voluntary STOP AI AUTOMATION — does not sell or reset the trade list. """
+    agent.manual_stop("STOP AI AUTOMATION from Frontend")
+    return {"status": "success", "message": "AI automation stopped. Open positions protected."}
 
 @app.post("/continue-trading")
 async def continue_trading():
@@ -1339,6 +1352,10 @@ class SetPairPayload(BaseModel):
 
 class CloseTradePayload(BaseModel):
     id: int
+    confirmed: bool = False
+
+class ManualSellPayload(BaseModel):
+    confirmed: bool = False
 
 @app.post("/open-trade")
 async def open_trade(payload: OpenTradePayload):
@@ -1361,9 +1378,11 @@ async def open_trade(payload: OpenTradePayload):
     return {"status": "success", "message": f"Manual BUY filled on {agent.active_pair}.", "trade": trade, "pair": agent.active_pair}
 
 @app.post("/manual-sell")
-async def manual_sell():
+async def manual_sell(payload: ManualSellPayload = ManualSellPayload()):
     """ Manual SELL button: closes exactly the ONE manually-opened trade with the
     highest True Net Profit while AI automation is OFF. """
+    if not payload.confirmed:
+        return {"status": "error", "message": "Manual SELL requires explicit confirmation."}
     if agent.is_active:
         return {"status": "error", "message": "Stop AI automation before using manual SELL."}
     closed = agent.manual_close_best()
@@ -1374,6 +1393,8 @@ async def manual_sell():
 @app.post("/close-trade")
 async def close_trade(payload: CloseTradePayload):
     """ Force-closes a single stacked position on the active pair (trash icon action). """
+    if not payload.confirmed:
+        return {"status": "error", "message": "Force close requires explicit confirmation."}
     trade = next((t for t in agent.trades if t["id"] == payload.id), None)
     if not trade:
         return {"status": "error", "message": "Trade not found or already closed."}

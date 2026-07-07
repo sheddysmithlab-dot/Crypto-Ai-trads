@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from 'react';
 // Visually mirrors the in-trading RULE 8 RiskAlertModal (warning icon, 30s
 // countdown, two buttons) but the buttons are wired for pre-start semantics,
 // not mid-trade loss resolution, so the two flows stay separate.
-export default function StartConfirmModal({ open, config, onContinue, onExit }) {
+export default function StartConfirmModal({ open, config, activeCount = 0, onContinue, onExit }) {
   const [seconds, setSeconds] = useState(30);
   const intervalRef = useRef(null);
   const onExitRef = useRef(onExit);
@@ -50,6 +50,14 @@ export default function StartConfirmModal({ open, config, onContinue, onExit }) 
         <p className="text-sm text-gray-400 mb-5">
           AI Automation ko start karne se pehle confirm karein. Niche aapki chosen settings hain:
         </p>
+
+        {activeCount > 0 ? (
+          <div className="mb-5 rounded-lg border border-amber-500/60 bg-amber-500/10 px-4 py-3 text-left text-sm text-amber-200">
+            <i className="fas fa-shield-alt mr-2"></i>
+            <span className="font-bold">{activeCount} open position(s)</span> list me protected rahengi.
+            Manual trades AI ke auto-sell se safe rahengi.
+          </div>
+        ) : null}
 
         <div className="grid grid-cols-2 gap-3 text-sm mb-6">
           <div className="bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2">

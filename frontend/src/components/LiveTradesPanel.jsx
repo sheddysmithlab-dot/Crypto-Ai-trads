@@ -14,7 +14,7 @@ function StatusIcon({ trade }) {
   );
 }
 
-export default function LiveTradesPanel({ trades, activeCount, activePair, closeTrade }) {
+export default function LiveTradesPanel({ trades, activeCount, activePair, onRequestClose }) {
   return (
     <div className="bg-lightCard dark:bg-darkCard rounded-xl shadow border border-gray-200 dark:border-gray-800 overflow-hidden">
       <div className="flex justify-between items-center px-3 py-2 border-b border-gray-200 dark:border-gray-800">
@@ -47,6 +47,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, close
               trades.map((trade) => {
                 const meta = getPairMeta(trade.pair);
                 const isSold = trade.status === 'sold';
+                const isProtected = trade.protected || trade.source === 'manual';
                 const isProfit = trade.pnl >= 0;
                 const rowBg = isSold
                   ? 'bg-white/5 dark:bg-white/5'
@@ -64,9 +65,14 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, close
                         {meta.icon}
                       </span>
                       {trade.pair}
+                      {isProtected && !isSold ? (
+                        <span className="text-[9px] text-amber-400 font-bold" title="Manual position — AI cannot auto-close">
+                          <i className="fas fa-shield-alt"></i>
+                        </span>
+                      ) : null}
                     </td>
                     <td className={`px-3 py-1.5 ${isSold ? 'text-white/80' : trade.side === 'LONG' ? 'text-green-500' : 'text-red-500'} font-bold text-[10px]`}>
-                      {trade.side} {isSold ? '(SOLD)' : ''}
+                      {trade.side} {isSold ? '(SOLD)' : isProtected ? '(MANUAL)' : ''}
                     </td>
                     <td className="px-3 py-1.5 font-mono">${fmtNum(trade.entry)}</td>
                     <td className="px-3 py-1.5 font-mono">${fmtNum(trade.current)}</td>
@@ -80,8 +86,8 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, close
                         {!isSold && (
                           <button
                             className="p-1 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded hover:bg-red-200 dark:hover:bg-red-900/50 transition opacity-0 group-hover:opacity-100"
-                            title="Force Close"
-                            onClick={() => closeTrade(trade.id)}
+                            title="Force Close (confirmation required)"
+                            onClick={() => onRequestClose(trade.id)}
                           >
                             <i className="fas fa-trash text-[10px]"></i>
                           </button>
@@ -104,6 +110,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, close
           trades.map((trade) => {
             const meta = getPairMeta(trade.pair);
             const isSold = trade.status === 'sold';
+            const isProtected = trade.protected || trade.source === 'manual';
             const isProfit = trade.pnl >= 0;
             const rowBg = isSold
               ? 'bg-white/5 dark:bg-white/5'
@@ -123,7 +130,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, close
                   <div>
                     <div className="font-semibold text-xs">{trade.pair}</div>
                     <div className={`text-[10px] ${isSold ? 'text-white/80' : trade.side === 'LONG' ? 'text-green-500' : 'text-red-500'} font-bold`}>
-                      {trade.side} {isSold ? '(SOLD)' : ''}
+                      {trade.side} {isSold ? '(SOLD)' : isProtected ? '(MANUAL)' : ''}
                     </div>
                   </div>
                 </div>
