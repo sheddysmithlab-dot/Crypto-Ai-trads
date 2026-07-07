@@ -5,7 +5,7 @@ import { backendWsUrl } from '../config/api';
 // trading mode (paper/live) and the automatic emergency-exit trigger.
 export function usePortfolio(setConnected, { onEmergencyTriggered } = {}) {
   const [portfolio, setPortfolio] = useState({
-    totalCapital: 142560.88,
+    totalCapital: 0,
     dailyProfit: 0,
     dailyProfitPct: 0,
     seasonProfit: 0,

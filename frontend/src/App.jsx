@@ -139,6 +139,9 @@ export default function App() {
       const data = await res.json();
       if (data.status === 'error') {
         console.error('Manual BUY failed:', data.message);
+        if (data.message?.toLowerCase().includes('insufficient')) {
+          window.alert(data.message);
+        }
       } else {
         debugLog(data.message || 'Manual BUY executed.');
       }
@@ -193,7 +196,10 @@ export default function App() {
         notifications={notifications}
         unreadCount={unreadCount}
         markAllRead={markAllRead}
-        onOpenPaperModal={() => setPaperModalOpen(true)}
+        onOpenPaperModal={() => {
+          if (portfolio.tradingMode === 'LIVE_TRADING') return;
+          setPaperModalOpen(true);
+        }}
         onOpenSettings={() => setSettingsOpen(true)}
         onLogout={logout}
       />
@@ -233,6 +239,7 @@ export default function App() {
         onClose={() => setPaperModalOpen(false)}
         currentCapital={displayCapital}
         onCapitalSet={(capital) => setManualCapital(capital)}
+        isLive={portfolio.tradingMode === 'LIVE_TRADING'}
       />
 
       <RiskAlertModal

@@ -12,7 +12,7 @@ function fmtCurrency(num) {
   return `$${Number(num).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-export default function PaperTradingModal({ open, onClose, currentCapital, onCapitalSet }) {
+export default function PaperTradingModal({ open, onClose, currentCapital, onCapitalSet, isLive }) {
   const [amount, setAmount] = useState('');
   const [status, setStatus] = useState({ tone: 'yellow', message: `Currently simulating with ${fmtCurrency(currentCapital)}.` });
   const [saving, setSaving] = useState(false);
@@ -25,6 +25,18 @@ export default function PaperTradingModal({ open, onClose, currentCapital, onCap
   }, [open, currentCapital]);
 
   if (!open) return null;
+
+  if (isLive) {
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-70 z-[110] flex items-center justify-center backdrop-blur-sm p-4">
+        <div className="bg-[#0B0E11] border border-gray-800 rounded-2xl shadow-2xl max-w-md w-full p-6 text-center">
+          <p className="text-emerald-400 font-semibold mb-2">Live Trading Active</p>
+          <p className="text-sm text-gray-400 mb-4">Paper trading is paused while Bybit is connected. Capital and P&amp;L come from your live account.</p>
+          <button className="px-4 py-2 rounded-lg bg-gray-800 text-white text-sm" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    );
+  }
 
   const toneClasses = {
     yellow: 'bg-yellow-900/20 border-yellow-700/40 text-yellow-300',

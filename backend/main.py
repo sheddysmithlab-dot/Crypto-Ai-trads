@@ -464,6 +464,8 @@ class BybitAPIWrapper:
                 equity = float(account_list[0]["totalEquity"])
                 self.last_known_balance = equity
                 self.last_error = None
+                if self.mode == "LIVE_TRADING":
+                    agent.current_capital = equity
                 if self._was_failing:
                     notifications.push("Bybit connection restored - live balance is syncing again.", "success")
                 self._was_failing = False
@@ -588,6 +590,28 @@ class AITradingAgent:
     def get_unrealized_net_usd(self):
         return sum(self._trade_metrics(t)["net_usd"] for t in self.trades)
 
+    def get_trading_capital_base(self):
+        """ Capital used for position sizing. LIVE -> Bybit equity; paper -> simulated ledger. """
+        if bybit_api.mode == "LIVE_TRADING":
+            if bybit_api.last_known_balance is None:
+                return None
+            return max(0.0, float(bybit_api.last_known_balance))
+        return self.current_capital
+
+    def on_live_connected(self, equity: float):
+        """ Paper credentials sleep: clear simulated state and bind ledger to Bybit equity. """
+        self.trades = []
+        self.current_capital = equity
+        self.starting_capital = equity
+        self.ai_season_start_capital = None
+        self.is_active = False
+        self.daily_target_reached = False
+        self.is_lock_active = False
+        self.peak_net_pct = 0.0
+        self.clear_emergency_state()
+        print(f"[LIVE SYNC] Paper state cleared. Bybit equity ${equity:,.2f} is now the account baseline.")
+        notifications.push(f"Live account synced from Bybit: ${equity:,.2f} equity. Paper simulation paused.", "success")
+
     def get_total_portfolio_value(self):
         """ RULE 5: Total Portfolio Value.
         PAPER_TRADING (default) -> simulated capital + unrealized P&L of open (simulated) positions.
@@ -597,6 +621,12 @@ class AITradingAgent:
         if bybit_api.mode == "LIVE_TRADING" and bybit_api.last_known_balance is not None:
             return bybit_api.last_known_balance
         return self.current_capital + self.get_unrealized_net_usd()
+
+    def _live_insufficient_balance(self) -> bool:
+        if bybit_api.mode != "LIVE_TRADING":
+            return False
+        base = self.get_trading_capital_base()
+        return base is None or base <= 0
 
     def get_session_baseline(self):
         """ Baseline for RULE 5/8 loss % while AI is running: the portfolio value at
@@ -676,8 +706,20 @@ class AITradingAgent:
             print(f"[PILLAR 3: AI AGENT] Skipping entry — invalid current_price ({self.current_price}) on {self.active_pair}.")
             return None
 
+        capital_base = self.get_trading_capital_base()
+        if bybit_api.mode == "LIVE_TRADING":
+            if capital_base is None:
+                notifications.push("Waiting for Bybit balance sync — please try again shortly.", "warning")
+                return None
+            if capital_base <= 0:
+                notifications.push("Insufficient balance: Bybit account equity is $0.00.", "error")
+                return None
+
         # RULE 1: 1% margin, 100x leverage -> position_size = margin * leverage
-        margin = round(self.current_capital * self.margin_pct, 2)
+        margin = round((capital_base if capital_base is not None else self.current_capital) * self.margin_pct, 2)
+        if margin <= 0:
+            notifications.push("Insufficient balance to open a position.", "error")
+            return None
         position_size = round(margin * self.leverage, 2)
 
         # RULE 7: Market orders fill with minor slippage vs the requested price
@@ -732,13 +774,18 @@ class AITradingAgent:
         return best
 
     def set_active_pair(self, pair, price):
-        """ Switching the focused coin closes any prior positions - one coin at a time rule. """
+        """ Switch pair for chart/trading. Only clears open trades when the coin actually changes. """
+        pair_changed = pair != self.active_pair
+        if pair_changed:
+            self.trades = []
         self.active_pair = pair
         self.current_price = price
-        self.trades = []
         self.peak_net_pct = 0.0
         self.is_lock_active = False
-        print(f"[PILLAR 3: AI AGENT] Active pair switched to {pair}. Previous positions cleared (single-coin focus).")
+        if pair_changed:
+            print(f"[PILLAR 3: AI AGENT] Active pair switched to {pair}. Open positions cleared.")
+        else:
+            print(f"[PILLAR 3: AI AGENT] Active pair refreshed to {pair} @ {price}.")
 
     def get_trades_snapshot(self):
         """ Live GROSS vs TRUE NET PnL% per trade (RULE 6), computed off the real-time current_price. """
@@ -1219,7 +1266,20 @@ async def continue_trading():
 async def connect_bybit():
     print("[PILLAR 2: BACKEND] Switching from Paper Trading to Live Real Trading...")
     bybit_api.connect_real_api()
-    return {"status": "success", "message": "SUCCESS: Bybit API Connected. Real Money Trading is ACTIVE."}
+    equity = await bybit_api.fetch_real_balance()
+    if equity is not None:
+        agent.on_live_connected(equity)
+    else:
+        notifications.push(
+            f"Bybit connected but balance sync failed: {bybit_api.last_error or 'unknown error'}.",
+            "error",
+        )
+    return {
+        "status": "success",
+        "message": "SUCCESS: Bybit API Connected. Real Money Trading is ACTIVE.",
+        "equity": equity,
+        "trading_mode": bybit_api.mode,
+    }
 
 @app.get("/trading-mode")
 async def get_trading_mode():
@@ -1255,6 +1315,8 @@ async def open_trade(payload: OpenTradePayload):
 
     trade = agent.open_trade(side, reason="Manual BUY button", source="manual")
     if trade is None:
+        if agent._live_insufficient_balance():
+            return {"status": "error", "message": "Insufficient balance on your Bybit account."}
         return {"status": "error", "message": "Could not open a manual position."}
     return {"status": "success", "message": f"Manual BUY filled on {agent.active_pair}.", "trade": trade, "pair": agent.active_pair}
 
