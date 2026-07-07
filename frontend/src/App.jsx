@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react';
 import { useAuth } from './hooks/useAuth.jsx';
 import { authFetch } from './config/api';
 import { debugLog } from './config/debug';
