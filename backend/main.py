@@ -1387,8 +1387,15 @@ async def close_trade(payload: CloseTradePayload):
 
 @app.post("/set-pair")
 async def set_pair(payload: SetPairPayload):
-    """ Switches the agent's single focused trading pair. Clears any prior positions. """
+    """ Switches focused pair only when there are no open positions. """
     global _last_real_feed_update
+    if payload.pair != agent.active_pair and agent.trades:
+        return {
+            "status": "locked",
+            "message": f"Pair switch blocked while {len(agent.trades)} trade(s) are active on {agent.active_pair}.",
+            "pair": agent.active_pair,
+            "price": agent.current_price,
+        }
     live_price = await fetch_bybit_spot_price(payload.pair)
     seed_price = live_price if live_price is not None else _sanitize_market_price(payload.price)
     if seed_price is None:
