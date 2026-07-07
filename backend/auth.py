@@ -1,4 +1,8 @@
-"""Session auth for the trading dashboard. Credentials live only in env vars."""
+"""Session auth for the trading dashboard.
+
+Credentials resolve in order: AUTH_USERNAME / AUTH_PASSWORD env vars, then
+built-in defaults (so Render works without manual env setup). Never logged.
+"""
 from __future__ import annotations
 
 import os
@@ -11,15 +15,19 @@ from fastapi import WebSocket
 SESSION_TTL_SECONDS = 12 * 3600
 TOKEN_BYTES = 32
 
+# Defaults when env vars are unset (override on Render via AUTH_USERNAME / AUTH_PASSWORD).
+DEFAULT_AUTH_USERNAME = "Shahidmultaniii"
+DEFAULT_AUTH_PASSWORD = "S#d_8224"
+
 _sessions: dict[str, dict] = {}
 
 
 def _env_username() -> str:
-    return (os.environ.get("AUTH_USERNAME") or "").strip()
+    return (os.environ.get("AUTH_USERNAME") or DEFAULT_AUTH_USERNAME).strip()
 
 
 def _env_password() -> str:
-    return os.environ.get("AUTH_PASSWORD") or ""
+    return os.environ.get("AUTH_PASSWORD") or DEFAULT_AUTH_PASSWORD
 
 
 def auth_is_configured() -> bool:

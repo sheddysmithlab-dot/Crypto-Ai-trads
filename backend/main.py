@@ -15,7 +15,6 @@ import httpx
 from dotenv import load_dotenv
 
 from auth import (
-    auth_is_configured,
     create_session,
     extract_bearer_token,
     get_session_username,
@@ -81,11 +80,6 @@ async def require_auth_middleware(request: Request, call_next):
 
 @app.post("/auth/login")
 async def auth_login(payload: LoginPayload):
-    if not auth_is_configured():
-        return JSONResponse(
-            status_code=503,
-            content={"message": "Login is not configured on the server. Set AUTH_USERNAME and AUTH_PASSWORD."},
-        )
     if not verify_credentials(payload.username, payload.password):
         print("[AUTH] Failed sign-in attempt.")
         return JSONResponse(status_code=401, content={"message": "Invalid username or password."})
