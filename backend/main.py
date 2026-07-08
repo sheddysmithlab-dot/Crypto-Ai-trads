@@ -730,11 +730,10 @@ class AITradingAgent:
         LAST_CANDLE_TIMESTAMPS.clear()
         print(f"[TIMEFRAME SYNC] Backend timeframe set to {seconds}s.")
 
-    def open_trade(self, side="LONG", reason="Manual", source="auto", position_size_usd=None):
+    def open_trade(self, side="LONG", reason="Manual", source="auto", position_size_usd=None, qty=None):
         """ RULE 1: Opens a position as a Market Order (RULE 7) with simulated minor slippage.
-        Manual entries default to 1% margin x 100x leverage. Auto paper entries may pass
-        `position_size_usd` (e.g. 2% of total capital from the TAAPI loop).
-        `source` tags who opened it - "auto" or "manual". """
+        Manual entries default to 1% margin x 100x leverage. Auto entries pass
+        `position_size_usd` + `qty` from compute_auto_trade_plan() (2% of capital). """
         if self.emergency_triggered:
             return None
 
@@ -785,6 +784,9 @@ class AITradingAgent:
         slippage = random.uniform(-0.0002, 0.0002)
         filled_price = round(self.current_price * (1 + slippage), 4)
 
+        if qty is None and position_size_usd is not None:
+            qty = compute_order_qty(position_size_usd, filled_price)
+
         # RULE 6: Live Entry Fee, based on Bybit's current Taker fee tier
         entry_fee_pct = bybit_api.get_taker_fee_pct()
         entry_fee_usd = round(position_size * (entry_fee_pct / 100), 4)
@@ -797,19 +799,32 @@ class AITradingAgent:
             "entry": filled_price,
             "margin": margin,
             "position_size": position_size,
+            "qty": qty,
             "entry_fee_pct": entry_fee_pct,
             "entry_fee_usd": entry_fee_usd,
             "source": source,
         }
         self.trades.append(trade)
         self._append_trade_history(trade)
+        qty_label = f" | qty={qty}" if qty is not None else ""
         bybit_api.execute_market_buy(
             self.active_pair,
-            f"{reason} | Margin=${margin} x{self.leverage} leverage -> Position=${position_size}",
+            f"{reason} | ${position_size} notional ({margin} margin x{self.leverage}){qty_label}",
         )
         print(f"[PILLAR 3: AI AGENT] Opened new {side} position #{trade['id']} on {self.active_pair} @ {filled_price} "
-              f"(margin=${margin}, position=${position_size}, entry_fee=${entry_fee_usd}, source={source})")
-        notifications.push(f"Order Filled: {self.active_pair} {side} @ {filled_price:,.4f} (Margin ${margin:,.2f} x{self.leverage})", "success")
+              f"(margin=${margin}, position=${position_size}, qty={qty}, entry_fee=${entry_fee_usd}, source={source})")
+        qty_note = f" | {qty} coins" if qty is not None else ""
+        if source == "auto" and position_size_usd is not None:
+            fill_msg = (
+                f"Order Filled: {self.active_pair} {side} @ {filled_price:,.4f} "
+                f"(${position_size:,.2f} = {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of capital{qty_note})"
+            )
+        else:
+            fill_msg = (
+                f"Order Filled: {self.active_pair} {side} @ {filled_price:,.4f} "
+                f"(Margin ${margin:,.2f} x{self.leverage}{qty_note})"
+            )
+        notifications.push(fill_msg, "success")
         return trade
 
     def manual_close_best(self, reason="Manual SELL button"):
@@ -1090,29 +1105,61 @@ async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
     return {"high": float(closed[2]), "low": float(closed[3]), "close_time": int(closed[0])}
 
 # TAAPI auto-order sizing: 2% of total portfolio value per fired trade.
+# Example: $1,000 capital -> $20 position -> ~0.00021 BTC @ $97,000.
 AUTO_TRADE_CAPITAL_PCT = 0.02
 
-def compute_auto_trade_notional_usd(agent) -> float | None:
-    """ Notional USD size for TAAPI-driven auto orders = 2% of total capital. """
+
+def qty_decimals_for_price(price: float) -> int:
+    """ Precision for base-asset qty — BTC-sized prices need extra decimals. """
+    if price >= 10000:
+        return 6
+    if price >= 1000:
+        return 5
+    if price >= 1:
+        return 4
+    return 2
+
+
+def compute_auto_trade_plan(agent, price: float | None = None) -> dict | None:
+    """ Single source of truth for TAAPI auto entries.
+    Returns USD notional (2% of total capital), base-asset qty, and margin. """
+    entry_price = _sanitize_market_price(price if price is not None else agent.current_price)
+    if entry_price is None:
+        return None
     total = agent.get_total_portfolio_value()
     if total is None or total <= 0:
         return None
-    return round(total * AUTO_TRADE_CAPITAL_PCT, 2)
+    position_usd = round(total * AUTO_TRADE_CAPITAL_PCT, 2)
+    if position_usd <= 0:
+        return None
+    decimals = qty_decimals_for_price(entry_price)
+    qty = round(position_usd / entry_price, decimals)
+    if qty <= 0:
+        return None
+    margin = round(position_usd / agent.leverage, 4)
+    return {
+        "total_capital": round(total, 2),
+        "position_usd": position_usd,
+        "capital_pct": AUTO_TRADE_CAPITAL_PCT * 100,
+        "qty": qty,
+        "qty_decimals": decimals,
+        "margin": margin,
+        "price": entry_price,
+    }
+
+
+def compute_auto_trade_notional_usd(agent) -> float | None:
+    """ Back-compat wrapper — prefer compute_auto_trade_plan(). """
+    plan = compute_auto_trade_plan(agent)
+    return plan["position_usd"] if plan else None
+
 
 def compute_order_qty(position_size_usd, current_price, qty_decimals=None):
-    """ Converts a USD notional into base-asset qty for pybit place_order().
-    Decimals scale with price so small $ orders on BTC still produce a non-zero qty. """
+    """ Converts a USD notional into base-asset qty for pybit place_order(). """
     if not current_price or current_price <= 0:
         return None
     if qty_decimals is None:
-        if current_price >= 10000:
-            qty_decimals = 5
-        elif current_price >= 1000:
-            qty_decimals = 4
-        elif current_price >= 1:
-            qty_decimals = 3
-        else:
-            qty_decimals = 2
+        qty_decimals = qty_decimals_for_price(current_price)
     qty = round(position_size_usd / current_price, qty_decimals)
     return qty if qty > 0 else None
 
@@ -1259,14 +1306,18 @@ async def auto_buy_loop():
                 f"Insufficient capital (base={capital_base}).",
             )
             continue
-        position_size_usd = compute_auto_trade_notional_usd(agent)
-        if position_size_usd is None:
+
+        plan = compute_auto_trade_plan(agent, agent.current_price)
+        if plan is None:
             _log_trade_skip(
                 result["action"], bybit_symbol, result.get("pattern"),
-                "Could not compute position size from portfolio value.",
+                f"Could not size trade (capital=${agent.get_total_portfolio_value()}, "
+                f"price=${agent.current_price}).",
             )
             continue
 
+        position_size_usd = plan["position_usd"]
+        qty = plan["qty"]
         result["symbol"] = bybit_symbol
         is_paper = bybit_api.mode == "PAPER_TRADING"
 
@@ -1277,6 +1328,7 @@ async def auto_buy_loop():
                 reason=f"PAPER TAAPI {result.get('pattern', 'signal')}",
                 source="auto",
                 position_size_usd=position_size_usd,
+                qty=qty,
             )
             fired = trade is not None
             skip_reason = None
@@ -1289,7 +1341,6 @@ async def auto_buy_loop():
                     skip_reason = f"Max concurrent trades ({agent.max_concurrent_trades}) reached."
                 else:
                     skip_reason = "Paper entry blocked (invalid price or zero balance)."
-            qty = compute_order_qty(position_size_usd, agent.current_price)
             system_log.set_last_trade_fire({
                 "success": fired,
                 "mode": "PAPER_TRADING",
@@ -1298,7 +1349,8 @@ async def auto_buy_loop():
                 "pattern": result.get("pattern"),
                 "qty": qty,
                 "position_usd": position_size_usd,
-                "capital_pct": AUTO_TRADE_CAPITAL_PCT * 100,
+                "capital_total": plan["total_capital"],
+                "capital_pct": plan["capital_pct"],
                 "sl": result.get("sl"),
                 "tp": result.get("tp"),
                 "entry": result.get("entry"),
@@ -1308,21 +1360,13 @@ async def auto_buy_loop():
             })
             if fired:
                 notifications.push(
-                    f"PAPER trade opened: {side} {agent.active_pair} | pattern={result['pattern']} | "
-                    f"${position_size_usd} ({AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital) | #{trade['id']}",
+                    f"PAPER trade opened: {side} {agent.active_pair} | {qty} @ ~${plan['price']:,.0f} | "
+                    f"${position_size_usd} ({plan['capital_pct']:.0f}% of ${plan['total_capital']:,.0f}) | "
+                    f"#{trade['id']}",
                     "success",
                 )
             elif skip_reason:
                 notifications.push(f"Paper trade skipped: {skip_reason}", "warning")
-            continue
-
-        qty = compute_order_qty(position_size_usd, agent.current_price)
-        if qty is None:
-            _log_trade_skip(
-                result["action"], bybit_symbol, result.get("pattern"),
-                f"Order qty rounds to zero (${position_size_usd} at price ${agent.current_price:,.2f}).",
-                position_usd=position_size_usd,
-            )
             continue
 
         if not is_bybit_testnet_configured():
@@ -1335,7 +1379,8 @@ async def auto_buy_loop():
                 "pattern": result.get("pattern"),
                 "qty": qty,
                 "position_usd": position_size_usd,
-                "capital_pct": AUTO_TRADE_CAPITAL_PCT * 100,
+                "capital_total": plan["total_capital"],
+                "capital_pct": plan["capital_pct"],
                 "sl": result.get("sl"),
                 "tp": result.get("tp"),
                 "entry": result.get("entry"),
@@ -1357,7 +1402,7 @@ async def auto_buy_loop():
             "pattern": result.get("pattern"),
             "qty": qty,
             "position_usd": position_size_usd,
-            "capital_pct": AUTO_TRADE_CAPITAL_PCT * 100,
+            "capital_pct": plan["capital_pct"],
             "sl": result.get("sl"),
             "tp": result.get("tp"),
             "entry": result.get("entry"),
@@ -1366,9 +1411,9 @@ async def auto_buy_loop():
         })
         if fired:
             notifications.push(
-                f"TESTNET order fired: {result['action']} {bybit_symbol} | pattern={result['pattern']} | "
-                f"qty={qty} (${position_size_usd} = {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital) | "
-                f"SL={result['sl']:.4f} | TP={result['tp']:.4f}",
+                f"TESTNET order fired: {result['action']} {bybit_symbol} | {qty} | "
+                f"${position_size_usd} ({plan['capital_pct']:.0f}% of ${plan['total_capital']:,.0f}) | "
+                f"pattern={result['pattern']}",
                 "success",
             )
         else:
