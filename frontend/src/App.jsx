@@ -26,7 +26,7 @@ import TradeExitConfirmModal from './components/TradeExitConfirmModal';
 import SystemLogModal from './components/SystemLogModal';
 
 export default function App() {
-  const { logout } = useAuth();
+  const { logout, username } = useAuth();
   const { status: apiStatus, setConnected } = useApiStatus();
   const pairSelector = usePairSelector();
   const { trades, activeCount, activePair: activeTradesPair, closeTrade } = useTrades(setConnected);
@@ -313,6 +313,7 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenLog={() => setLogModalOpen(true)}
         onLogout={logout}
+        username={username}
       />
 
       <MobilePortfolioCard

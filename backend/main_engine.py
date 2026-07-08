@@ -33,6 +33,10 @@ BYBIT_KLINE_INTERVAL = {
 }
 
 
+# Auto-order sizing: 2% of total wallet equity per TAAPI-fired trade.
+AUTO_TRADE_CAPITAL_PCT = 0.02
+
+
 class TradingEngine:
     """ The agent's heartbeat: polls Bybit for the latest closed candle, scans
     it for patterns, evaluates the trade math, and fires orders. """
@@ -104,6 +108,14 @@ class TradingEngine:
             self.last_processed_timestamp = 0
             print(f"[ENGINE] Settings changed -> now watching {symbol} @ {interval}, re-evaluating immediately.")
 
+    def _compute_auto_qty(self, entry_price: float) -> float | None:
+        equity = self.bybit_agent.fetch_usdt_equity()
+        if equity is None or equity <= 0 or entry_price <= 0:
+            return None
+        notional_usd = round(equity * AUTO_TRADE_CAPITAL_PCT, 2)
+        qty = round(notional_usd / entry_price, 3)
+        return qty if qty > 0 else None
+
     def start_heartbeat(self):
         """ Infinite loop: smart-sleeps per timeframe, then checks for a new
         closed candle and runs the full scan -> evaluate -> execute pipeline. """
@@ -135,7 +147,14 @@ class TradingEngine:
                         # evaluate_trade() doesn't carry a symbol in its payload -
                         # execute_trade() needs one, so it's added here.
                         result["symbol"] = self.current_symbol
-                        self.bybit_agent.execute_trade(result, qty=0.01)
+                        entry_price = float(result.get("entry") or candle["close"])
+                        qty = self._compute_auto_qty(entry_price)
+                        if qty is None:
+                            print("[ENGINE] Order skipped — could not size at 2% of total capital.")
+                            continue
+                        fired, err = self.bybit_agent.execute_trade(result, qty=qty)
+                        if not fired:
+                            print(f"[ENGINE] Order failed: {err}")
                     else:
                         print(f"[ENGINE] {result['action']}: {result['reason']}")
 

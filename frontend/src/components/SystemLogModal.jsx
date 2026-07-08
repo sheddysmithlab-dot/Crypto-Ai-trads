@@ -80,6 +80,7 @@ export default function SystemLogModal({
   const wsOk = apiStatus?.color === 'green';
   const bybitOk = conn.bybit_configured && (conn.bybit_mode === 'LIVE_TRADING' ? conn.bybit_connected : true);
   const aiOk = conn.ai_configured;
+  const bybitTestnetOk = conn.bybit_testnet_configured;
   const taapiOk = conn.taapi_configured;
 
   const mergedLogs = [
@@ -124,7 +125,7 @@ export default function SystemLogModal({
 
         <div className="overflow-y-auto flex-1 p-4 sm:p-6 space-y-4">
           {/* Connection grid */}
-          <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
             <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-2">Backend WebSockets</div>
               <StatusPill ok={wsOk} label={apiStatus?.label || 'UNKNOWN'} />
@@ -152,6 +153,11 @@ export default function SystemLogModal({
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-2">TAAPI.io</div>
               <StatusPill ok={taapiOk} label={taapiOk ? 'CONFIGURED' : 'MISSING KEY'} />
               <p className="text-[11px] text-gray-500 mt-2">exchange: {conn.taapi_exchange || 'binance'}</p>
+            </div>
+            <div className="bg-[#161A1E] border border-amber-700/40 rounded-xl p-3">
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-2">Bybit TESTNET</div>
+              <StatusPill ok={bybitTestnetOk} label={bybitTestnetOk ? 'KEYS SET' : 'KEYS MISSING'} />
+              <p className="text-[11px] text-gray-500 mt-2">Orders fire here (testnet.bybit.com)</p>
             </div>
           </section>
 
@@ -285,6 +291,14 @@ export default function SystemLogModal({
                   <dt className="text-gray-500">Qty</dt>
                   <dd className="text-gray-200">{tradeFire.qty}</dd>
                 </div>
+                {tradeFire.position_usd != null ? (
+                  <div>
+                    <dt className="text-gray-500">Size</dt>
+                    <dd className="text-gray-200">
+                      ${Number(tradeFire.position_usd).toLocaleString()} ({tradeFire.capital_pct || 2}% capital)
+                    </dd>
+                  </div>
+                ) : null}
                 <div className="col-span-2">
                   <dt className="text-gray-500">Pattern</dt>
                   <dd className="text-gray-200">{tradeFire.pattern || '—'}</dd>
@@ -297,6 +311,12 @@ export default function SystemLogModal({
                   <dt className="text-gray-500">Time</dt>
                   <dd className="text-gray-200">{formatTime(tradeFire.timestamp)}</dd>
                 </div>
+                {tradeFire.error ? (
+                  <div className="col-span-2 sm:col-span-4 mt-1 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2">
+                    <dt className="text-red-400 text-[10px] uppercase font-bold">Error</dt>
+                    <dd className="text-red-200 text-[11px] mt-1 break-words">{tradeFire.error}</dd>
+                  </div>
+                ) : null}
               </dl>
             )}
           </section>
@@ -336,7 +356,9 @@ export default function SystemLogModal({
 
           {settingsStatus ? (
             <p className="text-[10px] text-gray-600 text-center">
-              Settings: Bybit {settingsStatus.bybit_configured ? 'configured' : 'not set'} · AI {settingsStatus.ai_provider} ({settingsStatus.ai_configured ? 'ready' : 'key missing'})
+              Settings: Bybit mainnet {settingsStatus.bybit_configured ? 'configured' : 'not set'} · TESTNET{' '}
+              {conn.bybit_testnet_configured ? 'keys set' : 'keys missing'} · AI {settingsStatus.ai_provider} (
+              {settingsStatus.ai_configured ? 'ready' : 'key missing'})
             </p>
           ) : null}
         </div>

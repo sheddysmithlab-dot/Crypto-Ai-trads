@@ -23,7 +23,16 @@ from auth import (
     verify_credentials,
     verify_token,
 )
-from api_secrets import get_taapi_exchange, get_taapi_secret, get_zai_api_key, is_taapi_configured, is_zai_configured
+from api_secrets import (
+    get_taapi_exchange,
+    get_taapi_secret,
+    get_bybit_testnet_api_key,
+    get_bybit_testnet_api_secret,
+    get_zai_api_key,
+    is_bybit_testnet_configured,
+    is_taapi_configured,
+    is_zai_configured,
+)
 from chart_24h import chart_24h_refresh_loop, chart_24h_store
 from system_log import system_log
 from taapi_scanner import fetch_taapi_signals, evaluate_trade
@@ -226,6 +235,7 @@ class SettingsStore:
             "ai_configured": self.is_ai_configured(),
             "taapi_configured": is_taapi_configured(),
             "taapi_exchange": get_taapi_exchange(),
+            "bybit_testnet_configured": is_bybit_testnet_configured(),
         }
 
 settings_store = SettingsStore()
@@ -1077,19 +1087,25 @@ async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
     # startTime doubles as a unique, strictly-increasing per-candle id.
     return {"high": float(closed[2]), "low": float(closed[3]), "close_time": int(closed[0])}
 
+# TAAPI auto-order sizing: 2% of total portfolio value per fired trade.
+AUTO_TRADE_CAPITAL_PCT = 0.02
+
+def compute_auto_trade_notional_usd(agent) -> float | None:
+    """ Notional USD size for TAAPI-driven auto orders = 2% of total capital. """
+    total = agent.get_total_portfolio_value()
+    if total is None or total <= 0:
+        return None
+    return round(total * AUTO_TRADE_CAPITAL_PCT, 2)
+
 def compute_order_qty(position_size_usd, current_price, qty_decimals=3):
-    """ Converts the existing 1%-margin/leverage USD position size into a base-
-    asset quantity for pybit's place_order(). qty_decimals=3 is a reasonable
-    default (BTC's usual lot step) but isn't correct for every symbol - Bybit
-    enforces a per-symbol qty step via its instruments-info endpoint, which
-    this does not yet query. Fine for TESTNET experimentation; look this up
-    properly before risking mainnet orders. """
+    """ Converts a USD notional into base-asset qty for pybit place_order(). """
     if not current_price or current_price <= 0:
         return None
     qty = round(position_size_usd / current_price, qty_decimals)
     return qty if qty > 0 else None
 
 _bybit_executor_agent = None
+_bybit_testnet_keys_warned = False
 
 def get_bybit_executor_agent():
     """ Lazily builds the real-order-placing BybitAgent from TESTNET-only
@@ -1100,8 +1116,8 @@ def get_bybit_executor_agent():
     not silently reuse settings_store's mainnet keys. """
     global _bybit_executor_agent
     if _bybit_executor_agent is None:
-        key = os.environ.get("BYBIT_TESTNET_API_KEY", "").strip()
-        secret = os.environ.get("BYBIT_TESTNET_API_SECRET", "").strip()
+        key = get_bybit_testnet_api_key()
+        secret = get_bybit_testnet_api_secret()
         _bybit_executor_agent = BybitAgent(key, secret, testnet=True)
     return _bybit_executor_agent
 
@@ -1222,33 +1238,65 @@ async def auto_buy_loop():
         capital_base = agent.get_trading_capital_base()
         if capital_base is None or capital_base <= 0:
             continue
-        position_size_usd = round(capital_base * agent.margin_pct * agent.leverage, 2)
+        position_size_usd = compute_auto_trade_notional_usd(agent)
+        if position_size_usd is None:
+            continue
         qty = compute_order_qty(position_size_usd, agent.current_price)
         if qty is None:
             continue
 
         result["symbol"] = bybit_symbol
+
+        if not is_bybit_testnet_configured():
+            global _bybit_testnet_keys_warned
+            err = "BYBIT_TESTNET_API_KEY / BYBIT_TESTNET_API_SECRET not set — add keys from https://testnet.bybit.com to backend/.env"
+            system_log.set_last_trade_fire({
+                "success": False,
+                "action": result["action"],
+                "symbol": bybit_symbol,
+                "pattern": result.get("pattern"),
+                "qty": qty,
+                "position_usd": position_size_usd,
+                "capital_pct": AUTO_TRADE_CAPITAL_PCT * 100,
+                "sl": result.get("sl"),
+                "tp": result.get("tp"),
+                "entry": result.get("entry"),
+                "reason": result.get("reason"),
+                "error": err,
+            })
+            if not _bybit_testnet_keys_warned:
+                _bybit_testnet_keys_warned = True
+                system_log.push("bybit", err, {"symbol": bybit_symbol})
+                notifications.push("Bybit TESTNET keys missing — TAAPI signals fire but orders cannot execute.", "error")
+            continue
+
         executor = get_bybit_executor_agent()
-        fired = await asyncio.to_thread(executor.execute_trade, result, qty)
+        fired, order_error = await asyncio.to_thread(executor.execute_trade, result, qty)
         system_log.set_last_trade_fire({
             "success": bool(fired),
             "action": result["action"],
             "symbol": bybit_symbol,
             "pattern": result.get("pattern"),
             "qty": qty,
+            "position_usd": position_size_usd,
+            "capital_pct": AUTO_TRADE_CAPITAL_PCT * 100,
             "sl": result.get("sl"),
             "tp": result.get("tp"),
             "entry": result.get("entry"),
             "reason": result.get("reason"),
+            "error": order_error,
         })
         if fired:
             notifications.push(
                 f"TESTNET order fired: {result['action']} {bybit_symbol} | pattern={result['pattern']} | "
-                f"qty={qty} | SL={result['sl']:.4f} | TP={result['tp']:.4f}",
+                f"qty={qty} (${position_size_usd} = {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital) | "
+                f"SL={result['sl']:.4f} | TP={result['tp']:.4f}",
                 "success",
             )
         else:
-            notifications.push(f"TESTNET order FAILED: {result['action']} {bybit_symbol} (see server logs).", "error")
+            msg = order_error or "Unknown Bybit error — see server logs."
+            notifications.push(f"TESTNET order FAILED: {result['action']} {bybit_symbol} — {msg}", "error")
+            system_log.push("trade", f"Order rejected: {msg}", {"symbol": bybit_symbol, "action": result["action"]})
 
 async def market_simulator():
     """ Synthetic random-walk price - runs whenever the active pair has no
@@ -1640,6 +1688,7 @@ async def get_system_logs():
             "ai_base_url": settings_store.ai_base_url,
             "taapi_configured": taapi_key,
             "taapi_exchange": get_taapi_exchange(),
+            "bybit_testnet_configured": is_bybit_testnet_configured(),
         },
         "agent": {
             "is_active": agent.is_active,
@@ -1649,7 +1698,7 @@ async def get_system_logs():
             "current_price": round(agent.current_price, 4),
             "open_trades": len(agent.trades),
             "emergency_triggered": agent.emergency_triggered,
-            "policy": "TAAPI candle-pattern scan on each closed candle -> evaluate_trade() -> Bybit TESTNET market order with SL/TP",
+            "policy": f"TAAPI scan -> evaluate_trade() -> Bybit TESTNET order ({AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of total capital per trade)",
         },
         "chart": {
             "history_hint": "5M: backend /chart/24h snapshot, else Bybit spot klines, fallback Binance, then mock",

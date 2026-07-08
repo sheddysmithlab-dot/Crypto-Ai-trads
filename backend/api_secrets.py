@@ -59,3 +59,15 @@ def is_zai_configured() -> bool:
 
 def is_taapi_configured() -> bool:
     return bool(get_taapi_secret())
+
+
+def get_bybit_testnet_api_key() -> str:
+    return (os.environ.get("BYBIT_TESTNET_API_KEY") or "").strip()
+
+
+def get_bybit_testnet_api_secret() -> str:
+    return (os.environ.get("BYBIT_TESTNET_API_SECRET") or "").strip()
+
+
+def is_bybit_testnet_configured() -> bool:
+    return bool(get_bybit_testnet_api_key() and get_bybit_testnet_api_secret())

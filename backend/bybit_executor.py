@@ -24,11 +24,29 @@ class BybitAgent:
     def __init__(self, api_key, api_secret, testnet=True):
         """ testnet=True by default - callers must opt in to mainnet explicitly. """
         self.testnet = testnet
+        self.last_error = None
         self.session = HTTP(
             testnet=testnet,
             api_key=api_key,
             api_secret=api_secret,
         )
+
+    def fetch_usdt_equity(self) -> float | None:
+        """ Total unified-account equity (USDT) for position sizing. """
+        try:
+            resp = self.session.get_wallet_balance(accountType="UNIFIED")
+            if resp.get("retCode") != 0:
+                self.last_error = resp.get("retMsg", "wallet balance error")
+                return None
+            accounts = resp.get("result", {}).get("list", [])
+            if not accounts:
+                self.last_error = "No wallet data returned"
+                return None
+            equity = float(accounts[0].get("totalEquity", 0))
+            return equity if equity > 0 else None
+        except Exception as exc:
+            self.last_error = str(exc)
+            return None
 
     @staticmethod
     def _auto_price_decimals(price):
@@ -81,9 +99,10 @@ class BybitAgent:
                 slTriggerBy="LastPrice",
                 tpTriggerBy="LastPrice",
             )
+            self.last_error = None
             print(f"✅ ORDER FIRED: {action} {symbol} | SL: {sl_str} | TP: {tp_str}")
-            return True
+            return True, None
         except Exception as e:
+            self.last_error = str(e)
             print(f"❌ ORDER FAILED: {e}")
-            # No retry - a rejected/failed order is reported and left alone.
-            return False
+            return False, str(e)

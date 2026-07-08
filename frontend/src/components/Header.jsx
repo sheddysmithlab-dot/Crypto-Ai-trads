@@ -1,5 +1,7 @@
+import { useRef, useState } from 'react';
 import NotificationsDropdown from './NotificationsDropdown';
 import { fmtNum } from '../data/pairs';
+import { useClickOutside } from '../hooks/useClickOutside';
 
 const STATUS_COLOR = {
   green: 'text-green-500',
@@ -31,7 +33,12 @@ export default function Header({
   onOpenSettings,
   onOpenLog,
   onLogout,
+  username,
 }) {
+  const [profileOpen, setProfileOpen] = useState(false);
+  const profileRef = useRef(null);
+  useClickOutside(profileRef, () => setProfileOpen(false), profileOpen);
+
   const isProfit = dailyProfit >= 0;
   const isSeasonProfit = seasonProfit >= 0;
   const capStr = totalCapital.toLocaleString('en-US', { minimumFractionDigits: 2 });
@@ -138,17 +145,39 @@ export default function Header({
           <i className="fas fa-file-alt text-lg text-gray-600 dark:text-gray-300"></i>
         </button>
 
-        <button
-          type="button"
-          onClick={onLogout}
-          className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 transition"
-          title="Sign out"
-        >
-          <i className="fas fa-right-from-bracket text-gray-600 dark:text-gray-300"></i>
-        </button>
+        <div className="relative" ref={profileRef}>
+          <button
+            type="button"
+            onClick={() => setProfileOpen((open) => !open)}
+            className="w-8 h-8 rounded-full bg-gray-300 dark:bg-gray-700 flex items-center justify-center overflow-hidden border border-gray-300 dark:border-gray-600 hover:ring-2 hover:ring-blue-500/40 transition"
+            title="Profile"
+            aria-expanded={profileOpen}
+            aria-haspopup="true"
+          >
+            <i className="fas fa-user text-gray-500 dark:text-gray-300 text-sm"></i>
+          </button>
 
-        <div className="w-8 h-8 rounded-full bg-gray-300 dark:bg-gray-700 flex items-center justify-center overflow-hidden border border-gray-300 dark:border-gray-600">
-          <i className="fas fa-user text-gray-500 dark:text-gray-300 text-sm"></i>
+          {profileOpen && (
+            <div className="absolute right-0 mt-2 w-52 bg-white dark:bg-darkRow rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 overflow-hidden z-50">
+              <div className="px-3 py-3 border-b border-gray-200 dark:border-gray-700">
+                <div className="text-[10px] uppercase tracking-wider text-gray-500 dark:text-gray-400">Username</div>
+                <div className="text-sm font-bold text-gray-800 dark:text-gray-100 truncate mt-0.5" title={username}>
+                  {username || 'User'}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setProfileOpen(false);
+                  onLogout?.();
+                }}
+                className="w-full px-3 py-2.5 text-left text-sm font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center gap-2 transition"
+              >
+                <i className="fas fa-right-from-bracket"></i>
+                Logout
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </header>
