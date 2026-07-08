@@ -3,9 +3,9 @@ import { authFetch } from '../config/api';
 
 const PRESETS = [
   { amount: 1000, label: '$1K' },
+  { amount: 5000, label: '$5K' },
   { amount: 10000, label: '$10K' },
   { amount: 50000, label: '$50K' },
-  { amount: 142560.88, label: '$142.5K' },
 ];
 
 function fmtCurrency(num) {
@@ -13,13 +13,13 @@ function fmtCurrency(num) {
 }
 
 export default function PaperTradingModal({ open, onClose, currentCapital, onCapitalSet, isLive }) {
-  const [amount, setAmount] = useState('');
+  const [amount, setAmount] = useState('1000');
   const [status, setStatus] = useState({ tone: 'yellow', message: `Currently simulating with ${fmtCurrency(currentCapital)}.` });
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (open) {
-      setAmount('');
+      setAmount('1000');
       setStatus({ tone: 'yellow', message: `Currently simulating with ${fmtCurrency(currentCapital)}.` });
     }
   }, [open, currentCapital]);

@@ -548,7 +548,7 @@ class AITradingAgent:
         self.emergency_awaiting_decision = False
 
         # POLICY 2 / RULE 5 Config: Portfolio Kill Switch
-        self.starting_capital = 142560.88
+        self.starting_capital = 1000.0
         self.current_capital = self.starting_capital
         # Default 3.0% per the AI Agent Instructions setup modal; the modal's
         # /agent/config call updates this to whatever the user picks before start.
