@@ -1099,12 +1099,36 @@ def compute_auto_trade_notional_usd(agent) -> float | None:
         return None
     return round(total * AUTO_TRADE_CAPITAL_PCT, 2)
 
-def compute_order_qty(position_size_usd, current_price, qty_decimals=3):
-    """ Converts a USD notional into base-asset qty for pybit place_order(). """
+def compute_order_qty(position_size_usd, current_price, qty_decimals=None):
+    """ Converts a USD notional into base-asset qty for pybit place_order().
+    Decimals scale with price so small $ orders on BTC still produce a non-zero qty. """
     if not current_price or current_price <= 0:
         return None
+    if qty_decimals is None:
+        if current_price >= 10000:
+            qty_decimals = 5
+        elif current_price >= 1000:
+            qty_decimals = 4
+        elif current_price >= 1:
+            qty_decimals = 3
+        else:
+            qty_decimals = 2
     qty = round(position_size_usd / current_price, qty_decimals)
     return qty if qty > 0 else None
+
+
+def _log_trade_skip(action: str, symbol: str, pattern: str | None, reason: str, **extra):
+    """ Surface silent auto-entry failures in the System Log modal. """
+    system_log.set_last_trade_fire({
+        "success": False,
+        "action": action,
+        "symbol": symbol,
+        "pattern": pattern,
+        "error": reason,
+        **extra,
+    })
+    system_log.push("trade", f"SKIPPED: {action} {symbol} — {reason}", {"pattern": pattern, **extra})
+    print(f"[AUTO BUY LOOP] Trade skipped: {reason}")
 
 _bybit_executor_agent = None
 _bybit_testnet_keys_warned = False
@@ -1230,17 +1254,23 @@ async def auto_buy_loop():
 
         capital_base = agent.get_trading_capital_base()
         if capital_base is None or capital_base <= 0:
+            _log_trade_skip(
+                result["action"], bybit_symbol, result.get("pattern"),
+                f"Insufficient capital (base={capital_base}).",
+            )
             continue
         position_size_usd = compute_auto_trade_notional_usd(agent)
         if position_size_usd is None:
-            continue
-        qty = compute_order_qty(position_size_usd, agent.current_price)
-        if qty is None:
+            _log_trade_skip(
+                result["action"], bybit_symbol, result.get("pattern"),
+                "Could not compute position size from portfolio value.",
+            )
             continue
 
         result["symbol"] = bybit_symbol
+        is_paper = bybit_api.mode == "PAPER_TRADING"
 
-        if bybit_api.mode == "PAPER_TRADING":
+        if is_paper:
             side = "LONG" if result["action"] == "BUY" else "SHORT"
             trade = agent.open_trade(
                 side,
@@ -1249,7 +1279,17 @@ async def auto_buy_loop():
                 position_size_usd=position_size_usd,
             )
             fired = trade is not None
-            skip_reason = None if fired else "Paper entry skipped (inactive, cap reached, or insufficient capital)."
+            skip_reason = None
+            if not fired:
+                if not agent.is_active:
+                    skip_reason = "AI automation is not running — click START AI AUTOMATION."
+                elif agent.emergency_triggered:
+                    skip_reason = "Emergency halt is active."
+                elif len(agent.trades) >= agent.max_concurrent_trades:
+                    skip_reason = f"Max concurrent trades ({agent.max_concurrent_trades}) reached."
+                else:
+                    skip_reason = "Paper entry blocked (invalid price or zero balance)."
+            qty = compute_order_qty(position_size_usd, agent.current_price)
             system_log.set_last_trade_fire({
                 "success": fired,
                 "mode": "PAPER_TRADING",
@@ -1272,6 +1312,17 @@ async def auto_buy_loop():
                     f"${position_size_usd} ({AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital) | #{trade['id']}",
                     "success",
                 )
+            elif skip_reason:
+                notifications.push(f"Paper trade skipped: {skip_reason}", "warning")
+            continue
+
+        qty = compute_order_qty(position_size_usd, agent.current_price)
+        if qty is None:
+            _log_trade_skip(
+                result["action"], bybit_symbol, result.get("pattern"),
+                f"Order qty rounds to zero (${position_size_usd} at price ${agent.current_price:,.2f}).",
+                position_usd=position_size_usd,
+            )
             continue
 
         if not is_bybit_testnet_configured():
