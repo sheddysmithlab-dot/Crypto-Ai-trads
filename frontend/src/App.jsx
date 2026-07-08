@@ -67,11 +67,12 @@ export default function App() {
       debugLog('User clicked START AI AUTOMATION. Opening AI Agent Instructions modal...');
       setAgentModalOpen(true);
     } else {
-      setExitConfirm({
-        open: true,
-        type: 'stop',
-        tradeId: null,
-      });
+      debugLog('User clicked STOP AI AUTOMATION. Sending POST /emergency-exit to Backend...');
+      try {
+        await authFetch('/emergency-exit', { method: 'POST' });
+      } catch (err) {
+        console.error('Emergency exit failed:', err);
+      }
     }
   }
 
@@ -125,16 +126,6 @@ export default function App() {
     setAlertOpen(true);
   }
 
-  async function handleStopConfirm() {
-    setExitConfirm({ open: false, type: null, tradeId: null });
-    debugLog('User confirmed STOP AI AUTOMATION. Sending POST /stop-bot...');
-    try {
-      await authFetch('/stop-bot', { method: 'POST' });
-    } catch (err) {
-      console.error('Stop bot failed:', err);
-    }
-  }
-
   function requestForceClose(tradeId) {
     setExitConfirm({ open: true, type: 'force-close', tradeId });
   }
@@ -175,20 +166,11 @@ export default function App() {
   }
 
   function handleExitConfirm() {
-    if (exitConfirm.type === 'stop') return handleStopConfirm();
     if (exitConfirm.type === 'force-close') return handleForceCloseConfirm();
     if (exitConfirm.type === 'manual-sell') return handleManualSellConfirm();
   }
 
   const exitConfirmCopy = (() => {
-    if (exitConfirm.type === 'stop') {
-      return {
-        title: 'Stop AI Automation?',
-        message: 'AI automation band ho jayegi. Aapki open positions list me protected rahengi — koi auto sell nahi hogi.',
-        detail: `${activeCount} active position(s) abhi bhi open rahenge.`,
-        confirmLabel: 'Stop AI Only',
-      };
-    }
     if (exitConfirm.type === 'manual-sell') {
       return {
         title: 'Confirm Manual SELL?',

@@ -1,0 +1,239 @@
+"""Core candlestick-pattern scanning + trade-math logic, per SYSTEM_RULES.md.
+
+Two responsibilities only:
+  1. fetch_taapi_signals()  - pulls every pattern in TAAPI_PATTERNS from TAAPI.io.
+  2. evaluate_trade()       - turns those signals + the signal candle's OHLC into a
+                              concrete BUY/SELL/REJECT/NO_TRADE decision with
+                              entry/SL/TP prices, per the strict boundary rules.
+
+All constants below are copied from SYSTEM_RULES.md - do not hardcode
+fee/profit/buffer numbers anywhere else; change them here only.
+
+TAAPI is queried through its BULK endpoint (POST /bulk, max 20 calculations per
+request on every plan -> 30 patterns = 2 batched requests) instead of 30
+individual GETs: the free plan allows only 1 request / 15 seconds, so 30
+per-pattern calls could never finish inside a candle period, while 2 bulk
+requests spaced one rate-limit window apart always can.
+"""
+import os
+import time
+
+import requests
+
+# ==========================================
+# 1. BYBIT FEE & PROFIT MATH CONSTANTS
+# ==========================================
+BYBIT_TAKER_FEE = 0.002  # 0.2% total (0.1% open + 0.1% close)
+# Formula for API Target: Gross_TP = User_Net_Profit + BYBIT_TAKER_FEE
+
+# ==========================================
+# 2. TIMEFRAME PROFIT & MAX SL MATRIX (STRICT LOOKUP)
+# ==========================================
+TIMEFRAME_RULES = {
+    "30s": {"net_profit": 0.004, "gross_tp": 0.006, "max_allowed_sl": 0.006, "buffer": 0.0005},
+    "1m":  {"net_profit": 0.006, "gross_tp": 0.008, "max_allowed_sl": 0.008, "buffer": 0.0005},
+    "3m":  {"net_profit": 0.006, "gross_tp": 0.008, "max_allowed_sl": 0.008, "buffer": 0.0010},
+    "5m":  {"net_profit": 0.006, "gross_tp": 0.008, "max_allowed_sl": 0.008, "buffer": 0.0010},
+    "10m": {"net_profit": 0.008, "gross_tp": 0.010, "max_allowed_sl": 0.010, "buffer": 0.0010},
+    "15m": {"net_profit": 0.008, "gross_tp": 0.010, "max_allowed_sl": 0.010, "buffer": 0.0015},
+    "30m": {"net_profit": 0.010, "gross_tp": 0.012, "max_allowed_sl": 0.012, "buffer": 0.0015},
+    "1h":  {"net_profit": 0.012, "gross_tp": 0.014, "max_allowed_sl": 0.014, "buffer": 0.0015},
+    "1D":  {"net_profit": 0.015, "gross_tp": 0.017, "max_allowed_sl": 0.017, "buffer": 0.0015},
+}
+
+# ==========================================
+# 3. TAAPI.IO PATTERN DICTIONARY
+# Structure: "endpoint": "Action_Type" - 'BUY', 'SELL', or 'BOTH'.
+#
+# Endpoint names are TAAPI's REAL indicator slugs (verified against
+# https://taapi.io/indicators/) - SYSTEM_RULES.md's draft listed them with a
+# TA-Lib-style "cdl_" prefix (cdl_hammer, cdl_belt_hold, ...) that does not
+# exist on TAAPI's API; querying those names 404s on every single call, which
+# silently zeroed every signal. Same 30 patterns, same action types - only the
+# slugs are corrected (incl. the cdl_dragondflydoji typo -> dragonflydoji).
+#
+# Action_Type drives signal direction - NOT the raw value's sign alone:
+# TA-Lib reports doji-family shapes as +100 whenever found (the shape itself
+# is direction-neutral), so e.g. gravestonedoji comes back POSITIVE even
+# though the rules dictionary classifies it as a SELL setup. One-sided BUY/
+# SELL patterns therefore take their direction from this dictionary, and only
+# 'BOTH' patterns (engulfing, harami, ...) use the value's sign (+1 bullish
+# variant / -1 bearish variant).
+# ==========================================
+TAAPI_PATTERNS = {
+    # --- BULLISH REVERSALS (BUY) ---
+    "hammer": "BUY",
+    "invertedhammer": "BUY",
+    "dragonflydoji": "BUY",
+    "belthold": "BOTH",            # Value 1 = BUY, -1 = SELL
+    "engulfing": "BOTH",           # Value 1 = BUY, -1 = SELL
+    "piercing": "BUY",
+    "harami": "BOTH",              # Value 1 = BUY, -1 = SELL
+    "kicking": "BOTH",             # Value 1 = BUY, -1 = SELL
+    "matchinglow": "BUY",
+    "separatinglines": "BUY",
+    "counterattack": "BUY",
+    "morningstar": "BUY",
+    "morningdojistar": "BUY",
+    "3whitesoldiers": "BUY",
+    "abandonedbaby": "BOTH",       # Value 1 = BUY, -1 = SELL
+    "3inside": "BOTH",             # Value 1 = BUY, -1 = SELL
+    "3outside": "BOTH",            # Value 1 = BUY, -1 = SELL
+    "concealbabyswall": "BUY",
+    "ladderbottom": "BUY",
+    # --- BEARISH REVERSALS (SELL) ---
+    "hangingman": "SELL",
+    "shootingstar": "SELL",
+    "gravestonedoji": "SELL",
+    "darkcloudcover": "SELL",
+    "3blackcrows": "SELL",
+    "eveningstar": "SELL",
+    "eveningdojistar": "SELL",
+    "upsidegap2crows": "SELL",
+    # --- TREND CONTINUATION (HOLD/ADD) ---
+    "risefall3methods": "BOTH",    # Value 1 = Bullish Continuation, -1 = Bearish Continuation
+    "mathold": "BUY",
+    "3linestrike": "BOTH",         # Value 1 = Buy the dip, -1 = Sell the rally
+}
+
+# TAAPI only supports these query intervals: 1m/5m/15m/30m/1h/2h/4h/12h/1d/1w.
+# TIMEFRAME_RULES' "30s"/"3m"/"10m"/"1D" keys have no TAAPI equivalent and map
+# to the nearest supported granularity (callers keep using TIMEFRAME_RULES
+# keys everywhere else - only the TAAPI query itself is translated).
+TAAPI_INTERVAL_MAP = {
+    "30s": "1m", "1m": "1m", "3m": "1m", "5m": "5m", "10m": "5m",
+    "15m": "15m", "30m": "30m", "1h": "1h", "1d": "1d", "1D": "1d",
+}
+
+TAAPI_BULK_URL = "https://api.taapi.io/bulk"
+MAX_CALCULATIONS_PER_BULK = 20  # hard cap on EVERY TAAPI plan, free included
+
+
+def _normalize_signal(action_type, raw_value):
+    """ Applies the rules dictionary's Action_Type to TAAPI's raw pattern value:
+    a one-sided pattern's direction comes from the dictionary (any non-zero hit
+    counts), only 'BOTH' patterns use the sign of the value itself. """
+    if not raw_value:
+        return 0
+    if action_type == "BUY":
+        return 1
+    if action_type == "SELL":
+        return -1
+    return 1 if raw_value > 0 else -1
+
+
+def fetch_taapi_signals(symbol, interval, exchange, api_key):
+    """ Queries all TAAPI_PATTERNS via the bulk endpoint (batches of <=20) and
+    returns [{"pattern": <slug>, "value": 1 | -1 | 0}] - direction already
+    normalized through the Action_Type dictionary. A failed batch / errored
+    indicator / missing key contributes 0 for its patterns (fail safe: no
+    signal, no trade), with one summary log line instead of silent zeros.
+
+    TAAPI_BATCH_DELAY_SECONDS (env, default 16) spaces the two batches to
+    respect the free plan's 1-request-per-15s limit; paid plans can set it
+    to 0. """
+    taapi_interval = TAAPI_INTERVAL_MAP.get(interval, interval)
+    names = list(TAAPI_PATTERNS.keys())
+    batches = [names[i:i + MAX_CALCULATIONS_PER_BULK] for i in range(0, len(names), MAX_CALCULATIONS_PER_BULK)]
+    try:
+        batch_delay = float(os.environ.get("TAAPI_BATCH_DELAY_SECONDS", "16"))
+    except ValueError:
+        batch_delay = 16.0
+
+    raw_values = {name: 0 for name in names}
+    failed = 0
+    for batch_index, batch in enumerate(batches):
+        if batch_index > 0 and batch_delay > 0:
+            time.sleep(batch_delay)  # runs in a worker thread (asyncio.to_thread), never blocks the event loop
+        body = {
+            "secret": api_key,
+            "construct": {
+                "exchange": exchange,
+                "symbol": symbol,
+                "interval": taapi_interval,
+                "indicators": [{"id": name, "indicator": name} for name in batch],
+            },
+        }
+        try:
+            resp = requests.post(TAAPI_BULK_URL, json=body, timeout=15)
+            resp.raise_for_status()
+            for item in resp.json().get("data", []):
+                name = item.get("id")
+                if name not in raw_values:
+                    continue
+                if item.get("errors"):
+                    failed += 1
+                    continue
+                value = item.get("result", {}).get("value", 0)
+                if isinstance(value, (int, float)):
+                    raw_values[name] = value
+        except Exception as exc:
+            failed += len(batch)
+            print(f"[TAAPI] Bulk batch {batch_index + 1}/{len(batches)} failed: {exc}")
+
+    if failed:
+        print(f"[TAAPI] {failed}/{len(names)} pattern lookups unavailable this scan "
+              f"(rate limit / plan tier / symbol not on '{exchange}').")
+
+    return [
+        {"pattern": name, "value": _normalize_signal(TAAPI_PATTERNS[name], raw_values[name])}
+        for name in names
+    ]
+
+
+def evaluate_trade(signals_list, interval, candle_high, candle_low):
+    """ Reduces a batch of pattern signals + the signal candle's High/Low into
+    one final trade decision, strictly per SYSTEM_RULES.md's boundary rules. """
+
+    # a) CONFLICT CHECK - a bullish AND a bearish pattern firing at once is an
+    # unreliable, contradictory read - skip the candle entirely.
+    has_bullish = any(s["value"] == 1 for s in signals_list)
+    has_bearish = any(s["value"] == -1 for s in signals_list)
+    if has_bullish and has_bearish:
+        return {"action": "NO_TRADE", "reason": "Conflicting signals"}
+
+    # b) SIGNAL EXTRACTION - first non-zero signal in the list (conflict check
+    # above already guarantees every non-zero entry shares the same sign).
+    first_signal = next((s for s in signals_list if s["value"] != 0), None)
+    if first_signal is None:
+        return {"action": "NO_TRADE", "reason": "No valid signal"}
+    action = "BUY" if first_signal["value"] == 1 else "SELL"
+    pattern_name = first_signal["pattern"]
+
+    # c) MATH & REJECTION CHECK
+    rules = TIMEFRAME_RULES.get(interval)
+    if rules is None:
+        return {"action": "NO_TRADE", "reason": f"Unknown timeframe '{interval}'"}
+    buffer_pct = rules["buffer"]
+    max_allowed_sl = rules["max_allowed_sl"]
+    gross_tp = rules["gross_tp"]
+
+    if candle_low <= 0:
+        return {"action": "NO_TRADE", "reason": "Invalid candle price data"}
+
+    # TIMEFRAME_RULES' buffer/max_allowed_sl are FRACTIONS of price (e.g. 0.008
+    # = 0.8%), but candle_high/candle_low are absolute prices. Comparing a raw
+    # dollar range against a thousandths-of-a-percent threshold would reject
+    # every real-priced asset unconditionally (e.g. BTC's ~$100k candles are
+    # always many dollars wide, always "greater than" 0.008) - so the range is
+    # expressed as a percentage of price first, and buffer is converted to an
+    # absolute price offset off candle_low before being added/subtracted below.
+    range_pct = (candle_high - candle_low) / candle_low
+    sl_distance_pct = range_pct + (2 * buffer_pct)
+    if sl_distance_pct > max_allowed_sl:
+        return {"action": "REJECT", "reason": "SL exceeds timeframe limit"}
+
+    buffer = candle_low * buffer_pct
+
+    # d) FINAL PRICE CALCULATIONS
+    if action == "BUY":
+        entry = candle_high + buffer
+        sl = candle_low - buffer
+        tp = entry * (1 + gross_tp)
+    else:
+        entry = candle_low - buffer
+        sl = candle_high + buffer
+        tp = entry * (1 - gross_tp)
+
+    # e) Final payload
+    return {"action": action, "entry": entry, "sl": sl, "tp": tp, "pattern": pattern_name}

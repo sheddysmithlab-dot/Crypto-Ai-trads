@@ -7,9 +7,9 @@ import { fmtNum, getBinanceSymbol, getBybitSymbol } from '../data/pairs';
 // Timeframe -> candle interval in seconds. Drives BOTH historical bucketing
 // and live WebSocket tick bucketing so the chart genuinely reacts to the
 // selected timeframe (not just a cosmetic label change).
-const TIMEFRAME_SECONDS = { '10S': 10, '30S': 30, '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 86400 };
+const TIMEFRAME_SECONDS = { '30S': 30, '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 86400 };
 
-// Standard kline granularities on each exchange. 10S/30S are built from recent trades.
+// Standard kline granularities on each exchange. 30S is built from recent trades.
 const BYBIT_KLINE_INTERVAL = { '1M': '1', '5M': '5', '15M': '15', '1H': '60', '1D': 'D' };
 const BINANCE_KLINE_INTERVAL = { '1M': '1m', '5M': '5m', '15M': '15m', '1H': '1h', '1D': '1d' };
 
@@ -105,8 +105,8 @@ async function fetchRealHistory(binanceSymbol, klineInterval, limit = 150) {
   }));
 }
 
-// Binance has no kline granularity below 1 minute, so for the custom 10S/30S
-// timeframes we bucket the most recent REAL trades ourselves instead of
+// Binance has no kline granularity below 1 minute, so for the custom 30S
+// timeframe we bucket the most recent REAL trades ourselves instead of
 // falling back to fully synthetic data. Covers a few real minutes of actual
 // price action (exact span depends on how actively that pair is trading).
 async function fetchRealTradesAsCandles(binanceSymbol, intervalSeconds, limit = 1000) {

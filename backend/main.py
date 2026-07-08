@@ -24,6 +24,8 @@ from auth import (
     verify_token,
 )
 from chart_24h import chart_24h_refresh_loop, chart_24h_store
+from taapi_scanner import fetch_taapi_signals, evaluate_trade
+from bybit_executor import BybitAgent
 
 # Load backend/.env on startup (local dev). On Render, set ZAI_API_KEY in the
 # service environment — values there override / supplement the file.
@@ -562,7 +564,7 @@ class AITradingAgent:
         self.trade_history = []  # session list (active + sold), cleared only on START/STOP
 
         # Chart-only timeframe (kept so the frontend's /set-timeframe call still
-        # works). Entries no longer read candles - they fire on a 10s cadence.
+        # works). No auto-entry policy currently reads this - see auto_buy_loop().
         self.timeframe_seconds = 30
 
     def _trade_metrics(self, t):
@@ -699,18 +701,22 @@ class AITradingAgent:
         print(f"[PILLAR 3: AI AGENT] Paper trading capital reset to ${amount:,.2f}.")
 
     def set_timeframe(self, seconds):
-        """ Chart-only timeframe sync (frontend -> backend). The UI's selected
-        timeframe is stored for display purposes; entries no longer depend on
-        candles - they fire on a 10s unconditional cadence (auto_buy_loop). """
+        """ Frontend -> backend timeframe sync. Drives the TAAPI candle-pattern
+        auto-buy loop's polling interval. A candle's close_time isn't
+        comparable across different candle granularities, so a timeframe
+        change clears every pair's last-processed timestamp - otherwise the
+        loop could wrongly treat the new timeframe's current candle as
+        "already seen" and skip it until the next boundary. """
         self.timeframe_seconds = seconds
-        print(f"[TIMEFRAME SYNC] Backend timeframe set to {seconds}s (chart-only; entries are 10s unconditional).")
+        LAST_CANDLE_TIMESTAMPS.clear()
+        print(f"[TIMEFRAME SYNC] Backend timeframe set to {seconds}s.")
 
     def open_trade(self, side="LONG", reason="Manual", source="auto"):
         """ RULE 1: Opens a position sized at EXACTLY 1% margin of current total capital,
         with 100x leverage, filled as a Market Order (RULE 7) with simulated minor slippage.
-        `source` tags who opened it - "auto" (the 10s unconditional auto-buy loop) or
-        "manual" (the dashboard's manual BUY button) - so the manual SELL button can
-        tell them apart and only ever close manually-opened positions.
+        `source` tags who opened it - "auto" (the background auto-buy loop, currently idle
+        with no policy defined) or "manual" (the dashboard's manual BUY button) - so the
+        manual SELL button can tell them apart and only ever close manually-opened positions.
 
         Manual vs auto gating mirrors the ControlBar UI:
           - manual BUY/SELL are enabled only while automation is OFF (not is_active)
@@ -844,12 +850,12 @@ class AITradingAgent:
 
     async def process_tick(self, new_price, volume_increment):
         """ Runs on EVERY market tick (real Bybit feed or synthetic fallback).
-        NEW POLICY: entries are NO LONGER driven by candles/volume/indicators -
-        they fire on a strict 10-second cadence from auto_buy_loop(). This tick
-        handler now only: updates the live price, runs the RULE 8 30s auto-kill
-        timer, the RULE 5 portfolio kill switch, the optional daily-profit
-        target, and the RULE 4/6 trailing-lock exit (net-of-fees profit booking).
-        `volume_increment` is accepted for feed compatibility but unused now. """
+        POLICY CLEARED: all entry/exit trading rules (10s auto-buy, RULE 4/6
+        trailing lock, RULE 5 kill switch, RULE 8 auto-kill timer, daily
+        profit target halt) have been erased and await a new definition. This
+        tick handler now only updates the live price and clears corrupt
+        positions. `volume_increment` is accepted for feed compatibility but
+        unused. """
         clean_price = _sanitize_market_price(new_price)
         if clean_price is None:
             print(f"[PILLAR 3: AI AGENT] Ignoring invalid market tick: {new_price!r}")
@@ -863,91 +869,6 @@ class AITradingAgent:
                 f"Removed {len(corrupt)} corrupt position(s) with invalid entry prices on {self.active_pair}.",
                 "warning",
             )
-
-        # RULE 8: Backend Timer (Source of Truth) - Auto-execute emergency exit if 30 seconds pass with no response
-        now = time.time()
-        if (self.emergency_triggered and self.emergency_trigger_time is not None
-            and not self.emergency_auto_kill_executed):
-            seconds_elapsed = now - self.emergency_trigger_time
-            if seconds_elapsed >= 30:
-                # User didn't respond within 30 seconds -> backend auto-executes emergency exit,
-                # actually selling positions now (they were left running during the 30s window).
-                print(f"[RULE 8: AUTO-KILL] 30-second countdown expired. Backend auto-executing EMERGENCY EXIT.")
-                self.emergency_auto_kill_executed = True
-                self._close_all_positions("EMERGENCY SELL ALL TRIGGERED | RULE 8 30s auto-kill (no response)")
-                self.is_active = False
-                self.clear_emergency_state()
-                self.end_ai_season()
-                notifications.push("⚠️ RULE 8: 30-second timeout reached. System auto-halted.", "error")
-                return
-
-        # (Entry logic removed - see auto_buy_loop() for the 10s unconditional fire & hold.)
-
-        total_value = self.get_total_portfolio_value()
-        baseline = self.get_session_baseline()
-        portfolio_drop = ((baseline - total_value) / baseline) * 100 if baseline else 0.0
-
-        # RULE 5/8: Kill switch vs AI-season baseline (not lifetime paper capital).
-        if (self.is_active and portfolio_drop >= self.max_loss_pct
-                and not self.emergency_triggered):
-            self.trigger_emergency_exit(
-                reason=f"RULE 5: {self.max_loss_pct:.1f}% Session Stop-Loss Hit! "
-                       f"(Total Value ${total_value:,.2f}, baseline ${baseline:,.2f})."
-            )
-            return
-
-        if not self.trades:
-            return
-
-        # AI Agent Instructions modal: optional "Capital profit of the day" target.
-        # Once the day's profit % crosses it, halt NEW entries (existing positions
-        # keep being managed by the trailing lock and can still close on their own).
-        if (self.is_active and self.daily_profit_target_pct > 0
-                and not self.daily_target_reached and not self.emergency_triggered):
-            daily_profit_pct = ((total_value - self.starting_capital) / self.starting_capital) * 100
-            if daily_profit_pct >= self.daily_profit_target_pct:
-                self.daily_target_reached = True
-                print(f"[PILLAR 3: AI AGENT] Daily profit target {self.daily_profit_target_pct}% reached "
-                      f"(current {daily_profit_pct:.2f}%). New entries halted; existing positions remain open.")
-                notifications.push(
-                    f"🎯 Daily profit target of {self.daily_profit_target_pct}% reached! New entries halted.",
-                    "success",
-                )
-
-        # RULE 4 & 6: Dynamic Trailing Lock, driven by TRUE NET PROFIT (post-fee), not gross
-        net_pcts = [self._trade_metrics(t)["net_pct"] for t in self.trades]
-        avg_net_pct = sum(net_pcts) / len(net_pcts)
-
-        # NEW PROFIT BOOKING POLICY: 0.40% strict floor + 30% dynamic trailing.
-        # Floor: never sell below PROFIT_FLOOR_PCT net profit (after Bybit's
-        # ~0.20% fee, real profit still remains). Trailing: sell when avg net
-        # drops TRAILING_DROP_PCT (30%) from its highest peak. Example: peak
-        # +1.00% -> 30% of 1.00 = 0.30 -> sell at +0.70%. Floor override: if the
-        # peak is small enough that 30% off it would land below 0.40%, ignore the
-        # 30% rule and sell strictly at 0.40%.
-        floor = self.PROFIT_FLOOR_PCT
-        trailing_target = self.peak_net_pct * (1 - self.TRAILING_DROP_PCT)
-        floor_override = trailing_target < floor
-        effective_target = floor if floor_override else trailing_target
-
-        if avg_net_pct >= floor:
-            if not self.is_lock_active:
-                notifications.push(f"Trailing Lock ACTIVATED on {self.active_pair} at +{avg_net_pct:.3f}% net profit (floor {floor}%).", "success")
-                self.is_lock_active = True
-            if avg_net_pct > self.peak_net_pct:
-                self.peak_net_pct = avg_net_pct  # Trail Up
-                notifications.push(f"Trailing Lock peak shifted up to +{avg_net_pct:.3f}%.", "info")
-
-        # Fire only once we've actually retreated from the peak (avg < peak), so
-        # the lock activating at exactly the floor doesn't instantly sell.
-        if self.is_lock_active and self.peak_net_pct >= floor:
-            if avg_net_pct < self.peak_net_pct and avg_net_pct <= effective_target:
-                if floor_override:
-                    reason = (f"Profit Book: Floor Override @ {floor:.2f}% net "
-                              f"(peak {self.peak_net_pct:.3f}%, 30% drop -> {trailing_target:.3f}% would breach floor). Market SELL.")
-                else:
-                    reason = (f"Profit Book: 30% Trailing Drop (peak {self.peak_net_pct:.3f}% -> target {effective_target:.3f}%). Market SELL.")
-                self.execute_sell(reason)
 
     def execute_sell(self, reason):
         # RULE 4/6 & 7: Profit-protection sell. Exit orders are Market Orders.
@@ -1032,13 +953,14 @@ class AITradingAgent:
         self.is_lock_active = False
 
     def manual_stop(self, reason="Manual Kill Switch Activated from Frontend"):
-        """ Plain STOP TRADING button — halts AI only. Open positions (manual + auto) stay
-        protected in the live list until the user explicitly confirms an exit action. """
+        """ Plain STOP TRADING button — emergency exit: sell all open positions and halt AI. """
         print(f"[PILLAR 2: BACKEND] {reason}")
+        self._close_all_positions(reason)
         self.is_active = False
         self.end_ai_season()
+        self.peak_net_pct = 0.0
         self.is_lock_active = False
-        notifications.push("AI automation stopped. Open positions remain protected.", "warning")
+        notifications.push("EMERGENCY EXIT: All positions closed and AI automation stopped.", "error")
 
     def resume_trading_with_higher_buffer(self):
         """ User chose 'CONTINUE' on the risk popup: raise the cumulative stop-loss
@@ -1069,18 +991,107 @@ agent = AITradingAgent()
 BYBIT_SYMBOL_MAP = {
     "BTC": "BTCUSDT",
     "ETH": "ETHUSDT",
-    "SOL": "SOLUSDT",
-    "BNB": "BNBUSDT",
-    "MNT": "MNTUSDT",
-    "HYPE": "HYPEUSDT",
-    "SLX": "SLXUSDT",
-    "GRAM": "GRAMUSDT",
-    "CSPR": "CSPRUSDT",
+    "XRP": "XRPUSDT",
+    "LTC": "LTCUSDT",
+    # XMR intentionally has NO mapping: delisted from both Bybit and Binance
+    # spot (verified live 2026-07-08 - "Not supported symbols" / last Binance
+    # candle Feb 2024). The pair stays selectable in the UI, but with no
+    # mapping the synthetic market_simulator drives its price and the TAAPI
+    # auto-buy loop skips it entirely (no real market -> no real trades).
 }
 
 def get_bybit_symbol(pair_label):
     symbol = (pair_label or "").split("/")[0]
     return BYBIT_SYMBOL_MAP.get(symbol)
+
+# ==========================================
+# TAAPI CANDLE-PATTERN POLICY: interval translation tables.
+# Three different "interval" vocabularies have to agree here:
+#  - agent.timeframe_seconds: raw seconds, set by the frontend's chart timeframe
+#    selector (only 30S/1M/5M/15M/1H/1D exist there today).
+#  - TIMEFRAME_RULES keys (taapi_scanner.py / SYSTEM_RULES.md): "30s".."1D" -
+#    includes 3m/10m/30m, which nothing on the frontend can select yet. TAAPI's
+#    own query interval is translated FROM these keys inside taapi_scanner
+#    (TAAPI_INTERVAL_MAP) - callers only ever deal in TIMEFRAME_RULES keys.
+#  - Bybit kline's `interval` param: plain minute numbers ("1","5","60") or "D" -
+#    no native 30s or 10m candle, so those fall back to the nearest one available.
+# ==========================================
+SECONDS_TO_TIMEFRAME_KEY = {
+    30: "30s",
+    60: "1m",
+    300: "5m",
+    900: "15m",
+    3600: "1h",
+    86400: "1D",
+}
+
+TIMEFRAME_KEY_TO_BYBIT_KLINE = {
+    "30s": "1", "1m": "1", "3m": "3", "5m": "5", "10m": "5",
+    "15m": "15", "30m": "30", "1h": "60", "1D": "D",
+}
+
+# Per-pair last-processed CLOSED candle timestamp, keyed by pair label - keeping
+# this per-pair (not one shared scalar) means switching pairs never needs a
+# manual reset: a pair's own last-seen timestamp is either genuinely stale
+# (correctly triggers a re-scan) or doesn't exist yet (defaults to 0). A
+# TIMEFRAME change is the only case that needs an explicit reset (see
+# set_timeframe below) since a candle's close_time isn't comparable across
+# different candle granularities.
+LAST_CANDLE_TIMESTAMPS = {}
+
+# Pairs already warned about a failing candle fetch (e.g. no Bybit LINEAR/USDT
+# Perpetual market for that symbol - several of BYBIT_SYMBOL_MAP's smaller-cap
+# tokens may only have a SPOT listing). Warns once per pair instead of every
+# failed poll cycle, so a genuinely-unsupported pair doesn't spam the bell.
+_CANDLE_FETCH_WARNED_PAIRS = set()
+
+async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
+    """ Reads the last 2 klines from Bybit's LINEAR (USDT Perpetual) market -
+    matching where bybit_executor.py actually places orders, not the spot
+    feed the dashboard's price simulation uses - and returns the previous,
+    fully closed candle (index 0 is still forming). Native httpx/async so it
+    never blocks the event loop (unlike pybit's sync client). """
+    bybit_interval = TIMEFRAME_KEY_TO_BYBIT_KLINE.get(timeframe_key, "1")
+    url = (
+        f"https://api.bybit.com/v5/market/kline?category=linear"
+        f"&symbol={bybit_symbol}&interval={bybit_interval}&limit=2"
+    )
+    async with httpx.AsyncClient(timeout=6.0) as client:
+        resp = await client.get(url)
+    resp.raise_for_status()
+    candles = resp.json()["result"]["list"]  # newest-first
+    closed = candles[1]
+    # Bybit's kline row is [startTime, open, high, low, close, volume, turnover] -
+    # startTime doubles as a unique, strictly-increasing per-candle id.
+    return {"high": float(closed[2]), "low": float(closed[3]), "close_time": int(closed[0])}
+
+def compute_order_qty(position_size_usd, current_price, qty_decimals=3):
+    """ Converts the existing 1%-margin/leverage USD position size into a base-
+    asset quantity for pybit's place_order(). qty_decimals=3 is a reasonable
+    default (BTC's usual lot step) but isn't correct for every symbol - Bybit
+    enforces a per-symbol qty step via its instruments-info endpoint, which
+    this does not yet query. Fine for TESTNET experimentation; look this up
+    properly before risking mainnet orders. """
+    if not current_price or current_price <= 0:
+        return None
+    qty = round(position_size_usd / current_price, qty_decimals)
+    return qty if qty > 0 else None
+
+_bybit_executor_agent = None
+
+def get_bybit_executor_agent():
+    """ Lazily builds the real-order-placing BybitAgent from TESTNET-only
+    credentials, deliberately kept SEPARATE from settings_store's Bybit
+    credentials (those are the dashboard's mainnet balance-reading keys).
+    Testnet requires its own key pair from testnet.bybit.com - mixing
+    testnet/mainnet keys fails outright (Bybit retCode 10003), so this must
+    not silently reuse settings_store's mainnet keys. """
+    global _bybit_executor_agent
+    if _bybit_executor_agent is None:
+        key = os.environ.get("BYBIT_TESTNET_API_KEY", "").strip()
+        secret = os.environ.get("BYBIT_TESTNET_API_SECRET", "").strip()
+        _bybit_executor_agent = BybitAgent(key, secret, testnet=True)
+    return _bybit_executor_agent
 
 async def fetch_bybit_spot_price(pair_label):
     """ Latest spot last price for pair switching / seeding current_price. """
@@ -1121,30 +1132,99 @@ _last_real_feed_update = 0.0
 REAL_FEED_STALE_AFTER_SECONDS = 10
 
 # ==========================================
-# NEW ENTRY POLICY: 10-SEC UNCONDITIONAL FIRE & HOLD
-# Replaces the old candle/volume (RULE 3) entry logic. Once the bot is active,
-# this loop fires ONE new BUY trade every 10 seconds - unconditionally, with no
-# technical-indicator gating. The max_concurrent_trades cap (Risk-based SL * 1.5,
-# set from the AI Agent Instructions modal) acts as the HOLD: when active trades
-# reach the cap, the loop skips firing; the moment a trade sells and frees a
-# slot, the next 10s tick resumes firing so the book refills to the cap.
-# Exit/profit-booking still runs in process_tick (trailing lock, kill switch).
+# ENTRY POLICY: TAAPI CANDLE-PATTERN SCAN -> REAL BYBIT TESTNET EXECUTION
+# Per SYSTEM_RULES.md (taapi_scanner.py) + bybit_executor.py. On every new
+# CLOSED candle (interval follows the frontend's selected chart timeframe),
+# scans the curated pattern set, applies the strict conflict/rejection math,
+# and - on a valid BUY/SELL - fires a REAL Market order on Bybit TESTNET with
+# SL/TP attached exchange-side. Once fired, Bybit's engine (not this loop)
+# closes the trade - no monitoring, no early exit, matching the NO EARLY EXIT
+# rule. These orders do NOT go through agent.open_trade()/agent.trades: that
+# in-memory ledger assumes the app itself decides when a position closes,
+# which no longer applies once SL/TP are exchange-attached, so surfacing them
+# there would show a "position" the app can never actually resolve. Fired/
+# rejected/failed outcomes are pushed to the notification bell instead.
 # ==========================================
-AUTO_BUY_INTERVAL_SECONDS = 10
 
 async def auto_buy_loop():
-    print(f"[AUTO BUY LOOP] Background task starting (every {AUTO_BUY_INTERVAL_SECONDS}s, unconditional fire & hold).")
+    print("[AUTO BUY LOOP] TAAPI candle-pattern policy active (Bybit TESTNET real execution).")
     while True:
-        await asyncio.sleep(AUTO_BUY_INTERVAL_SECONDS)
-        # No-op unless the bot is actively running and not in a protective halt.
-        if not agent.is_active or agent.emergency_triggered or agent.daily_target_reached:
+        timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+        # Smart sleep - avoids spamming Bybit/TAAPI on fast timeframes.
+        if timeframe_key in ("30s", "1m"):
+            sleep_seconds = 5
+        elif timeframe_key in ("5m", "15m"):
+            sleep_seconds = 15
+        else:
+            sleep_seconds = 30
+        await asyncio.sleep(sleep_seconds)
+
+        if not agent.is_active or agent.emergency_triggered:
             continue
-        # HOLD: max capacity reached - wait for a slot to free (a sell in process_tick).
-        if len(agent.trades) >= agent.max_concurrent_trades:
+
+        bybit_symbol = get_bybit_symbol(agent.active_pair)
+        if bybit_symbol is None:
+            continue  # no real market mapping for this pair - nothing to scan
+
+        try:
+            candle = await fetch_closed_candle_ohlc(bybit_symbol, timeframe_key)
+        except Exception as exc:
+            print(f"[AUTO BUY LOOP] Candle fetch failed for {bybit_symbol}: {exc}")
+            if agent.active_pair not in _CANDLE_FETCH_WARNED_PAIRS:
+                _CANDLE_FETCH_WARNED_PAIRS.add(agent.active_pair)
+                notifications.push(
+                    f"TAAPI policy can't read {bybit_symbol} candles (no Bybit LINEAR market for "
+                    f"this pair?) - auto-entries paused for {agent.active_pair} until this resolves.",
+                    "warning",
+                )
             continue
-        # FIRE: open one 1%-margin / 100x LONG. open_trade() re-checks the cap too,
-        # so a race between this loop and a manual BUY can never exceed the limit.
-        agent.open_trade("LONG", reason="10s Unconditional Auto-Buy (Time-Based Fire & Hold)")
+        _CANDLE_FETCH_WARNED_PAIRS.discard(agent.active_pair)  # recovered - clear so a future failure re-warns
+
+        close_time = candle["close_time"]
+        if close_time <= LAST_CANDLE_TIMESTAMPS.get(agent.active_pair, 0):
+            continue  # already scanned this candle
+        LAST_CANDLE_TIMESTAMPS[agent.active_pair] = close_time
+        print(f"🔄 New {timeframe_key} candle detected for {agent.active_pair}. Scanning patterns...")
+
+        taapi_key = os.environ.get("TAAPI_SECRET", "").strip()
+        if not taapi_key:
+            continue  # no TAAPI key configured - fail closed, no entries
+
+        taapi_exchange = os.environ.get("TAAPI_EXCHANGE", "binance").strip() or "binance"
+        try:
+            # timeframe_key is passed as-is - taapi_scanner translates it to a
+            # TAAPI-supported query interval internally (TAAPI_INTERVAL_MAP).
+            signals = await asyncio.to_thread(
+                fetch_taapi_signals, agent.active_pair, timeframe_key, taapi_exchange, taapi_key
+            )
+        except Exception as exc:
+            print(f"[AUTO BUY LOOP] TAAPI fetch failed: {exc}")
+            continue
+
+        result = evaluate_trade(signals, timeframe_key, candle["high"], candle["low"])
+        if result["action"] not in ("BUY", "SELL"):
+            print(f"[AUTO BUY LOOP] {result['action']}: {result['reason']}")
+            continue
+
+        capital_base = agent.get_trading_capital_base()
+        if capital_base is None or capital_base <= 0:
+            continue
+        position_size_usd = round(capital_base * agent.margin_pct * agent.leverage, 2)
+        qty = compute_order_qty(position_size_usd, agent.current_price)
+        if qty is None:
+            continue
+
+        result["symbol"] = bybit_symbol
+        executor = get_bybit_executor_agent()
+        fired = await asyncio.to_thread(executor.execute_trade, result, qty)
+        if fired:
+            notifications.push(
+                f"TESTNET order fired: {result['action']} {bybit_symbol} | pattern={result['pattern']} | "
+                f"qty={qty} | SL={result['sl']:.4f} | TP={result['tp']:.4f}",
+                "success",
+            )
+        else:
+            notifications.push(f"TESTNET order FAILED: {result['action']} {bybit_symbol} (see server logs).", "error")
 
 async def market_simulator():
     """ Synthetic random-walk price - runs whenever the active pair has no
@@ -1174,7 +1254,8 @@ async def binance_price_feed():
     """ Keeps agent.current_price tracking REAL market prices, polling Bybit's
     public recent-trades endpoint every ~1.5s for whichever mapped pair is
     active. (Volume is folded through to process_tick for feed compatibility
-    but is no longer used for entries - those fire on a 10s cadence now.)
+    but is no longer used for entries; TAAPI candle-pattern scans now drive
+    entry decisions.)
     Verified this delivers real price from this exact backend. """
     global _last_real_feed_update
     print("[MARKET FEED] Background task starting (Bybit REST polling mode).")
@@ -1295,14 +1376,8 @@ async def emergency_exit():
         agent.confirm_emergency_exit()
     else:
         print("[PILLAR 2: BACKEND] Received manual STOP TRADING from Frontend control button.")
-        agent.manual_stop()
-    return {"status": "success", "message": "AI automation stopped. Open positions protected."}
-
-@app.post("/stop-bot")
-async def stop_bot():
-    """ Voluntary STOP AI AUTOMATION — does not sell or reset the trade list. """
-    agent.manual_stop("STOP AI AUTOMATION from Frontend")
-    return {"status": "success", "message": "AI automation stopped. Open positions protected."}
+        agent.manual_stop("STOP AI AUTOMATION | Emergency Exit from Frontend")
+    return {"status": "success", "message": "All trades closed."}
 
 @app.post("/continue-trading")
 async def continue_trading():

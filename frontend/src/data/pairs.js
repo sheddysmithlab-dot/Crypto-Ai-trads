@@ -1,29 +1,26 @@
 export const TRADING_PAIRS = [
-  { symbol: 'BTC', icon: '₿', color: '#f7931a', starred: true, price: 68415.7 },
-  { symbol: 'SOL', icon: 'S', color: '#14f195', starred: true, price: 145.32 },
-  { symbol: 'ETH', icon: 'Ξ', color: '#627eea', starred: true, price: 3480.55 },
-  { symbol: 'MNT', icon: 'M', color: '#a855f7', starred: true, price: 0.982 },
-  { symbol: 'SLX', icon: 'SL', color: '#6b7280', starred: false, price: 1.245 },
-  { symbol: 'HYPE', icon: 'H', color: '#ec4899', starred: false, price: 28.15 },
-  { symbol: 'GRAM', icon: 'G', color: '#14b8a6', starred: false, price: 0.0452 },
-  { symbol: 'CSPR', icon: 'C', color: '#ef4444', starred: false, price: 0.0186 },
-  { symbol: 'BNB', icon: 'B', color: '#f3ba2f', starred: false, price: 612.3 },
+  { symbol: 'BTC', icon: '₿', color: '#f7931a', starred: true, price: 62281.7 },
+  { symbol: 'ETH', icon: 'Ξ', color: '#627eea', starred: true, price: 1742.08 },
+  { symbol: 'XRP', icon: 'X', color: '#25a768', starred: true, price: 1.085 },
+  { symbol: 'LTC', icon: 'Ł', color: '#345d9d', starred: false, price: 43.79 },
+  // XMR is DELISTED from both Bybit and Binance spot (no live market data on
+  // either source) - kept in the dropdown per product decision, but it has no
+  // symbol mapping below, so the chart falls back to simulated data and the
+  // backend runs its synthetic price feed for it. No TAAPI scans / auto trades
+  // can fire on it.
+  { symbol: 'XMR', icon: 'ɱ', color: '#f26822', starred: false, price: 165.0 },
 ];
 
-// Primary chart feed — this bot trades on Bybit spot; all dropdown pairs are listed there.
+// Primary chart feed — this bot trades on Bybit spot. XMR intentionally absent (delisted).
 export const BYBIT_SYMBOL_MAP = {
   BTC: 'BTCUSDT',
   ETH: 'ETHUSDT',
-  SOL: 'SOLUSDT',
-  BNB: 'BNBUSDT',
-  MNT: 'MNTUSDT',
-  HYPE: 'HYPEUSDT',
-  SLX: 'SLXUSDT',
-  GRAM: 'GRAMUSDT',
-  CSPR: 'CSPRUSDT',
+  XRP: 'XRPUSDT',
+  LTC: 'LTCUSDT',
 };
 
-export const BINANCE_SYMBOL_MAP = { BTC: 'btcusdt', ETH: 'ethusdt', SOL: 'solusdt', BNB: 'bnbusdt' };
+// Binance fallback feed. XMR intentionally absent (delisted Feb 2024).
+export const BINANCE_SYMBOL_MAP = { BTC: 'btcusdt', ETH: 'ethusdt', XRP: 'xrpusdt', LTC: 'ltcusdt' };
 
 export function getBybitSymbol(pairLabel) {
   const symbol = (pairLabel || '').split('/')[0];

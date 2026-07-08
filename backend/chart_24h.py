@@ -50,6 +50,14 @@ class Chart24hStore:
             return True
         return (time.time() - float(ts)) >= REFRESH_INTERVAL_SECONDS
 
+    def pairs_mismatch(self, bybit_symbol_map: dict) -> bool:
+        """ True when the stored snapshot's pair set differs from the current
+        symbol map - e.g. right after the app's trading-pair list is changed.
+        Without this check, a fresh (<24h) snapshot of the OLD pairs would
+        leave every NEW pair without chart data until the next daily refresh. """
+        expected = {f"{base}/USDT" for base in bybit_symbol_map}
+        return expected != set(self._data.get("pairs", {}).keys())
+
     def get_pair(self, pair_label: str):
         return self._data.get("pairs", {}).get(pair_label)
 
@@ -129,7 +137,7 @@ chart_24h_store = Chart24hStore()
 
 
 async def chart_24h_refresh_loop(bybit_symbol_map: dict):
-    if chart_24h_store.is_stale():
+    if chart_24h_store.is_stale() or chart_24h_store.pairs_mismatch(bybit_symbol_map):
         await chart_24h_store.refresh_all(bybit_symbol_map)
     while True:
         await asyncio.sleep(REFRESH_INTERVAL_SECONDS)
