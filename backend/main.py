@@ -24,6 +24,7 @@ from auth import (
     verify_token,
 )
 from chart_24h import chart_24h_refresh_loop, chart_24h_store
+from system_log import system_log
 from taapi_scanner import fetch_taapi_signals, evaluate_trade
 from bybit_executor import BybitAgent
 
@@ -829,22 +830,24 @@ class AITradingAgent:
             print(f"[PILLAR 3: AI AGENT] Active pair refreshed to {pair} @ {price}.")
 
     def get_trades_snapshot(self):
-        """ Session trade list (active + sold). Active rows keep updating live. """
-        active_by_id = {t["id"]: t for t in self.trades}
+        """Live trade list for the active panel. Completed trades are hidden here.
+
+        This ensures that once the bot closes all active positions on STOP,
+        the frontend trade window clears immediately instead of still showing
+        sold positions from the session history.
+        """
         snapshot = []
-        for row in self.trade_history:
-            out = dict(row)
-            live_trade = active_by_id.get(row["id"])
-            if live_trade:
-                m = self._trade_metrics(live_trade)
-                out.update({
-                    "current": round(self.current_price, 4),
-                    "gross_pnl_pct": round(m["gross_pct"], 4),
-                    "pnl": round(m["net_pct"], 4),
-                    "net_pnl_usd": round(m["net_usd"], 2),
-                    "exit_fee_usd": round(m["exit_fee_usd"], 4),
-                    "status": "locked" if self.is_lock_active else "active",
-                })
+        for trade in self.trades:
+            m = self._trade_metrics(trade)
+            out = dict(trade)
+            out.update({
+                "current": round(self.current_price, 4),
+                "gross_pnl_pct": round(m["gross_pct"], 4),
+                "pnl": round(m["net_pct"], 4),
+                "net_pnl_usd": round(m["net_usd"], 2),
+                "exit_fee_usd": round(m["exit_fee_usd"], 4),
+                "status": "locked" if self.is_lock_active else "active",
+            })
             snapshot.append(out)
         return snapshot
 
@@ -960,6 +963,7 @@ class AITradingAgent:
         self.end_ai_season()
         self.peak_net_pct = 0.0
         self.is_lock_active = False
+        system_log.push("ai", "AI automation STOPPED — emergency exit, all positions closed.", {"reason": reason})
         notifications.push("EMERGENCY EXIT: All positions closed and AI automation stopped.", "error")
 
     def resume_trading_with_higher_buffer(self):
@@ -1188,20 +1192,21 @@ async def auto_buy_loop():
 
         taapi_key = os.environ.get("TAAPI_SECRET", "").strip()
         if not taapi_key:
-            continue  # no TAAPI key configured - fail closed, no entries
+            system_log.push("taapi", "TAAPI_SECRET not configured — pattern scan skipped.", {"pair": agent.active_pair})
+            continue
 
         taapi_exchange = os.environ.get("TAAPI_EXCHANGE", "binance").strip() or "binance"
         try:
-            # timeframe_key is passed as-is - taapi_scanner translates it to a
-            # TAAPI-supported query interval internally (TAAPI_INTERVAL_MAP).
             signals = await asyncio.to_thread(
                 fetch_taapi_signals, agent.active_pair, timeframe_key, taapi_exchange, taapi_key
             )
         except Exception as exc:
             print(f"[AUTO BUY LOOP] TAAPI fetch failed: {exc}")
+            system_log.push("taapi", f"TAAPI fetch failed: {exc}", {"pair": agent.active_pair, "timeframe": timeframe_key})
             continue
 
         result = evaluate_trade(signals, timeframe_key, candle["high"], candle["low"])
+        system_log.set_last_taapi_scan(agent.active_pair, timeframe_key, signals, result, candle)
         if result["action"] not in ("BUY", "SELL"):
             print(f"[AUTO BUY LOOP] {result['action']}: {result['reason']}")
             continue
@@ -1217,6 +1222,17 @@ async def auto_buy_loop():
         result["symbol"] = bybit_symbol
         executor = get_bybit_executor_agent()
         fired = await asyncio.to_thread(executor.execute_trade, result, qty)
+        system_log.set_last_trade_fire({
+            "success": bool(fired),
+            "action": result["action"],
+            "symbol": bybit_symbol,
+            "pattern": result.get("pattern"),
+            "qty": qty,
+            "sl": result.get("sl"),
+            "tp": result.get("tp"),
+            "entry": result.get("entry"),
+            "reason": result.get("reason"),
+        })
         if fired:
             notifications.push(
                 f"TESTNET order fired: {result['action']} {bybit_symbol} | pattern={result['pattern']} | "
@@ -1350,6 +1366,11 @@ async def start_bot():
     agent.begin_ai_season()  # season P&L + kill-switch baseline = portfolio value right now
     agent.is_active = True
     print("[PILLAR 2: BACKEND] Received 'START' from Frontend. AI Agent awakened.")
+    system_log.push(
+        "ai",
+        f"AI automation STARTED on {agent.active_pair} ({open_count} open position(s) preserved).",
+        {"open_positions": open_count, "timeframe_seconds": agent.timeframe_seconds},
+    )
     if open_count:
         notifications.push(
             f"AI Agent STARTED on {agent.active_pair}. {open_count} open position(s) preserved (manual trades protected).",
@@ -1590,6 +1611,48 @@ async def get_agent_config():
 async def get_settings_status():
     """ Returns only non-secret configuration state. Keys/secrets are never returned. """
     return settings_store.status_dict()
+
+@app.get("/system/logs")
+async def get_system_logs():
+    """ Transparency snapshot for the System Log modal — connections, TAAPI scan,
+    trade pipeline, and rolling backend event log. No secrets are returned. """
+    taapi_key = bool(os.environ.get("TAAPI_SECRET", "").strip())
+    timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+    return {
+        "connections": {
+            "bybit_configured": settings_store.is_bybit_configured(),
+            "bybit_environment": settings_store.bybit_environment,
+            "bybit_mode": bybit_api.mode,
+            "bybit_connected": bybit_api.connected,
+            "bybit_last_error": bybit_api.last_error,
+            "bybit_balance": bybit_api.last_known_balance,
+            "ai_configured": settings_store.is_ai_configured(),
+            "ai_provider": settings_store.ai_provider,
+            "ai_model": settings_store.ai_model,
+            "ai_base_url": settings_store.ai_base_url,
+            "taapi_configured": taapi_key,
+            "taapi_exchange": os.environ.get("TAAPI_EXCHANGE", "binance").strip() or "binance",
+        },
+        "agent": {
+            "is_active": agent.is_active,
+            "active_pair": agent.active_pair,
+            "timeframe_key": timeframe_key,
+            "timeframe_seconds": agent.timeframe_seconds,
+            "current_price": round(agent.current_price, 4),
+            "open_trades": len(agent.trades),
+            "emergency_triggered": agent.emergency_triggered,
+            "policy": "TAAPI candle-pattern scan on each closed candle -> evaluate_trade() -> Bybit TESTNET market order with SL/TP",
+        },
+        "chart": {
+            "history_hint": "5M: backend /chart/24h snapshot, else Bybit spot klines, fallback Binance, then mock",
+            "live_hint_paper": "Paper mode: public Bybit/Binance WebSocket trade stream in browser",
+            "live_hint_live": "Live mode: backend /ws/market feed (Bybit price engine)",
+        },
+        "last_taapi_scan": system_log.last_taapi_scan,
+        "last_trade_fire": system_log.last_trade_fire,
+        "entries": system_log.entries[-60:],
+        "notifications": notifications.notifications[-20:],
+    }
 
 @app.get("/chart/24h")
 async def get_chart_24h(pair: str | None = Query(None, description="e.g. BTC/USDT")):

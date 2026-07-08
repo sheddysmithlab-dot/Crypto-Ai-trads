@@ -154,7 +154,7 @@ async function loadHistoricalData(pairLabelArg, tfKey, basePrice) {
   const binanceKline = BINANCE_KLINE_INTERVAL[tfKey];
 
   if (!bybitSymbol && !binanceSymbol) {
-    return generateMockData(basePrice, intervalSecs);
+    return { data: generateMockData(basePrice, intervalSecs), source: 'mock (no exchange mapping)' };
   }
 
   const tryBackend = async () => {
@@ -177,21 +177,24 @@ async function loadHistoricalData(pairLabelArg, tfKey, basePrice) {
   try {
     if (tfKey === '5M') {
       try {
-        return await tryBackend();
+        const data = await tryBackend();
+        return { data, source: 'backend /chart/24h (Bybit 5m persisted)' };
       } catch (backendErr) {
         console.warn(`[CHART] Backend 24h snapshot unavailable for ${pairLabelArg}:`, backendErr);
       }
     }
-    return await tryBybit();
+    const data = await tryBybit();
+    return { data, source: bybitKline ? `Bybit spot klines (${bybitKline})` : 'Bybit recent trades (bucketed)' };
   } catch (bybitErr) {
     console.warn(`[CHART] Bybit history failed for ${pairLabelArg} (${tfKey}):`, bybitErr);
     try {
-      return await tryBinance();
+      const data = await tryBinance();
+      return { data, source: binanceKline ? `Binance klines (${binanceKline})` : 'Binance recent trades (bucketed)' };
     } catch (binanceErr) {
       console.warn(`[CHART] Binance fallback failed for ${pairLabelArg} (${tfKey}):`, binanceErr);
     }
   }
-  return generateMockData(basePrice, intervalSecs);
+  return { data: generateMockData(basePrice, intervalSecs), source: 'mock fallback' };
 }
 
 function calcSMA(data, period) {
@@ -275,6 +278,9 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
   pairLabelRef.current = pairLabel;
 
   const [timeframe, setTimeframe] = useState('30S');
+  const [chartSourceMode, setChartSourceModeState] = useState('PAPER_TRADING');
+  const [chartHistorySource, setChartHistorySource] = useState('—');
+  const [chartLiveSource, setChartLiveSource] = useState('—');
   const [readouts, setReadouts] = useState({
     vol: 0,
     volMA: 0,
@@ -344,8 +350,9 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
   const loadRealHistoryInBackground = useCallback(
     (pairLabelArg, tfKey, basePrice) => {
       const myGeneration = ++loadGenerationRef.current;
-      loadHistoricalData(pairLabelArg, tfKey, basePrice).then((data) => {
-        if (myGeneration !== loadGenerationRef.current) return; // superseded - drop it
+      loadHistoricalData(pairLabelArg, tfKey, basePrice).then(({ data, source }) => {
+        if (myGeneration !== loadGenerationRef.current) return;
+        setChartHistorySource(source);
         applyDataset(data, { zoomToRecent: true });
       });
     },
@@ -418,6 +425,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       };
 
       if (bybitSymbol) {
+        setChartLiveSource(`Bybit public WebSocket (spot trades: ${bybitSymbol})`);
         const ws = new WebSocket('wss://stream.bybit.com/v5/public/spot');
         freeSourceWsRef.current = ws;
 
@@ -457,6 +465,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       }
 
       const ws = new WebSocket(`wss://stream.binance.com:443/ws/${binanceSymbol}@trade`);
+      setChartLiveSource(`Binance public WebSocket (trades: ${binanceSymbol})`);
       freeSourceWsRef.current = ws;
 
       ws.onopen = () => {
@@ -490,8 +499,10 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     (mode) => {
       if (mode === tradingModeRef.current) return;
       tradingModeRef.current = mode;
+      setChartSourceModeState(mode);
 
       if (mode === 'LIVE_TRADING') {
+        setChartLiveSource('Backend /ws/market (Bybit price feed)');
         debugLog('[CHART SOURCE] Bybit connected -> free source stopped, chart now follows Backend/Bybit feed.');
         disconnectFreeSource();
       } else {
@@ -739,5 +750,5 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     if (externalTradingMode) setChartDataSourceMode(externalTradingMode);
   }, [externalTradingMode, setChartDataSourceMode]);
 
-  return { timeframe, switchTimeframe, readouts };
+  return { timeframe, switchTimeframe, readouts, chartSourceMode, chartHistorySource, chartLiveSource };
 }

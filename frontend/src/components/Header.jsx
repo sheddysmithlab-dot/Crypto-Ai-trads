@@ -29,6 +29,7 @@ export default function Header({
   markAllRead,
   onOpenPaperModal,
   onOpenSettings,
+  onOpenLog,
   onLogout,
 }) {
   const isProfit = dailyProfit >= 0;
@@ -126,6 +127,15 @@ export default function Header({
           title="Settings"
         >
           <i className="fas fa-cog text-lg text-gray-600 dark:text-gray-300"></i>
+        </button>
+
+        <button
+          id="log-btn"
+          onClick={onOpenLog}
+          className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 transition"
+          title="System log"
+        >
+          <i className="fas fa-file-alt text-lg text-gray-600 dark:text-gray-300"></i>
         </button>
 
         <button

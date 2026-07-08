@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from './hooks/useAuth.jsx';
 import { authFetch } from './config/api';
 import { debugLog } from './config/debug';
@@ -23,6 +23,7 @@ import SettingsModal from './components/SettingsModal';
 import AgentInstructionsModal from './components/AgentInstructionsModal';
 import StartConfirmModal from './components/StartConfirmModal';
 import TradeExitConfirmModal from './components/TradeExitConfirmModal';
+import SystemLogModal from './components/SystemLogModal';
 
 export default function App() {
   const { logout } = useAuth();
@@ -39,6 +40,10 @@ export default function App() {
   const [startConfirmOpen, setStartConfirmOpen] = useState(false);
   const [pendingConfig, setPendingConfig] = useState(null);
   const [manualCapital, setManualCapital] = useState(null);
+  const [logModalOpen, setLogModalOpen] = useState(false);
+  const [settingsStatus, setSettingsStatus] = useState(null);
+  const [systemLogs, setSystemLogs] = useState(null);
+  const [actionLogs, setActionLogs] = useState([]);
   const [exitConfirm, setExitConfirm] = useState({ open: false, type: null, tradeId: null });
 
   const portfolio = usePortfolio(setConnected, {
@@ -48,9 +53,38 @@ export default function App() {
   const uptime = useUptime(portfolio.isActive);
   const dayStats = useDayStats(pairSelector.activePairLabel);
 
+  async function fetchSettingsStatus() {
+    try {
+      const res = await authFetch('/settings/status');
+      if (!res.ok) return;
+      const data = await res.json();
+      setSettingsStatus(data);
+    } catch (err) {
+      console.warn('Failed to fetch settings status for log modal:', err);
+    }
+  }
+
+  const fetchSystemLogs = useCallback(async () => {
+    try {
+      const res = await authFetch('/system/logs');
+      if (!res.ok) return;
+      const data = await res.json();
+      setSystemLogs(data);
+    } catch (err) {
+      console.warn('Failed to fetch system logs:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (logModalOpen) {
+      fetchSettingsStatus();
+      fetchSystemLogs();
+    }
+  }, [logModalOpen, fetchSystemLogs]);
+
   const chartContainerRef = useRef(null);
   const volumeContainerRef = useRef(null);
-  const { timeframe, switchTimeframe, readouts } = useTradingChart({
+  const { timeframe, switchTimeframe, readouts, chartSourceMode, chartHistorySource, chartLiveSource } = useTradingChart({
     chartContainerRef,
     volumeContainerRef,
     pairLabel: pairSelector.activePairLabel,
@@ -59,15 +93,24 @@ export default function App() {
     setConnected,
   });
 
+  function pushActionLog(message) {
+    setActionLogs((prev) => [
+      { timestamp: new Date().toISOString(), message },
+      ...prev,
+    ].slice(0, 20));
+  }
+
   async function handleControlClick() {
     if (!portfolio.isActive) {
       // START AI AUTOMATION opens the AI Agent Instructions pre-start popup first.
       // The actual /start-bot call happens inside handleAgentStart once the user
       // confirms stop-loss / daily-profit and clicks Start.
       debugLog('User clicked START AI AUTOMATION. Opening AI Agent Instructions modal...');
+      pushActionLog('START AI AUTOMATION requested. Showing AI instructions popup.');
       setAgentModalOpen(true);
     } else {
       debugLog('User clicked STOP AI AUTOMATION. Sending POST /emergency-exit to Backend...');
+      pushActionLog('STOP AI AUTOMATION requested. Sending emergency exit request to backend.');
       try {
         await authFetch('/emergency-exit', { method: 'POST' });
       } catch (err) {
@@ -81,6 +124,7 @@ export default function App() {
   // open the "Emergency Exit & Continue" final safety check with the config.
   function handleAgentStartRequest(config) {
     debugLog('AI Instructions confirmed. Opening Emergency Exit & Continue safety check...', config);
+    pushActionLog(`AI config confirmed. stop_loss=${config.stopLossPct}%, daily_profit=${config.dailyProfitPct}%`);
     setAgentModalOpen(false);
     setPendingConfig(config);
     setStartConfirmOpen(true);
@@ -91,6 +135,7 @@ export default function App() {
     if (!pendingConfig) return;
     const { stopLossPct, dailyProfitPct } = pendingConfig;
     setStartConfirmOpen(false);
+    pushActionLog(`Safety check continued. Starting bot with stop_loss=${stopLossPct}%, daily_profit=${dailyProfitPct}%`);
     debugLog(`Safety check: Continue. Applying config (stopLoss=${stopLossPct}%, dailyProfit=${dailyProfitPct}%) and starting bot...`);
     try {
       await authFetch('/agent/config', {
@@ -110,6 +155,7 @@ export default function App() {
 
   // Safety check -> Emergency Exit (or 30s auto-default): cancel, do NOT start.
   function handleConfirmExit() {
+    pushActionLog('Safety check cancelled. Bot start aborted.');
     debugLog('Safety check: Emergency Exit. Bot start cancelled.');
     setStartConfirmOpen(false);
     setPendingConfig(null);
@@ -117,6 +163,7 @@ export default function App() {
 
   async function handleRiskExit() {
     setRiskModal((r) => ({ ...r, open: false }));
+    pushActionLog('Emergency exit action confirmed from risk modal.');
     try {
       debugLog('Emergency Exit button clicked from modal');
       await authFetch('/emergency-exit', { method: 'POST' });
@@ -147,6 +194,7 @@ export default function App() {
 
   async function handleManualSellConfirm() {
     setExitConfirm({ open: false, type: null, tradeId: null });
+    pushActionLog('Manual SELL confirmed. Sending request to backend.');
     debugLog('Manual SELL confirmed. Sending POST /manual-sell to Backend...');
     try {
       const res = await authFetch('/manual-sell', {
@@ -166,8 +214,14 @@ export default function App() {
   }
 
   function handleExitConfirm() {
-    if (exitConfirm.type === 'force-close') return handleForceCloseConfirm();
-    if (exitConfirm.type === 'manual-sell') return handleManualSellConfirm();
+    if (exitConfirm.type === 'force-close') {
+      pushActionLog(`Force close confirmed for trade #${exitConfirm.tradeId}.`);
+      return handleForceCloseConfirm();
+    }
+    if (exitConfirm.type === 'manual-sell') {
+      pushActionLog('Manual sell confirmed from exit confirmation popup.');
+      return handleManualSellConfirm();
+    }
   }
 
   const exitConfirmCopy = (() => {
@@ -194,6 +248,7 @@ export default function App() {
   })();
 
   async function handleManualBuy() {
+    pushActionLog('Manual BUY button clicked. Sending open-trade request.');
     debugLog('Manual BUY button clicked. Sending POST /open-trade to Backend...');
     try {
       const res = await authFetch('/open-trade', {
@@ -221,6 +276,7 @@ export default function App() {
 
   async function handleRiskContinue() {
     setRiskModal((r) => ({ ...r, open: false }));
+    pushActionLog('Risk modal continue chosen. Raising stop-loss threshold and resuming trading.');
     try {
       debugLog('Continue button clicked - raising stop-loss threshold');
       const res = await authFetch('/continue-trading', { method: 'POST' });
@@ -255,6 +311,7 @@ export default function App() {
           setPaperModalOpen(true);
         }}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenLog={() => setLogModalOpen(true)}
         onLogout={logout}
       />
 
@@ -335,6 +392,23 @@ export default function App() {
         confirmLabel={exitConfirmCopy.confirmLabel}
         onConfirm={handleExitConfirm}
         onCancel={() => setExitConfirm({ open: false, type: null, tradeId: null })}
+      />
+
+      <SystemLogModal
+        open={logModalOpen}
+        onClose={() => setLogModalOpen(false)}
+        apiStatus={apiStatus}
+        tradingMode={portfolio.tradingMode}
+        chartSourceMode={chartSourceMode}
+        chartHistorySource={chartHistorySource}
+        chartLiveSource={chartLiveSource}
+        timeframe={timeframe}
+        activePair={pairSelector.activePairLabel}
+        lastUpdated={readouts.lastUpdated}
+        settingsStatus={settingsStatus}
+        systemLogs={systemLogs}
+        actionLogs={actionLogs}
+        onRefresh={fetchSystemLogs}
       />
     </div>
   );
