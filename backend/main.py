@@ -23,14 +23,16 @@ from auth import (
     verify_credentials,
     verify_token,
 )
+from api_secrets import get_taapi_exchange, get_taapi_secret, get_zai_api_key, is_taapi_configured, is_zai_configured
 from chart_24h import chart_24h_refresh_loop, chart_24h_store
 from system_log import system_log
 from taapi_scanner import fetch_taapi_signals, evaluate_trade
 from bybit_executor import BybitAgent
 
-# Load backend/.env on startup (local dev). On Render, set ZAI_API_KEY in the
-# service environment — values there override / supplement the file.
-load_dotenv()
+from pathlib import Path
+
+# Load backend/.env before any credential reads (cwd-safe path).
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 # Windows' default console codepage (cp1252) can't encode emoji used in log
 # messages below; force UTF-8 stdout/stderr so print() never crashes the app.
@@ -157,7 +159,7 @@ class SettingsStore:
 
     def _load_from_env(self):
         """ Apply permanent Z.ai defaults + any secrets from .env / Render env vars. """
-        zai_key = (os.environ.get("ZAI_API_KEY") or os.environ.get("AI_API_KEY") or "").strip()
+        zai_key = get_zai_api_key()
         if zai_key:
             self.ai_api_key = zai_key
         self.ai_provider = (os.environ.get("AI_PROVIDER") or "z-ai").strip() or "z-ai"
@@ -176,10 +178,14 @@ class SettingsStore:
         if env_mode in ("mainnet", "testnet"):
             self.bybit_environment = env_mode
 
-        if self.is_ai_configured():
-            print(f"[SETTINGS] Z.ai AI loaded from environment (model={self.ai_model}, provider={self.ai_provider}).")
+        if is_zai_configured():
+            print(f"[SETTINGS] Z.ai AI loaded (model={self.ai_model}, provider={self.ai_provider}).")
         else:
-            print("[SETTINGS] Z.ai is the default AI provider — set ZAI_API_KEY in backend/.env to enable.")
+            print("[SETTINGS] Z.ai is the default AI provider — set ZAI_API_KEY to enable.")
+        if is_taapi_configured():
+            print(f"[SETTINGS] TAAPI.io loaded (exchange={get_taapi_exchange()}).")
+        else:
+            print("[SETTINGS] TAAPI_SECRET not set — pattern scans disabled.")
 
     def save(self, payload: SettingsPayload):
         # Only overwrite secret fields if the user actually typed a new value
@@ -218,6 +224,8 @@ class SettingsStore:
             "ai_model": self.ai_model,
             "ai_base_url": self.ai_base_url,
             "ai_configured": self.is_ai_configured(),
+            "taapi_configured": is_taapi_configured(),
+            "taapi_exchange": get_taapi_exchange(),
         }
 
 settings_store = SettingsStore()
@@ -1190,12 +1198,12 @@ async def auto_buy_loop():
         LAST_CANDLE_TIMESTAMPS[agent.active_pair] = close_time
         print(f"🔄 New {timeframe_key} candle detected for {agent.active_pair}. Scanning patterns...")
 
-        taapi_key = os.environ.get("TAAPI_SECRET", "").strip()
+        taapi_key = get_taapi_secret()
         if not taapi_key:
             system_log.push("taapi", "TAAPI_SECRET not configured — pattern scan skipped.", {"pair": agent.active_pair})
             continue
 
-        taapi_exchange = os.environ.get("TAAPI_EXCHANGE", "binance").strip() or "binance"
+        taapi_exchange = get_taapi_exchange()
         try:
             signals = await asyncio.to_thread(
                 fetch_taapi_signals, agent.active_pair, timeframe_key, taapi_exchange, taapi_key
@@ -1616,7 +1624,7 @@ async def get_settings_status():
 async def get_system_logs():
     """ Transparency snapshot for the System Log modal — connections, TAAPI scan,
     trade pipeline, and rolling backend event log. No secrets are returned. """
-    taapi_key = bool(os.environ.get("TAAPI_SECRET", "").strip())
+    taapi_key = is_taapi_configured()
     timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     return {
         "connections": {
@@ -1631,7 +1639,7 @@ async def get_system_logs():
             "ai_model": settings_store.ai_model,
             "ai_base_url": settings_store.ai_base_url,
             "taapi_configured": taapi_key,
-            "taapi_exchange": os.environ.get("TAAPI_EXCHANGE", "binance").strip() or "binance",
+            "taapi_exchange": get_taapi_exchange(),
         },
         "agent": {
             "is_active": agent.is_active,

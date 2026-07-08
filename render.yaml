@@ -19,6 +19,10 @@ services:
         value: https://api.z.ai/api/paas/v4
       - key: ZAI_API_KEY
         sync: false
+      - key: TAAPI_SECRET
+        sync: false
+      - key: TAAPI_EXCHANGE
+        value: binance
       - key: AUTH_USERNAME
         sync: false
       - key: AUTH_PASSWORD

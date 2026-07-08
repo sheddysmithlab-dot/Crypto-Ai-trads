@@ -79,7 +79,7 @@ export default function SystemLogModal({
 
   const wsOk = apiStatus?.color === 'green';
   const bybitOk = conn.bybit_configured && (conn.bybit_mode === 'LIVE_TRADING' ? conn.bybit_connected : true);
-  const aiOk = conn.ai_configured || conn.ai_provider === 'none';
+  const aiOk = conn.ai_configured;
   const taapiOk = conn.taapi_configured;
 
   const mergedLogs = [

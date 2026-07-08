@@ -4,6 +4,8 @@ Ties together Step 2 (taapi_scanner) and Step 3 (bybit_executor): on every new
 closed candle, scans patterns, evaluates the trade math, and fires an order.
 """
 import os
+
+from api_secrets import get_taapi_secret
 import time
 import threading
 
@@ -149,7 +151,7 @@ if __name__ == "__main__":
     engine = TradingEngine(
         api_key=os.environ.get("BYBIT_API_KEY", ""),
         api_secret=os.environ.get("BYBIT_API_SECRET", ""),
-        taapi_key=os.environ.get("TAAPI_SECRET", ""),
+        taapi_key=get_taapi_secret(),
         testnet=True,
     )
 
