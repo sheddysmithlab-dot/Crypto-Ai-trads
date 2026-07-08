@@ -61,7 +61,7 @@ export default function StartConfirmModal({ open, config, activeCount = 0, onCon
 
         <div className="grid grid-cols-2 gap-3 text-sm mb-6">
           <div className="bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2">
-            <div className="text-[10px] uppercase tracking-wider text-gray-500">Stop Loss</div>
+            <div className="text-[10px] uppercase tracking-wider text-gray-500">Risk Level</div>
             <div className="font-bold text-white">{config?.stopLossPct}%</div>
           </div>
           <div className="bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2">

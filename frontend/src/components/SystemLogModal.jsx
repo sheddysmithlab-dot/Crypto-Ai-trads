@@ -77,10 +77,11 @@ export default function SystemLogModal({
   const backendEntries = systemLogs?.entries || [];
   const backendNotifications = systemLogs?.notifications || [];
 
+  const isPaper = (conn.bybit_mode || tradingMode) === 'PAPER_TRADING';
   const wsOk = apiStatus?.color === 'green';
-  const bybitOk = conn.bybit_configured && (conn.bybit_mode === 'LIVE_TRADING' ? conn.bybit_connected : true);
+  const bybitOk = isPaper || (conn.bybit_configured && (conn.bybit_mode === 'LIVE_TRADING' ? conn.bybit_connected : true));
   const aiOk = conn.ai_configured;
-  const bybitTestnetOk = conn.bybit_testnet_configured;
+  const bybitTestnetOk = isPaper || conn.bybit_testnet_configured;
   const taapiOk = conn.taapi_configured;
 
   const mergedLogs = [
@@ -156,8 +157,13 @@ export default function SystemLogModal({
             </div>
             <div className="bg-[#161A1E] border border-amber-700/40 rounded-xl p-3">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-2">Bybit TESTNET</div>
-              <StatusPill ok={bybitTestnetOk} label={bybitTestnetOk ? 'KEYS SET' : 'KEYS MISSING'} />
-              <p className="text-[11px] text-gray-500 mt-2">Orders fire here (testnet.bybit.com)</p>
+              <StatusPill
+                ok={bybitTestnetOk}
+                label={isPaper ? 'PAPER MODE' : bybitTestnetOk ? 'KEYS SET' : 'KEYS MISSING'}
+              />
+              <p className="text-[11px] text-gray-500 mt-2">
+                {isPaper ? 'Simulated trades — no API keys needed' : 'Orders fire here (testnet.bybit.com)'}
+              </p>
             </div>
           </section>
 
@@ -267,10 +273,10 @@ export default function SystemLogModal({
           <section className="bg-[#161A1E] border border-gray-800 rounded-xl p-4">
             <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-3">
               <i className="fas fa-bolt text-amber-400 mr-1.5" />
-              Last Trade Fire (Bybit TESTNET)
+              Last Trade Fire ({isPaper ? 'Paper Simulation' : 'Bybit TESTNET'})
             </h3>
             {!tradeFire ? (
-              <p className="text-sm text-gray-500">No TESTNET order attempted yet this session.</p>
+              <p className="text-sm text-gray-500">No trade fire attempted yet this session.</p>
             ) : (
               <dl className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
                 <div>

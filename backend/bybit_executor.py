@@ -1,10 +1,7 @@
 """Fire-and-forget Bybit V5 order execution, per SYSTEM_RULES.md.
 
-BOUNDARY REMINDER (NO EARLY EXIT rule from Step 1): stopLoss/takeProfit are
-attached directly to the order itself, so Bybit's matching engine - not this
-agent - is what closes the position. Once execute_trade() places the order
-successfully, this module's job for that trade is 100% done: no polling, no
-trailing, no early exit, no re-checking the position afterwards.
+Orders are market-only for now — no exchange-side stopLoss/takeProfit. Position
+management (exits, caps) is handled by the agent layer, not attached SL/TP.
 """
 import sys
 
@@ -63,26 +60,13 @@ class BybitAgent:
 
     def execute_trade(self, signal_payload, qty, price_decimals=None):
         """ Fires ONE market order off an evaluate_trade() payload
-        ({"action", "symbol", "entry", "sl", "tp", "pattern"}), with SL/TP
-        attached exchange-side. No retry on failure - a rejected order is
-        reported and left alone, per the STRICT ERROR HANDLING rule.
-
-        `price_decimals` auto-detects from the SL/TP price magnitude when left
-        as None (so a $100k BTC order and a $0.02 altcoin order each get a
-        sane precision) - pass an explicit value to override for a symbol
-        whose real tick size you know. """
+        ({"action", "symbol", "entry", "sl", "tp", "pattern"}). SL/TP from the
+        signal are ignored for now — no exchange-side stops on the order.
+        No retry on failure - a rejected order is reported and left alone. """
         action = signal_payload["action"]
         symbol = signal_payload["symbol"]
-        sl = signal_payload["sl"]
-        tp = signal_payload["tp"]
-
-        if price_decimals is None:
-            price_decimals = self._auto_price_decimals(max(sl, tp))
 
         side = "Buy" if action == "BUY" else "Sell"
-        # Bybit requires SL/TP as strings, formatted to the pair's price precision.
-        sl_str = f"{sl:.{price_decimals}f}"
-        tp_str = f"{tp:.{price_decimals}f}"
 
         try:
             # pybit raises InvalidRequestError (bad params / Bybit-side rejection,
@@ -94,13 +78,10 @@ class BybitAgent:
                 side=side,
                 orderType="Market",
                 qty=str(qty),
-                stopLoss=sl_str,
-                takeProfit=tp_str,
-                slTriggerBy="LastPrice",
-                tpTriggerBy="LastPrice",
             )
             self.last_error = None
-            print(f"✅ ORDER FIRED: {action} {symbol} | SL: {sl_str} | TP: {tp_str}")
+            pattern = signal_payload.get("pattern", "")
+            print(f"✅ ORDER FIRED: {action} {symbol} | pattern={pattern} | qty={qty}")
             return True, None
         except Exception as e:
             self.last_error = str(e)

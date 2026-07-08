@@ -2,18 +2,18 @@ import { useState } from 'react';
 
 // "AI Agent Instructions" pre-start popup.
 // Entry point: the green START AI AUTOMATION button in the ControlBar opens this
-// (the bot is NOT started yet). The user picks a stop-loss % (and an optional
+// (the bot is NOT started yet). The user picks a risk level % (and an optional
 // daily profit target). Two neon gauges - RISK and CONFIDENCE - update live off
-// the stop-loss value, and the whole popup recolours green->red as risk crosses
+// the risk value, and the whole popup recolours green->red as risk crosses
 // 50%. Clicking START AI AUTOMATION closes this popup and hands the chosen
 // config to the parent, which then opens the "Emergency Exit & Continue" safety
 // check popup (final confirmation before the bot actually starts).
 //
-// Algorithm (per spec):
-//   risk       = 45 + (stopLoss - 3) * 5     // base 3% -> 45%, +5% per +1% SL
+// Portfolio stop-loss on trades is disabled for now. The risk % here only
+// drives how many concurrent trades the bot may open:
+//   risk       = 45 + (stopLoss - 3) * 5     // base 3% -> 45%, +5% per +1% risk
 //   confidence = 100 - risk                  // base 3% -> 55%
 //   trades     = round(stopLoss * 1.5)       // half-up; 3% -> 5
-// Everything is displayed as a strict integer - no decimals on the card.
 
 const BASE_STOP_LOSS = 3;
 const BASE_RISK = 45;
@@ -120,7 +120,7 @@ export default function AgentInstructionsModal({ open, onClose, onStart }) {
           {/* Inputs */}
           <div className="space-y-3">
             <div className="flex items-center justify-between bg-[#161A1E] border border-gray-700 rounded-lg px-4 py-3">
-              <span className="text-xs font-semibold text-gray-300">Stop loss of total capital</span>
+              <span className="text-xs font-semibold text-gray-300">Risk level <span className="text-gray-500">(max trades)</span></span>
               <div className="flex items-center gap-1">
                 <input
                   type="number"
@@ -152,7 +152,7 @@ export default function AgentInstructionsModal({ open, onClose, onStart }) {
 
           {/* Trades info */}
           <p className="text-center text-xs text-gray-400">
-            Ai bot can do <span className={`font-black ${isRed ? 'text-red-400' : 'text-green-400'}`}>{trades}</span> trades at a time as per your stop loss.
+            Ai bot can do <span className={`font-black ${isRed ? 'text-red-400' : 'text-green-400'}`}>{trades}</span> trades at a time based on your risk level.
           </p>
 
           {/* Big action button - opens the Emergency Exit & Continue safety check next */}

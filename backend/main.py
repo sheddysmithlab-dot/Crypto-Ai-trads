@@ -730,16 +730,11 @@ class AITradingAgent:
         LAST_CANDLE_TIMESTAMPS.clear()
         print(f"[TIMEFRAME SYNC] Backend timeframe set to {seconds}s.")
 
-    def open_trade(self, side="LONG", reason="Manual", source="auto"):
-        """ RULE 1: Opens a position sized at EXACTLY 1% margin of current total capital,
-        with 100x leverage, filled as a Market Order (RULE 7) with simulated minor slippage.
-        `source` tags who opened it - "auto" (the background auto-buy loop, currently idle
-        with no policy defined) or "manual" (the dashboard's manual BUY button) - so the
-        manual SELL button can tell them apart and only ever close manually-opened positions.
-
-        Manual vs auto gating mirrors the ControlBar UI:
-          - manual BUY/SELL are enabled only while automation is OFF (not is_active)
-          - auto buys only fire while automation is ON (is_active) """
+    def open_trade(self, side="LONG", reason="Manual", source="auto", position_size_usd=None):
+        """ RULE 1: Opens a position as a Market Order (RULE 7) with simulated minor slippage.
+        Manual entries default to 1% margin x 100x leverage. Auto paper entries may pass
+        `position_size_usd` (e.g. 2% of total capital from the TAAPI loop).
+        `source` tags who opened it - "auto" or "manual". """
         if self.emergency_triggered:
             return None
 
@@ -775,12 +770,16 @@ class AITradingAgent:
                 notifications.push("Insufficient balance: Bybit account equity is $0.00.", "error")
                 return None
 
-        # RULE 1: 1% margin, 100x leverage -> position_size = margin * leverage
-        margin = round((capital_base if capital_base is not None else self.current_capital) * self.margin_pct, 2)
-        if margin <= 0:
+        # RULE 1: 1% margin, 100x leverage for manual; auto paper may pass a fixed notional.
+        if position_size_usd is not None:
+            position_size = round(float(position_size_usd), 2)
+            margin = round(position_size / self.leverage, 2)
+        else:
+            margin = round((capital_base if capital_base is not None else self.current_capital) * self.margin_pct, 2)
+            position_size = round(margin * self.leverage, 2)
+        if margin <= 0 or position_size <= 0:
             notifications.push("Insufficient balance to open a position.", "error")
             return None
-        position_size = round(margin * self.leverage, 2)
 
         # RULE 7: Market orders fill with minor slippage vs the requested price
         slippage = random.uniform(-0.0002, 0.0002)
@@ -804,7 +803,10 @@ class AITradingAgent:
         }
         self.trades.append(trade)
         self._append_trade_history(trade)
-        bybit_api.execute_market_buy(self.active_pair, f"{reason} | Margin=${margin} (1% of capital) x{self.leverage} leverage -> Position=${position_size}")
+        bybit_api.execute_market_buy(
+            self.active_pair,
+            f"{reason} | Margin=${margin} x{self.leverage} leverage -> Position=${position_size}",
+        )
         print(f"[PILLAR 3: AI AGENT] Opened new {side} position #{trade['id']} on {self.active_pair} @ {filled_price} "
               f"(margin=${margin}, position=${position_size}, entry_fee=${entry_fee_usd}, source={source})")
         notifications.push(f"Order Filled: {self.active_pair} {side} @ {filled_price:,.4f} (Margin ${margin:,.2f} x{self.leverage})", "success")
@@ -1160,22 +1162,13 @@ _last_real_feed_update = 0.0
 REAL_FEED_STALE_AFTER_SECONDS = 10
 
 # ==========================================
-# ENTRY POLICY: TAAPI CANDLE-PATTERN SCAN -> REAL BYBIT TESTNET EXECUTION
-# Per SYSTEM_RULES.md (taapi_scanner.py) + bybit_executor.py. On every new
-# CLOSED candle (interval follows the frontend's selected chart timeframe),
-# scans the curated pattern set, applies the strict conflict/rejection math,
-# and - on a valid BUY/SELL - fires a REAL Market order on Bybit TESTNET with
-# SL/TP attached exchange-side. Once fired, Bybit's engine (not this loop)
-# closes the trade - no monitoring, no early exit, matching the NO EARLY EXIT
-# rule. These orders do NOT go through agent.open_trade()/agent.trades: that
-# in-memory ledger assumes the app itself decides when a position closes,
-# which no longer applies once SL/TP are exchange-attached, so surfacing them
-# there would show a "position" the app can never actually resolve. Fired/
-# rejected/failed outcomes are pushed to the notification bell instead.
+# ENTRY POLICY: TAAPI CANDLE-PATTERN SCAN
+# PAPER_TRADING (default): simulated positions via agent.open_trade() — no Bybit
+# API keys required. LIVE_TRADING + TESTNET keys: real orders via bybit_executor.
 # ==========================================
 
 async def auto_buy_loop():
-    print("[AUTO BUY LOOP] TAAPI candle-pattern policy active (Bybit TESTNET real execution).")
+    print("[AUTO BUY LOOP] TAAPI candle-pattern policy active (paper simulation by default).")
     while True:
         timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
         # Smart sleep - avoids spamming Bybit/TAAPI on fast timeframes.
@@ -1246,6 +1239,40 @@ async def auto_buy_loop():
             continue
 
         result["symbol"] = bybit_symbol
+
+        if bybit_api.mode == "PAPER_TRADING":
+            side = "LONG" if result["action"] == "BUY" else "SHORT"
+            trade = agent.open_trade(
+                side,
+                reason=f"PAPER TAAPI {result.get('pattern', 'signal')}",
+                source="auto",
+                position_size_usd=position_size_usd,
+            )
+            fired = trade is not None
+            skip_reason = None if fired else "Paper entry skipped (inactive, cap reached, or insufficient capital)."
+            system_log.set_last_trade_fire({
+                "success": fired,
+                "mode": "PAPER_TRADING",
+                "action": result["action"],
+                "symbol": bybit_symbol,
+                "pattern": result.get("pattern"),
+                "qty": qty,
+                "position_usd": position_size_usd,
+                "capital_pct": AUTO_TRADE_CAPITAL_PCT * 100,
+                "sl": result.get("sl"),
+                "tp": result.get("tp"),
+                "entry": result.get("entry"),
+                "reason": result.get("reason"),
+                "error": skip_reason,
+                "trade_id": trade["id"] if trade else None,
+            })
+            if fired:
+                notifications.push(
+                    f"PAPER trade opened: {side} {agent.active_pair} | pattern={result['pattern']} | "
+                    f"${position_size_usd} ({AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital) | #{trade['id']}",
+                    "success",
+                )
+            continue
 
         if not is_bybit_testnet_configured():
             global _bybit_testnet_keys_warned
@@ -1627,26 +1654,25 @@ def _half_up_round(value: float) -> int:
 @app.post("/agent/config")
 async def set_agent_config(payload: AgentConfigPayload):
     """ Applied from the "AI Agent Instructions" pre-start modal.
-    - stop_loss_pct  -> sets the RULE 5/8 portfolio kill-switch threshold
-      (agent.max_loss_pct) and drives the concurrent-trades cap via
-      round(stop_loss_pct * 1.5) (half-up).
+    - stop_loss_pct (risk level from the popup) -> max_concurrent_trades via
+      round(stop_loss_pct * 1.5) (half-up). Portfolio stop-loss is disabled for
+      now; this value only caps how many trades can run at once.
     - daily_profit_pct -> optional "Capital profit of the day" target; 0 disables.
     Both are validated and stored before /start-bot is called by the frontend. """
     if payload.stop_loss_pct < 0.5 or payload.stop_loss_pct > 50:
-        return {"status": "error", "message": "Stop loss must be between 0.5% and 50%."}
+        return {"status": "error", "message": "Risk level must be between 0.5% and 50%."}
     if payload.daily_profit_pct < 0 or payload.daily_profit_pct > 1000:
         return {"status": "error", "message": "Daily profit target must be between 0% and 1000%."}
 
-    agent.max_loss_pct = payload.stop_loss_pct
     agent.max_concurrent_trades = max(1, _half_up_round(payload.stop_loss_pct * 1.5))
     agent.daily_profit_target_pct = payload.daily_profit_pct
     agent.daily_target_reached = False
-    print(f"[AGENT CONFIG] stop_loss={agent.max_loss_pct}% | max_concurrent_trades="
+    print(f"[AGENT CONFIG] risk_level={payload.stop_loss_pct}% | max_concurrent_trades="
           f"{agent.max_concurrent_trades} | daily_profit_target={agent.daily_profit_target_pct}%")
     return {
         "status": "success",
         "message": "Agent config applied.",
-        "max_loss_pct": agent.max_loss_pct,
+        "risk_pct": payload.stop_loss_pct,
         "max_concurrent_trades": agent.max_concurrent_trades,
         "daily_profit_target_pct": agent.daily_profit_target_pct,
     }
@@ -1654,8 +1680,11 @@ async def set_agent_config(payload: AgentConfigPayload):
 @app.get("/agent/config")
 async def get_agent_config():
     """ Lets the modal show the currently-applied config when reopened. """
+    # Derive the popup risk % from the stored concurrent-trades cap (inverse of * 1.5).
+    risk_pct = round(agent.max_concurrent_trades / 1.5, 1) if agent.max_concurrent_trades else 3.0
     return {
-        "stop_loss_pct": agent.max_loss_pct,
+        "stop_loss_pct": risk_pct,
+        "risk_pct": risk_pct,
         "daily_profit_pct": agent.daily_profit_target_pct,
         "max_concurrent_trades": agent.max_concurrent_trades,
     }
@@ -1698,7 +1727,11 @@ async def get_system_logs():
             "current_price": round(agent.current_price, 4),
             "open_trades": len(agent.trades),
             "emergency_triggered": agent.emergency_triggered,
-            "policy": f"TAAPI scan -> evaluate_trade() -> Bybit TESTNET order ({AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of total capital per trade)",
+            "policy": (
+                f"TAAPI scan -> evaluate_trade() -> PAPER simulation ({AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital per trade)"
+                if bybit_api.mode == "PAPER_TRADING"
+                else f"TAAPI scan -> evaluate_trade() -> Bybit TESTNET order ({AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of total capital per trade)"
+            ),
         },
         "chart": {
             "history_hint": "5M: backend /chart/24h snapshot, else Bybit spot klines, fallback Binance, then mock",
