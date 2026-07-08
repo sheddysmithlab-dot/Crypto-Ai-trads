@@ -520,9 +520,23 @@ class BybitAPIWrapper:
     def execute_market_sell(self, pair, reason):
         # REST API ACTION CABLE - RULE 7: Exit orders are ALWAYS Market Orders
         if self.mode == "PAPER_TRADING":
-            print(f"👉 [PAPER TRADING - VIRTUAL] Bybit API -> Market Sell {pair} -> {reason}")
+            print(f"👉 [PAPER TRADING - VIRTUAL] Bybit API -> Market SELL {pair} -> {reason}")
         else:
             print(f"🔥 [REAL LIVE TRADING - ACTUAL] Bybit REST API -> MARKET SELL {pair} -> {reason}")
+
+    def execute_market_open(self, pair, side, reason):
+        """ Open a position: LONG = market buy, SHORT/inverse = market sell (Bybit linear). """
+        if side == "SHORT":
+            self.execute_market_sell(pair, f"OPEN SHORT | {reason}")
+        else:
+            self.execute_market_buy(pair, f"OPEN LONG | {reason}")
+
+    def execute_market_close(self, pair, side, reason):
+        """ Close a position: LONG exit = sell, SHORT exit = buy to cover. """
+        if side == "SHORT":
+            self.execute_market_buy(pair, f"CLOSE SHORT | {reason}")
+        else:
+            self.execute_market_sell(pair, f"CLOSE LONG | {reason}")
 
 bybit_api = BybitAPIWrapper()
 
@@ -803,20 +817,24 @@ class AITradingAgent:
             "entry_fee_pct": entry_fee_pct,
             "entry_fee_usd": entry_fee_usd,
             "source": source,
+            "peak_net_pct": 0.0,
+            "is_lock_active": False,
         }
         self.trades.append(trade)
         self._append_trade_history(trade)
         qty_label = f" | qty={qty}" if qty is not None else ""
-        bybit_api.execute_market_buy(
+        bybit_api.execute_market_open(
             self.active_pair,
+            side,
             f"{reason} | ${position_size} notional ({margin} margin x{self.leverage}){qty_label}",
         )
         print(f"[PILLAR 3: AI AGENT] Opened new {side} position #{trade['id']} on {self.active_pair} @ {filled_price} "
               f"(margin=${margin}, position=${position_size}, qty={qty}, entry_fee=${entry_fee_usd}, source={source})")
         qty_note = f" | {qty} coins" if qty is not None else ""
         if source == "auto" and position_size_usd is not None:
+            inverse_note = " inverse SHORT" if side == "SHORT" else ""
             fill_msg = (
-                f"Order Filled: {self.active_pair} {side} @ {filled_price:,.4f} "
+                f"Order Filled:{inverse_note} {self.active_pair} {side} @ {filled_price:,.4f} "
                 f"(${position_size:,.2f} = {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of capital{qty_note})"
             )
         else:
@@ -840,16 +858,10 @@ class AITradingAgent:
 
         best = max(manual_trades, key=lambda t: self._trade_metrics(t)["net_pct"])
         m = self._trade_metrics(best)
-        self.current_capital += m["net_usd"]
-        self._finalize_trade_history(best, m, reason)
+        self._close_single_trade(best, m, reason)
         self.trades = [t for t in self.trades if t["id"] != best["id"]]
-        bybit_api.execute_market_sell(best["pair"], f"{reason} | Realized Net P&L: ${m['net_usd']:.2f} ({m['net_pct']:.3f}%)")
         print(f"[PILLAR 3: AI AGENT] Manual SELL closed position #{best['id']} on {best['pair']} "
               f"(net_pct={m['net_pct']:.3f}%, net_usd=${m['net_usd']:.2f})")
-        notifications.push(
-            f"Manual SELL: Position #{best['id']} closed on {best['pair']} | Net P&L: ${m['net_usd']:.2f} ({m['net_pct']:.3f}%)",
-            "success" if m["net_usd"] >= 0 else "error",
-        )
         return best
 
     def set_active_pair(self, pair, price):
@@ -881,19 +893,14 @@ class AITradingAgent:
                 "pnl": round(m["net_pct"], 4),
                 "net_pnl_usd": round(m["net_usd"], 2),
                 "exit_fee_usd": round(m["exit_fee_usd"], 4),
-                "status": "locked" if self.is_lock_active else "active",
+                "status": "locked" if trade.get("is_lock_active") else "active",
             })
             snapshot.append(out)
         return snapshot
 
     async def process_tick(self, new_price, volume_increment):
-        """ Runs on EVERY market tick (real Bybit feed or synthetic fallback).
-        POLICY CLEARED: all entry/exit trading rules (10s auto-buy, RULE 4/6
-        trailing lock, RULE 5 kill switch, RULE 8 auto-kill timer, daily
-        profit target halt) have been erased and await a new definition. This
-        tick handler now only updates the live price and clears corrupt
-        positions. `volume_increment` is accepted for feed compatibility but
-        unused. """
+        """ Updates live price, clears corrupt entries, and books profit per open
+        auto trade (LONG + inverse SHORT) via the 0.40% floor + 30% trailing lock. """
         clean_price = _sanitize_market_price(new_price)
         if clean_price is None:
             print(f"[PILLAR 3: AI AGENT] Ignoring invalid market tick: {new_price!r}")
@@ -907,6 +914,77 @@ class AITradingAgent:
                 f"Removed {len(corrupt)} corrupt position(s) with invalid entry prices on {self.active_pair}.",
                 "warning",
             )
+
+        if not self.is_active or not self.trades:
+            return
+
+        floor = self.PROFIT_FLOOR_PCT
+        still_open = []
+        for trade in self.trades:
+            if trade.get("source") == "manual":
+                still_open.append(trade)
+                continue
+
+            m = self._trade_metrics(trade)
+            net = m["net_pct"]
+            peak = float(trade.get("peak_net_pct", 0.0))
+            locked = bool(trade.get("is_lock_active", False))
+
+            if net >= floor:
+                if not locked:
+                    trade["is_lock_active"] = True
+                    notifications.push(
+                        f"Trailing lock ON #{trade['id']} {trade['side']} {trade['pair']} @ +{net:.3f}% net",
+                        "success",
+                    )
+                    locked = True
+                if net > peak:
+                    trade["peak_net_pct"] = net
+                    peak = net
+
+                trailing_target = peak * (1 - self.TRAILING_DROP_PCT)
+                floor_override = trailing_target < floor
+                effective_target = floor if floor_override else trailing_target
+
+                if locked and peak >= floor and net < peak and net <= effective_target:
+                    if floor_override:
+                        reason = (
+                            f"Profit book #{trade['id']}: floor {floor:.2f}% net "
+                            f"(peak {peak:.3f}%, trail would breach floor)"
+                        )
+                    else:
+                        reason = (
+                            f"Profit book #{trade['id']}: 30% trail "
+                            f"(peak {peak:.3f}% -> target {effective_target:.3f}%)"
+                        )
+                    self._close_single_trade(trade, m, reason)
+                    continue
+
+            still_open.append(trade)
+
+        self.trades = still_open
+        locked_trades = [t for t in self.trades if t.get("is_lock_active")]
+        self.is_lock_active = bool(locked_trades)
+        self.peak_net_pct = max((float(t.get("peak_net_pct", 0)) for t in locked_trades), default=0.0)
+
+    def _close_single_trade(self, trade, metrics, reason):
+        """ Realize P&L and close one position (LONG sell / SHORT buy-to-cover). """
+        self.current_capital += metrics["net_usd"]
+        self._finalize_trade_history(trade, metrics, reason)
+        bybit_api.execute_market_close(
+            trade["pair"],
+            trade["side"],
+            f"{reason} | Realized Net P&L: ${metrics['net_usd']:.2f} ({metrics['net_pct']:.3f}%)",
+        )
+        print(
+            f"[PILLAR 3: AI AGENT] Closed {trade['side']} #{trade['id']} on {trade['pair']} "
+            f"| net=${metrics['net_usd']:.2f} ({metrics['net_pct']:.3f}%)"
+        )
+        notifications.push(
+            f"Position #{trade['id']} CLOSED ({trade['side']}) {trade['pair']} | "
+            f"Net P&L: ${metrics['net_usd']:.2f} ({metrics['net_pct']:.3f}%)",
+            "success" if metrics["net_usd"] >= 0 else "error",
+        )
 
     def execute_sell(self, reason):
         # RULE 4/6 & 7: Profit-protection sell. Exit orders are Market Orders.
@@ -928,11 +1006,7 @@ class AITradingAgent:
             return
 
         for trade, m in auto_winners:
-            self.current_capital += m["net_usd"]
-            self._finalize_trade_history(trade, m, reason)
-            bybit_api.execute_market_sell(trade["pair"], f"{reason} | Realized Net P&L: ${m['net_usd']:.2f} ({m['net_pct']:.3f}%)")
-            notifications.push(f"Position #{trade['id']} CLOSED on {trade['pair']} | Net P&L: ${m['net_usd']:.2f} ({m['net_pct']:.3f}%)",
-                                "success" if m["net_usd"] >= 0 else "error")
+            self._close_single_trade(trade, m, reason)
 
         self.trades = held
 
@@ -952,12 +1026,10 @@ class AITradingAgent:
                 self.peak_net_pct = min(self.peak_net_pct, new_avg)
 
     def _close_all_positions(self, reason):
-        """ RULE 5 & 7: Unconditional 'SELL ALL' via Market Order, realizing whatever net P&L remains. """
-        for trade in self.trades:
+        """ Unconditional close all — LONG (sell) and SHORT (buy to cover). """
+        for trade in list(self.trades):
             m = self._trade_metrics(trade)
-            self.current_capital += m["net_usd"]
-            self._finalize_trade_history(trade, m, reason)
-            bybit_api.execute_market_sell(trade["pair"], f"{reason} | Realized Net P&L: ${m['net_usd']:.2f}")
+            self._close_single_trade(trade, m, reason)
         self.trades = []
         self.peak_net_pct = 0.0
         self.is_lock_active = False
@@ -1359,10 +1431,11 @@ async def auto_buy_loop():
                 "trade_id": trade["id"] if trade else None,
             })
             if fired:
+                side_label = "inverse SHORT" if side == "SHORT" else "LONG"
                 notifications.push(
-                    f"PAPER trade opened: {side} {agent.active_pair} | {qty} @ ~${plan['price']:,.0f} | "
+                    f"PAPER {side_label} opened: {agent.active_pair} | {qty} @ ~${plan['price']:,.0f} | "
                     f"${position_size_usd} ({plan['capital_pct']:.0f}% of ${plan['total_capital']:,.0f}) | "
-                    f"#{trade['id']}",
+                    f"pattern={result.get('pattern')} #{trade['id']}",
                     "success",
                 )
             elif skip_reason:
@@ -1824,9 +1897,10 @@ async def get_system_logs():
             "open_trades": len(agent.trades),
             "emergency_triggered": agent.emergency_triggered,
             "policy": (
-                f"TAAPI scan -> evaluate_trade() -> PAPER simulation ({AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital per trade)"
+                f"TAAPI BUY->LONG / SELL->inverse SHORT | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital per trade | "
+                f"per-trade profit book (floor {agent.PROFIT_FLOOR_PCT}% + 30% trail)"
                 if bybit_api.mode == "PAPER_TRADING"
-                else f"TAAPI scan -> evaluate_trade() -> Bybit TESTNET order ({AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of total capital per trade)"
+                else f"TAAPI BUY/SELL -> Bybit TESTNET linear | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital | per-trade profit book"
             ),
         },
         "chart": {
