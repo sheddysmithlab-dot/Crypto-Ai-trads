@@ -23,7 +23,7 @@ import requests
 # ==========================================
 # 1. BYBIT FEE & PROFIT MATH CONSTANTS
 # ==========================================
-BYBIT_TAKER_FEE = 0.002  # 0.2% total (0.1% open + 0.1% close)
+BYBIT_TAKER_FEE = 0.0011  # 0.11% round-trip (0.055% open + 0.055% close, USDT perpetual taker)
 # Formula for API Target: Gross_TP = User_Net_Profit + BYBIT_TAKER_FEE
 
 # ==========================================

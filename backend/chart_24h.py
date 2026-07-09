@@ -64,6 +64,16 @@ class Chart24hStore:
     def get_snapshot(self):
         return self._data
 
+    async def ensure_pair(self, pair_label: str, bybit_symbol: str):
+        """Return cached 24h stats for a pair, fetching live from Bybit on miss."""
+        existing = self.get_pair(pair_label)
+        if existing:
+            return existing
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            entry = await self._fetch_pair(client, pair_label, bybit_symbol)
+        self._data.setdefault("pairs", {})[pair_label] = entry
+        return entry
+
     async def _fetch_pair(self, client: httpx.AsyncClient, pair_label: str, bybit_symbol: str):
         ticker_url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={bybit_symbol}"
         kline_url = (

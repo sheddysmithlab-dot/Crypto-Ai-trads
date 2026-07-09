@@ -323,8 +323,8 @@ class BybitAPIWrapper:
         self.mode = "PAPER_TRADING"
         self.connected = False
         # RULE 7: Taker fee tier, continuously "fetched" from Bybit (simulated here at
-        # Bybit's standard ~0.055% taker rate; real integration would poll the fee-rate endpoint).
-        self.taker_fee_pct = 0.05
+        # Bybit USDT perpetual standard taker fee (0.055% per market fill).
+        self.taker_fee_pct = 0.055
 
         # Real Bybit account equity (USD), refreshed in the background while LIVE_TRADING.
         # None until the first successful fetch - callers fall back to paper capital until then.
@@ -544,16 +544,16 @@ bybit_api = BybitAPIWrapper()
 # PILLAR 3: CORE AI AGENT LOGIC (State & Rules)
 # ==========================================
 class AITradingAgent:
-    # PROFIT BOOKING ONLY — no portfolio/trade stop-loss. Floor per chart TF + 30% trail.
+    # Net-profit floor per chart TF (after 0.055% taker fee each leg). 1M starts at 0.20%+.
     TRAILING_DROP_PCT = 0.30
     PROFIT_FLOOR_BY_TIMEFRAME = {
-        "1m": 0.40,
-        "5m": 0.60,
-        "15m": 0.08,
-        "1h": 1.0,
-        "1D": 1.2,
+        "1m": 0.20,
+        "5m": 0.40,
+        "15m": 0.60,
+        "1h": 0.80,
+        "1D": 1.0,
     }
-    PROFIT_FLOOR_PCT = 0.40      # default fallback (1m chart)
+    PROFIT_FLOOR_PCT = 0.20      # default fallback (1m chart)
 
     def __init__(self):
         self.is_active = False
@@ -1932,9 +1932,18 @@ async def get_system_logs():
 
 @app.get("/chart/24h")
 async def get_chart_24h(pair: str | None = Query(None, description="e.g. BTC/USDT")):
-    """ Latest backend-persisted 24h chart snapshot (high/low + 5m candles). Refreshed every 24h. """
+    """ Latest 24h high/low + 5m candles. Uses persisted snapshot when available;
+    fetches live from Bybit on demand when a mapped pair is missing from cache. """
     if pair:
-        entry = chart_24h_store.get_pair(pair)
+        bybit_symbol = get_bybit_symbol(pair)
+        try:
+            if bybit_symbol:
+                entry = await chart_24h_store.ensure_pair(pair, bybit_symbol)
+            else:
+                entry = chart_24h_store.get_pair(pair)
+        except Exception as exc:
+            print(f"[CHART 24H] Live fetch failed for {pair}: {exc}")
+            entry = None
         if not entry:
             return {
                 "pair": pair,
