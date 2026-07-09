@@ -538,17 +538,11 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       if (mode === tradingModeRef.current) return;
       tradingModeRef.current = mode;
       setChartSourceModeState(mode);
-
-      if (mode === 'LIVE_TRADING') {
-        setChartLiveSource('Backend /ws/market (Bybit price feed)');
-        debugLog('[CHART SOURCE] Bybit connected -> free source stopped, chart now follows Backend/Bybit feed.');
-        disconnectFreeSource();
-      } else {
-        debugLog('[CHART SOURCE] Paper Trading -> switching chart to free public crypto feed.');
-        connectFreeSource(pairLabelRef.current);
-      }
+      setChartLiveSource('Backend /ws/market (Bybit spot ticker — same as profit logic)');
+      debugLog(`[CHART SOURCE] ${mode}: chart live price follows backend ticker feed.`);
+      disconnectFreeSource();
     },
-    [connectFreeSource, disconnectFreeSource]
+    [disconnectFreeSource]
   );
 
   const switchSymbol = useCallback(
@@ -693,8 +687,8 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
 
           if (data.trading_mode) setChartDataSourceMode(data.trading_mode);
 
-          if (tradingModeRef.current === 'LIVE_TRADING') {
-            applyLivePriceTick(data.price);
+          if (data.price != null && !Number.isNaN(Number(data.price))) {
+            applyLivePriceTick(Number(data.price));
           }
 
           const wsPair = data.active_pair;
@@ -705,7 +699,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
           ) {
             trailingLockLineRef.current?.applyOptions({
               price: entryPriceRef.current + entryPriceRef.current * (data.peak_pct / 100),
-              title: `Active Lock Peak (+${data.peak_pct.toFixed(2)}%)`,
+              title: `Lock peak (+${data.peak_pct.toFixed(2)}% gross)`,
               color: '#eab308',
             });
           }
@@ -774,10 +768,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     if (!candleSeriesRef.current) return;
     debugLog(`[CHART] Regenerating candlestick data for ${pairLabel}`);
     switchSymbolRef.current?.(pairPrice);
-    if (tradingModeRef.current !== 'LIVE_TRADING') {
-      debugLog(`[FREE SOURCE] Re-subscribing to public feed for ${pairLabel}`);
-      connectFreeSourceRef.current?.(pairLabel);
-    }
+    // Live chart ticks come from backend /ws/market for both paper and live modes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pairLabel, pairPrice]);
 

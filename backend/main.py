@@ -544,8 +544,8 @@ bybit_api = BybitAPIWrapper()
 # PILLAR 3: CORE AI AGENT LOGIC (State & Rules)
 # ==========================================
 class AITradingAgent:
-    # Net-profit floor per chart TF (after 0.055% taker fee each leg). 1M starts at 0.20%+.
-    TRAILING_DROP_PCT = 0.30
+    # Gross profit floor per chart TF (fees included). Instant fixed TP: close as soon as gross >= floor.
+    TRAILING_DROP_PCT = 0.30  # legacy; profit book is fixed-TP only (no trail wait)
     PROFIT_FLOOR_BY_TIMEFRAME = {
         "1m": 0.20,
         "5m": 0.40,
@@ -602,7 +602,7 @@ class AITradingAgent:
         self.timeframe_seconds = 60
 
     def get_profit_floor_pct(self):
-        """ Net-profit floor for trailing lock / profit booking on the active chart TF. """
+        """ Gross-profit floor for instant fixed TP (fees included in threshold). """
         key = SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
         return self.PROFIT_FLOOR_BY_TIMEFRAME.get(key, self.PROFIT_FLOOR_PCT)
 
@@ -750,10 +750,22 @@ class AITradingAgent:
         LAST_CANDLE_TIMESTAMPS.clear()
         print(f"[TIMEFRAME SYNC] Backend timeframe set to {seconds}s.")
 
-    def open_trade(self, side="LONG", reason="Manual", source="auto", position_size_usd=None, qty=None):
+    def open_trade(
+        self,
+        side="LONG",
+        reason="Manual",
+        source="auto",
+        position_size_usd=None,
+        qty=None,
+        skip_exchange_open=False,
+        entry_price=None,
+        exchange=None,
+        bybit_symbol=None,
+    ):
         """ RULE 1: Opens a position as a Market Order (RULE 7) with simulated minor slippage.
         Manual entries default to 1% margin x 100x leverage. Auto entries pass
-        `position_size_usd` + `qty` from compute_auto_trade_plan() (2% of capital). """
+        `position_size_usd` + `qty` from compute_auto_trade_plan() (2% of capital).
+        `skip_exchange_open=True` when Bybit TESTNET already filled the order (FIX 4). """
         if self.emergency_triggered:
             return None
 
@@ -801,11 +813,19 @@ class AITradingAgent:
             return None
 
         # RULE 7: Market orders fill with minor slippage vs the requested price
-        slippage = random.uniform(-0.0002, 0.0002)
-        filled_price = round(self.current_price * (1 + slippage), 4)
+        if entry_price is not None:
+            filled_price = round(float(entry_price), 4)
+        else:
+            slippage = random.uniform(-0.0002, 0.0002)
+            filled_price = round(self.current_price * (1 + slippage), 4)
 
         if qty is None and position_size_usd is not None:
             qty = compute_order_qty(position_size_usd, filled_price)
+
+        if exchange is None and bybit_api.mode == "PAPER_TRADING":
+            exchange = "paper"
+        if bybit_symbol is None:
+            bybit_symbol = get_bybit_symbol(self.active_pair)
 
         # RULE 6: Live Entry Fee, based on Bybit's current Taker fee tier
         entry_fee_pct = bybit_api.get_taker_fee_pct()
@@ -823,17 +843,21 @@ class AITradingAgent:
             "entry_fee_pct": entry_fee_pct,
             "entry_fee_usd": entry_fee_usd,
             "source": source,
+            "peak_gross_pct": 0.0,
             "peak_net_pct": 0.0,
             "is_lock_active": False,
+            "exchange": exchange,
+            "bybit_symbol": bybit_symbol,
         }
         self.trades.append(trade)
         self._append_trade_history(trade)
         qty_label = f" | qty={qty}" if qty is not None else ""
-        bybit_api.execute_market_open(
-            self.active_pair,
-            side,
-            f"{reason} | ${position_size} notional ({margin} margin x{self.leverage}){qty_label}",
-        )
+        if not skip_exchange_open:
+            bybit_api.execute_market_open(
+                self.active_pair,
+                side,
+                f"{reason} | ${position_size} notional ({margin} margin x{self.leverage}){qty_label}",
+            )
         print(f"[PILLAR 3: AI AGENT] Opened new {side} position #{trade['id']} on {self.active_pair} @ {filled_price} "
               f"(margin=${margin}, position=${position_size}, qty={qty}, entry_fee=${entry_fee_usd}, source={source})")
         qty_note = f" | {qty} coins" if qty is not None else ""
@@ -864,8 +888,8 @@ class AITradingAgent:
 
         best = max(manual_trades, key=lambda t: self._trade_metrics(t)["net_pct"])
         m = self._trade_metrics(best)
-        self._close_single_trade(best, m, reason)
-        self.trades = [t for t in self.trades if t["id"] != best["id"]]
+        if self._close_single_trade(best, m, reason):
+            self.trades = [t for t in self.trades if t["id"] != best["id"]]
         print(f"[PILLAR 3: AI AGENT] Manual SELL closed position #{best['id']} on {best['pair']} "
               f"(net_pct={m['net_pct']:.3f}%, net_usd=${m['net_usd']:.2f})")
         return best
@@ -905,8 +929,8 @@ class AITradingAgent:
         return snapshot
 
     async def process_tick(self, new_price, volume_increment):
-        """ Updates live price, clears corrupt entries, and books profit per open
-        auto trade (LONG + inverse SHORT) via the chart-timeframe floor + 30% trail. """
+        """ Updates live price and instantly books profit on auto trades when gross
+        hits the chart-timeframe floor (fixed TP — no trail / pullback wait). """
         clean_price = _sanitize_market_price(new_price)
         if clean_price is None:
             print(f"[PILLAR 3: AI AGENT] Ignoring invalid market tick: {new_price!r}")
@@ -932,65 +956,68 @@ class AITradingAgent:
                 continue
 
             m = self._trade_metrics(trade)
+            gross = m["gross_pct"]
             net = m["net_pct"]
-            peak = float(trade.get("peak_net_pct", 0.0))
-            locked = bool(trade.get("is_lock_active", False))
 
-            if net >= floor:
-                if not locked:
-                    trade["is_lock_active"] = True
-                    notifications.push(
-                        f"Trailing lock ON #{trade['id']} {trade['side']} {trade['pair']} @ +{net:.3f}% net",
-                        "success",
-                    )
-                    locked = True
-                if net > peak:
-                    trade["peak_net_pct"] = net
-                    peak = net
-
-                trailing_target = peak * (1 - self.TRAILING_DROP_PCT)
-                floor_override = trailing_target < floor
-                effective_target = floor if floor_override else trailing_target
-
-                if locked and peak >= floor and net < peak and net <= effective_target:
-                    if floor_override:
-                        reason = (
-                            f"Profit book #{trade['id']}: floor {floor:.2f}% net "
-                            f"(peak {peak:.3f}%, trail would breach floor)"
-                        )
-                    else:
-                        reason = (
-                            f"Profit book #{trade['id']}: 30% trail "
-                            f"(peak {peak:.3f}% -> target {effective_target:.3f}%)"
-                        )
-                    self._close_single_trade(trade, m, reason)
+            if gross >= floor:
+                reason = (
+                    f"Fixed TP #{trade['id']}: +{gross:.3f}% gross fired "
+                    f"(floor {floor:.2f}% incl. fees, net {net:.3f}%)"
+                )
+                if self._close_single_trade(trade, m, reason):
                     continue
 
             still_open.append(trade)
 
         self.trades = still_open
-        locked_trades = [t for t in self.trades if t.get("is_lock_active")]
-        self.is_lock_active = bool(locked_trades)
-        self.peak_net_pct = max((float(t.get("peak_net_pct", 0)) for t in locked_trades), default=0.0)
+        self.is_lock_active = False
+        self.peak_net_pct = 0.0
 
-    def _close_single_trade(self, trade, metrics, reason):
-        """ Realize P&L and close one position (LONG sell / SHORT buy-to-cover). """
-        self.current_capital += metrics["net_usd"]
+    def _close_single_trade(self, trade, metrics, reason) -> bool:
+        """Close one position. Returns True if closed locally (and on Bybit when applicable)."""
+        if trade_uses_bybit_executor(trade):
+            ok, err = bybit_close_trade(trade)
+            if not ok:
+                msg = err or "Unknown Bybit close error"
+                notifications.push(
+                    f"Bybit TESTNET close FAILED #{trade['id']} {trade['pair']}: {msg}",
+                    "error",
+                )
+                system_log.push(
+                    "bybit",
+                    f"Close failed #{trade['id']} {trade.get('bybit_symbol')}: {msg}",
+                    {"trade_id": trade["id"], "reason": reason},
+                )
+                return False
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(bybit_api.fetch_real_balance())
+            except RuntimeError:
+                pass
+        else:
+            bybit_api.execute_market_close(
+                trade["pair"],
+                trade["side"],
+                f"{reason} | Realized Net P&L: ${metrics['net_usd']:.2f} ({metrics['net_pct']:.3f}%)",
+            )
+
+        if bybit_api.mode != "LIVE_TRADING":
+            self.current_capital += metrics["net_usd"]
+
         self._finalize_trade_history(trade, metrics, reason)
-        bybit_api.execute_market_close(
-            trade["pair"],
-            trade["side"],
-            f"{reason} | Realized Net P&L: ${metrics['net_usd']:.2f} ({metrics['net_pct']:.3f}%)",
-        )
         print(
             f"[PILLAR 3: AI AGENT] Closed {trade['side']} #{trade['id']} on {trade['pair']} "
             f"| net=${metrics['net_usd']:.2f} ({metrics['net_pct']:.3f}%)"
         )
+        exchange_note = " (Paper)" if trade.get("exchange") == "paper" else (
+            " (Bybit TESTNET)" if trade_uses_bybit_executor(trade) else ""
+        )
         notifications.push(
-            f"Position #{trade['id']} CLOSED ({trade['side']}) {trade['pair']} | "
+            f"Position #{trade['id']} CLOSED{exchange_note} ({trade['side']}) {trade['pair']} | "
             f"Net P&L: ${metrics['net_usd']:.2f} ({metrics['net_pct']:.3f}%)",
             "success" if metrics["net_usd"] >= 0 else "error",
         )
+        return True
 
     def execute_sell(self, reason):
         # RULE 4/6 & 7: Profit-protection sell. Exit orders are Market Orders.
@@ -1003,25 +1030,29 @@ class AITradingAgent:
         print(f"[PILLAR 3: AI AGENT] Output -> SELL REQUIRED: {reason}")
 
         scored = [(t, self._trade_metrics(t)) for t in self.trades]
-        # Manual positions stay protected — only AI-opened winners may auto-close.
-        auto_winners = [(t, m) for (t, m) in scored if m["net_pct"] > 0 and t.get("source") != "manual"]
-        held = [t for (t, m) in scored if m["net_pct"] <= 0 or t.get("source") == "manual"]
-
+        auto_winners = [
+            (t, m) for t, m in scored if m["net_pct"] > 0 and t.get("source") != "manual"
+        ]
         if not auto_winners:
             print("[PILLAR 3: AI AGENT] No auto trades in net profit to close — manual positions protected, losers held.")
             return
 
-        for trade, m in auto_winners:
-            self._close_single_trade(trade, m, reason)
+        still_open = []
+        for trade, m in scored:
+            if m["net_pct"] > 0 and trade.get("source") != "manual":
+                if not self._close_single_trade(trade, m, reason):
+                    still_open.append(trade)
+            else:
+                still_open.append(trade)
 
-        self.trades = held
+        self.trades = still_open
 
         # Recompute trailing-lock state off whatever remains.
         if not self.trades:
             self.is_lock_active = False
             self.peak_net_pct = 0.0
         else:
-            remaining = [self._trade_metrics(t)["net_pct"] for t in self.trades]
+            remaining = [self._trade_metrics(t)["gross_pct"] for t in self.trades]
             new_avg = sum(remaining) / len(remaining)
             if new_avg < self.get_profit_floor_pct():
                 # Everything left is under the floor - drop the lock until the held
@@ -1033,10 +1064,12 @@ class AITradingAgent:
 
     def _close_all_positions(self, reason):
         """ Unconditional close all — LONG (sell) and SHORT (buy to cover). """
+        still_open = []
         for trade in list(self.trades):
             m = self._trade_metrics(trade)
-            self._close_single_trade(trade, m, reason)
-        self.trades = []
+            if not self._close_single_trade(trade, m, reason):
+                still_open.append(trade)
+        self.trades = still_open
         self.peak_net_pct = 0.0
         self.is_lock_active = False
 
@@ -1253,8 +1286,174 @@ def _log_trade_skip(action: str, symbol: str, pattern: str | None, reason: str, 
     system_log.push("trade", f"SKIPPED: {action} {symbol} — {reason}", {"pattern": pattern, **extra})
     print(f"[AUTO BUY LOOP] Trade skipped: {reason}")
 
+def agent_policy_summary() -> str:
+    """Single policy text for paper and live — same TAAPI / fixed-TP / sizing rules."""
+    floor = agent.get_profit_floor_pct()
+    exec_mode = (
+        "paper ledger (simulated fills)"
+        if bybit_api.mode == "PAPER_TRADING"
+        else "Bybit TESTNET linear (real open/close)"
+    )
+    return (
+        f"TAAPI BUY->LONG / SELL->inverse SHORT | fixed TP @ {floor}% gross "
+        f"(fees incl., instant close) | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital/trade | {exec_mode}"
+    )
+
+
+def _auto_entry_skip_reason(trade, fired: bool, order_error: str | None) -> str | None:
+    if fired and trade:
+        return None
+    if order_error:
+        return order_error
+    if not agent.is_active:
+        return "AI automation is not running — click START AI AUTOMATION."
+    if agent.emergency_triggered:
+        return "Emergency halt is active."
+    if len(agent.trades) >= agent.max_concurrent_trades:
+        return f"Max concurrent trades ({agent.max_concurrent_trades}) reached."
+    return "Auto entry blocked (invalid price, zero balance, or register failed)."
+
+
+def _log_auto_trade_fire(
+    *,
+    success: bool,
+    mode: str,
+    action: str,
+    bybit_symbol: str,
+    pattern: str | None,
+    qty,
+    position_usd: float,
+    plan: dict,
+    result: dict,
+    trade_id: int | None,
+    error: str | None,
+):
+    system_log.set_last_trade_fire({
+        "success": success,
+        "mode": mode,
+        "action": action,
+        "symbol": bybit_symbol,
+        "pattern": pattern,
+        "qty": qty,
+        "position_usd": position_usd,
+        "capital_total": plan.get("total_capital"),
+        "capital_pct": plan.get("capital_pct"),
+        "sl": result.get("sl"),
+        "tp": result.get("tp"),
+        "entry": result.get("entry"),
+        "reason": result.get("reason"),
+        "error": error,
+        "trade_id": trade_id,
+    })
+
+
+async def fire_taapi_auto_trade(
+    result: dict,
+    bybit_symbol: str,
+    plan: dict,
+    position_size_usd: float,
+    qty,
+) -> tuple[dict | None, bool, str | None]:
+    """Unified TAAPI auto-entry for paper and live — same register shape, sizing, and logs."""
+    side = "LONG" if result["action"] == "BUY" else "SHORT"
+    entry_px = result.get("entry") or agent.current_price
+    pattern = result.get("pattern")
+    reason = f"TAAPI {pattern or 'signal'}"
+
+    if bybit_api.mode == "PAPER_TRADING":
+        trade = agent.open_trade(
+            side,
+            reason=reason,
+            source="auto",
+            position_size_usd=position_size_usd,
+            qty=qty,
+            entry_price=entry_px,
+            exchange="paper",
+            bybit_symbol=bybit_symbol,
+        )
+        fired = trade is not None
+        order_error = None
+        log_mode = "PAPER_TRADING"
+    else:
+        if not is_bybit_testnet_configured():
+            return None, False, (
+                "BYBIT_TESTNET_API_KEY / BYBIT_TESTNET_API_SECRET not set — "
+                "add keys from https://testnet.bybit.com to backend/.env"
+            )
+
+        executor = get_bybit_executor_agent()
+        fired, order_error = await asyncio.to_thread(executor.execute_trade, result, qty)
+        trade = None
+        if fired:
+            trade = agent.open_trade(
+                side,
+                reason=reason,
+                source="auto",
+                position_size_usd=position_size_usd,
+                qty=qty,
+                skip_exchange_open=True,
+                entry_price=entry_px,
+                exchange="bybit_linear_testnet",
+                bybit_symbol=bybit_symbol,
+            )
+            if not trade:
+                fired = False
+                order_error = (
+                    order_error
+                    or "Bybit order filled but local trade register failed — check TESTNET positions."
+                )
+                notifications.push(
+                    f"CRITICAL: Bybit order filled for {bybit_symbol} but dashboard register failed. "
+                    "Position may be open on TESTNET untracked.",
+                    "error",
+                )
+        log_mode = "BYBIT_TESTNET"
+
+    skip_reason = _auto_entry_skip_reason(trade, fired, order_error)
+    _log_auto_trade_fire(
+        success=bool(fired and trade),
+        mode=log_mode,
+        action=result["action"],
+        bybit_symbol=bybit_symbol,
+        pattern=pattern,
+        qty=qty,
+        position_usd=position_size_usd,
+        plan=plan,
+        result=result,
+        trade_id=trade["id"] if trade else None,
+        error=skip_reason,
+    )
+
+    if fired and trade:
+        side_label = "inverse SHORT" if side == "SHORT" else "LONG"
+        venue = "PAPER" if log_mode == "PAPER_TRADING" else "TESTNET"
+        notifications.push(
+            f"{venue} {side_label} opened: {agent.active_pair} | {qty} @ ~${plan['price']:,.0f} | "
+            f"${position_size_usd} ({plan['capital_pct']:.0f}% of ${plan['total_capital']:,.0f}) | "
+            f"pattern={pattern} #{trade['id']}",
+            "success",
+        )
+    elif skip_reason:
+        notifications.push(f"Trade skipped: {skip_reason}", "warning")
+
+    return trade, bool(fired and trade), skip_reason
+
+
 _bybit_executor_agent = None
 _bybit_testnet_keys_warned = False
+
+def trade_uses_bybit_executor(trade: dict) -> bool:
+    """True when this trade was opened on Bybit TESTNET linear and needs a real close."""
+    return (
+        trade.get("exchange") == "bybit_linear_testnet"
+        and is_bybit_testnet_configured()
+    )
+
+
+def bybit_close_trade(trade: dict) -> tuple[bool, str | None]:
+    executor = get_bybit_executor_agent()
+    return executor.close_position(trade)
+
 
 def get_bybit_executor_agent():
     """ Lazily builds the real-order-placing BybitAgent from TESTNET-only
@@ -1270,6 +1469,18 @@ def get_bybit_executor_agent():
         _bybit_executor_agent = BybitAgent(key, secret, testnet=True)
     return _bybit_executor_agent
 
+async def _fetch_bybit_spot_ticker_price(client: httpx.AsyncClient, bybit_symbol: str) -> float | None:
+    """Bybit spot lastPrice — works even when no new prints hit recent-trade."""
+    resp = await client.get(
+        f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={bybit_symbol}"
+    )
+    if resp.status_code != 200:
+        return None
+    body = resp.json()
+    item = body.get("result", {}).get("list", [{}])[0]
+    return _sanitize_market_price(item.get("lastPrice"))
+
+
 async def fetch_bybit_spot_price(pair_label):
     """ Latest spot last price for pair switching / seeding current_price. """
     symbol = get_bybit_symbol(pair_label)
@@ -1277,15 +1488,7 @@ async def fetch_bybit_spot_price(pair_label):
         return None
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
-            resp = await client.get(
-                f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol}"
-            )
-        if resp.status_code != 200:
-            return None
-        body = resp.json()
-        item = body.get("result", {}).get("list", [{}])[0]
-        price = float(item.get("lastPrice", 0))
-        return price if price > 0 else None
+            return await _fetch_bybit_spot_ticker_price(client, symbol)
     except Exception as exc:
         print(f"[MARKET FEED] Could not fetch spot price for {pair_label}: {exc}")
         return None
@@ -1395,108 +1598,23 @@ async def auto_buy_loop():
         position_size_usd = plan["position_usd"]
         qty = plan["qty"]
         result["symbol"] = bybit_symbol
-        is_paper = bybit_api.mode == "PAPER_TRADING"
-
-        if is_paper:
-            side = "LONG" if result["action"] == "BUY" else "SHORT"
-            trade = agent.open_trade(
-                side,
-                reason=f"PAPER TAAPI {result.get('pattern', 'signal')}",
-                source="auto",
-                position_size_usd=position_size_usd,
-                qty=qty,
-            )
-            fired = trade is not None
-            skip_reason = None
-            if not fired:
-                if not agent.is_active:
-                    skip_reason = "AI automation is not running — click START AI AUTOMATION."
-                elif agent.emergency_triggered:
-                    skip_reason = "Emergency halt is active."
-                elif len(agent.trades) >= agent.max_concurrent_trades:
-                    skip_reason = f"Max concurrent trades ({agent.max_concurrent_trades}) reached."
-                else:
-                    skip_reason = "Paper entry blocked (invalid price or zero balance)."
-            system_log.set_last_trade_fire({
-                "success": fired,
-                "mode": "PAPER_TRADING",
-                "action": result["action"],
-                "symbol": bybit_symbol,
-                "pattern": result.get("pattern"),
-                "qty": qty,
-                "position_usd": position_size_usd,
-                "capital_total": plan["total_capital"],
-                "capital_pct": plan["capital_pct"],
-                "sl": result.get("sl"),
-                "tp": result.get("tp"),
-                "entry": result.get("entry"),
-                "reason": result.get("reason"),
-                "error": skip_reason,
-                "trade_id": trade["id"] if trade else None,
-            })
-            if fired:
-                side_label = "inverse SHORT" if side == "SHORT" else "LONG"
-                notifications.push(
-                    f"PAPER {side_label} opened: {agent.active_pair} | {qty} @ ~${plan['price']:,.0f} | "
-                    f"${position_size_usd} ({plan['capital_pct']:.0f}% of ${plan['total_capital']:,.0f}) | "
-                    f"pattern={result.get('pattern')} #{trade['id']}",
-                    "success",
-                )
-            elif skip_reason:
-                notifications.push(f"Paper trade skipped: {skip_reason}", "warning")
-            continue
-
-        if not is_bybit_testnet_configured():
+        if not is_bybit_testnet_configured() and bybit_api.mode != "PAPER_TRADING":
             global _bybit_testnet_keys_warned
-            err = "BYBIT_TESTNET_API_KEY / BYBIT_TESTNET_API_SECRET not set — add keys from https://testnet.bybit.com to backend/.env"
-            system_log.set_last_trade_fire({
-                "success": False,
-                "action": result["action"],
-                "symbol": bybit_symbol,
-                "pattern": result.get("pattern"),
-                "qty": qty,
-                "position_usd": position_size_usd,
-                "capital_total": plan["total_capital"],
-                "capital_pct": plan["capital_pct"],
-                "sl": result.get("sl"),
-                "tp": result.get("tp"),
-                "entry": result.get("entry"),
-                "reason": result.get("reason"),
-                "error": err,
-            })
+            err = (
+                "BYBIT_TESTNET_API_KEY / BYBIT_TESTNET_API_SECRET not set — "
+                "add keys from https://testnet.bybit.com to backend/.env"
+            )
             if not _bybit_testnet_keys_warned:
                 _bybit_testnet_keys_warned = True
                 system_log.push("bybit", err, {"symbol": bybit_symbol})
-                notifications.push("Bybit TESTNET keys missing — TAAPI signals fire but orders cannot execute.", "error")
+                notifications.push(
+                    "Bybit TESTNET keys missing — TAAPI signals fire but orders cannot execute.",
+                    "error",
+                )
+            _log_trade_skip(result["action"], bybit_symbol, result.get("pattern"), err)
             continue
 
-        executor = get_bybit_executor_agent()
-        fired, order_error = await asyncio.to_thread(executor.execute_trade, result, qty)
-        system_log.set_last_trade_fire({
-            "success": bool(fired),
-            "action": result["action"],
-            "symbol": bybit_symbol,
-            "pattern": result.get("pattern"),
-            "qty": qty,
-            "position_usd": position_size_usd,
-            "capital_pct": plan["capital_pct"],
-            "sl": result.get("sl"),
-            "tp": result.get("tp"),
-            "entry": result.get("entry"),
-            "reason": result.get("reason"),
-            "error": order_error,
-        })
-        if fired:
-            notifications.push(
-                f"TESTNET order fired: {result['action']} {bybit_symbol} | {qty} | "
-                f"${position_size_usd} ({plan['capital_pct']:.0f}% of ${plan['total_capital']:,.0f}) | "
-                f"pattern={result['pattern']}",
-                "success",
-            )
-        else:
-            msg = order_error or "Unknown Bybit error — see server logs."
-            notifications.push(f"TESTNET order FAILED: {result['action']} {bybit_symbol} — {msg}", "error")
-            system_log.push("trade", f"Order rejected: {msg}", {"symbol": bybit_symbol, "action": result["action"]})
+        await fire_taapi_auto_trade(result, bybit_symbol, plan, position_size_usd, qty)
 
 async def market_simulator():
     """ Synthetic random-walk price - runs whenever the active pair has no
@@ -1523,15 +1641,12 @@ async def market_simulator():
         await asyncio.sleep(0.5)
 
 async def binance_price_feed():
-    """ Keeps agent.current_price tracking REAL market prices, polling Bybit's
-    public recent-trades endpoint every ~1.5s for whichever mapped pair is
-    active. (Volume is folded through to process_tick for feed compatibility
-    but is no longer used for entries; TAAPI candle-pattern scans now drive
-    entry decisions.)
-    Verified this delivers real price from this exact backend. """
+    """ Keeps agent.current_price tracking REAL Bybit spot lastPrice every ~1.5s.
+    ALWAYS calls process_tick on each successful poll so fixed-TP profit
+    booking never freeze when recent-trade has no new prints between polls.
+    (Volume is unused for entries; TAAPI candle scans drive entries.) """
     global _last_real_feed_update
-    print("[MARKET FEED] Background task starting (Bybit REST polling mode).")
-    last_seen_trade_id = None
+    print("[MARKET FEED] Background task starting (Bybit spot ticker poll, ~1.5s).")
     current_symbol = None
 
     async with httpx.AsyncClient(timeout=6.0) as client:
@@ -1543,29 +1658,17 @@ async def binance_price_feed():
 
             if target_symbol != current_symbol:
                 current_symbol = target_symbol
-                last_seen_trade_id = None  # fresh pair - don't diff against the old symbol's trade IDs
+                print(f"[MARKET FEED] Polling spot ticker for {target_symbol} ({agent.active_pair}).")
 
             try:
-                url = f"https://api.bybit.com/v5/market/recent-trade?category=spot&symbol={target_symbol}&limit=20"
-                resp = await client.get(url)
-                if resp.status_code == 200:
-                    body = resp.json()
-                    trades = body.get("result", {}).get("list", [])
-                    if trades:
-                        # Bybit returns newest-first; only fold in trades newer than the
-                        # last poll, so volume reflects genuine recent activity instead
-                        # of re-counting the same trades.
-                        new_trades = [t for t in trades if last_seen_trade_id is None or t["seq"] > last_seen_trade_id]
-                        if new_trades:
-                            total_qty = sum(float(t["size"]) for t in new_trades)
-                            last_price = float(new_trades[0]["price"])  # newest-first -> index 0 is latest
-                            await agent.process_tick(last_price, total_qty)
-                            last_seen_trade_id = trades[0]["seq"]
-                            _last_real_feed_update = time.time()
+                price = await _fetch_bybit_spot_ticker_price(client, target_symbol)
+                if price is not None:
+                    await agent.process_tick(price, 0.0)
+                    _last_real_feed_update = time.time()
                 else:
-                    print(f"[MARKET FEED] Bybit REST returned HTTP {resp.status_code} for {target_symbol}")
+                    print(f"[MARKET FEED] Invalid or missing ticker price for {target_symbol}")
             except Exception as exc:
-                print(f"[MARKET FEED] REST poll error for {target_symbol}: {exc}")
+                print(f"[MARKET FEED] Ticker poll error for {target_symbol}: {exc}")
 
             await asyncio.sleep(1.5)
 
@@ -1646,7 +1749,7 @@ async def start_bot():
         notifications.push(f"AI Agent STARTED - now monitoring {agent.active_pair} live.", "success")
     return {
         "status": "success",
-        "message": "Bot active & trailing logic initialized.",
+        "message": "Bot active & fixed-TP profit book initialized.",
         "open_positions": open_count,
         "trade_history_count": len(agent.trade_history),
     }
@@ -1762,11 +1865,13 @@ async def close_trade(payload: CloseTradePayload):
         return {"status": "error", "message": "Trade not found or already closed."}
 
     m = agent._trade_metrics(trade)
-    agent._finalize_trade_history(trade, m, "Manual force-close")
+    if not agent._close_single_trade(trade, m, "Manual force-close"):
+        return {
+            "status": "error",
+            "message": "Could not close position on Bybit TESTNET — see notifications.",
+        }
     agent.trades = [t for t in agent.trades if t["id"] != payload.id]
-    bybit_api.execute_market_sell(trade["pair"], f"Manual force-close of position #{trade['id']}")
-    notifications.push(f"Position #{trade['id']} manually force-closed on {trade['pair']}.", "warning")
-    return {"status": "success", "message": f"Position #{trade['id']} closed at market price."}
+    return {"status": "success", "message": f"Position #{payload.id} closed at market price."}
 
 @app.post("/set-pair")
 async def set_pair(payload: SetPairPayload):
@@ -1912,17 +2017,11 @@ async def get_system_logs():
             "current_price": round(agent.current_price, 4),
             "open_trades": len(agent.trades),
             "emergency_triggered": agent.emergency_triggered,
-            "policy": (
-                f"TAAPI BUY->LONG / SELL->inverse SHORT | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital per trade | "
-                f"per-trade profit book (floor {agent.get_profit_floor_pct()}% + 30% trail)"
-                if bybit_api.mode == "PAPER_TRADING"
-                else f"TAAPI BUY/SELL -> Bybit TESTNET linear | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital | per-trade profit book"
-            ),
+            "policy": agent_policy_summary(),
         },
         "chart": {
             "history_hint": "5M: backend /chart/24h snapshot, else Bybit spot klines, fallback Binance, then mock",
-            "live_hint_paper": "Paper mode: public Bybit/Binance WebSocket trade stream in browser",
-            "live_hint_live": "Live mode: backend /ws/market feed (Bybit price engine)",
+            "live_hint": "Paper & Live: backend Bybit spot ticker (~1.5s) drives automation + /ws/market chart price",
         },
         "last_taapi_scan": system_log.last_taapi_scan,
         "last_trade_fire": system_log.last_trade_fire,
@@ -2076,6 +2175,10 @@ async def portfolio_feed(websocket: WebSocket):
                 "risk_level_pct": agent.risk_level_pct,
                 "max_concurrent_trades": agent.max_concurrent_trades,
                 "profit_floor_pct": agent.get_profit_floor_pct(),
+                "profit_floor_mode": "fixed_tp_gross",
+                "trading_execution": (
+                    "paper_simulation" if bybit_api.mode == "PAPER_TRADING" else "bybit_testnet"
+                ),
                 "trades": len(agent.trades)
             }
             # POLICY 4: Alerting Frontend on Emergency Exit

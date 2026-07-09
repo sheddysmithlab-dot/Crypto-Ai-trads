@@ -87,3 +87,34 @@ class BybitAgent:
             self.last_error = str(e)
             print(f"❌ ORDER FAILED: {e}")
             return False, str(e)
+
+    def close_position(self, trade: dict) -> tuple[bool, str | None]:
+        """Market reduce-only close for a tracked linear perpetual position."""
+        symbol = trade.get("bybit_symbol")
+        qty = trade.get("qty")
+        if not symbol or qty is None:
+            self.last_error = "Missing bybit_symbol or qty on trade record"
+            return False, self.last_error
+
+        side = trade.get("side", "LONG")
+        close_side = "Sell" if side == "LONG" else "Buy"
+
+        try:
+            self.session.place_order(
+                category="linear",
+                symbol=symbol,
+                side=close_side,
+                orderType="Market",
+                qty=str(qty),
+                reduceOnly=True,
+            )
+            self.last_error = None
+            print(
+                f"✅ CLOSE FIRED: {close_side} {symbol} | qty={qty} | "
+                f"trade #{trade.get('id')} ({side})"
+            )
+            return True, None
+        except Exception as exc:
+            self.last_error = str(exc)
+            print(f"❌ CLOSE FAILED #{trade.get('id')} {symbol}: {exc}")
+            return False, str(exc)

@@ -33,7 +33,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
               <th className="px-3 py-1.5 font-semibold">Side</th>
               <th className="px-3 py-1.5 font-semibold">Entry</th>
               <th className="px-3 py-1.5 font-semibold">Current</th>
-              <th className="px-3 py-1.5 font-semibold">PnL (%)</th>
+              <th className="px-3 py-1.5 font-semibold">PnL (gross)</th>
               <th className="px-3 py-1.5 font-semibold text-right">Status</th>
             </tr>
           </thead>
@@ -74,12 +74,28 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                     </td>
                     <td className={`px-3 py-1.5 ${isSold ? 'text-white/80' : trade.side === 'LONG' ? 'text-green-500' : 'text-red-500'} font-bold text-[10px]`}>
                       {trade.side} {isSold ? '(SOLD)' : isProtected ? '(MANUAL)' : ''}
+                      {trade.exchange === 'bybit_linear_testnet' && !isSold ? (
+                        <span className="text-amber-400 font-bold ml-1" title="Real Bybit TESTNET position">⛓</span>
+                      ) : null}
+                      {trade.exchange === 'paper' && !isSold ? (
+                        <span className="text-blue-400 font-bold ml-1" title="Paper simulation (same rules as live)">📄</span>
+                      ) : null}
                     </td>
                     <td className="px-3 py-1.5 font-mono">${fmtNum(trade.entry)}</td>
                     <td className="px-3 py-1.5 font-mono">${fmtNum(trade.current)}</td>
                     <td className={`px-3 py-1.5 font-bold ${pnlColor}`}>
-                      {isProfit ? '+' : ''}
-                      {trade.pnl.toFixed(2)}%
+                      {trade.gross_pnl_pct != null ? (
+                        <span title={`Net after fees: ${trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}%`}>
+                          {trade.gross_pnl_pct >= 0 ? '+' : ''}
+                          {trade.gross_pnl_pct.toFixed(2)}%
+                          <span className="text-[9px] font-normal text-gray-500 ml-0.5">gross</span>
+                        </span>
+                      ) : (
+                        <>
+                          {isProfit ? '+' : ''}
+                          {trade.pnl.toFixed(2)}%
+                        </>
+                      )}
                     </td>
                     <td className="px-3 py-1.5">
                       <div className="flex items-center justify-end gap-1.5">
@@ -145,9 +161,18 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <span className={`font-bold ${pnlColor} text-xs`}>
-                    {isProfit ? '+' : ''}
-                    {trade.pnl.toFixed(2)}%
+                  <span className={`font-bold ${pnlColor} text-xs`} title={`Net: ${trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}%`}>
+                    {trade.gross_pnl_pct != null ? (
+                      <>
+                        {trade.gross_pnl_pct >= 0 ? '+' : ''}
+                        {trade.gross_pnl_pct.toFixed(2)}%
+                      </>
+                    ) : (
+                      <>
+                        {isProfit ? '+' : ''}
+                        {trade.pnl.toFixed(2)}%
+                      </>
+                    )}
                   </span>
                   <StatusIcon trade={trade} />
                 </div>

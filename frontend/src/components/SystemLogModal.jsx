@@ -339,7 +339,7 @@ export default function SystemLogModal({
                 label={isPaper ? 'PAPER MODE' : bybitTestnetOk ? 'KEYS SET' : 'KEYS MISSING'}
               />
               <p className="text-[11px] text-gray-500 mt-2">
-                {isPaper ? 'Simulated trades — no API keys needed' : 'Orders fire here (testnet.bybit.com)'}
+                {isPaper ? 'Paper ledger — same TAAPI / fixed-TP rules as TESTNET' : 'Bybit TESTNET — real orders, same rules as paper'}
               </p>
             </div>
           </section>
@@ -450,7 +450,7 @@ export default function SystemLogModal({
           <section className="bg-[#161A1E] border border-gray-800 rounded-xl p-4">
             <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-3">
               <i className="fas fa-bolt text-amber-400 mr-1.5" />
-              Last Trade Fire ({isPaper ? 'Paper Simulation' : 'Bybit TESTNET'})
+              Last Trade Fire ({tradeFire?.mode || (isPaper ? 'PAPER_TRADING' : 'BYBIT_TESTNET')})
             </h3>
             {!tradeFire ? (
               <p className="text-sm text-gray-500">No trade fire attempted yet this session.</p>
@@ -461,6 +461,10 @@ export default function SystemLogModal({
                   <dd className={tradeFire.success ? 'text-green-400 font-bold' : 'text-red-400 font-bold'}>
                     {tradeFire.success ? 'FIRED' : 'FAILED'}
                   </dd>
+                </div>
+                <div>
+                  <dt className="text-gray-500">Mode</dt>
+                  <dd className="text-gray-200">{tradeFire.mode || '—'}</dd>
                 </div>
                 <div>
                   <dt className="text-gray-500">Action</dt>
