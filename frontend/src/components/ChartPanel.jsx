@@ -1,7 +1,7 @@
 import PairSelectorDropdown from './PairSelectorDropdown';
 import { fmtNum } from '../data/pairs';
 
-const TIMEFRAMES = ['30S', '1M', '5M', '15M', '1H', '1D'];
+const TIMEFRAMES = ['1M', '5M', '15M', '1H', '1D'];
 
 export default function ChartPanel({ pairSelector, chartContainerRef, volumeContainerRef, timeframe, switchTimeframe, readouts }) {
   return (

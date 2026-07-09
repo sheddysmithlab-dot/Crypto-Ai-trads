@@ -598,7 +598,7 @@ class AITradingAgent:
 
         # Chart-only timeframe (kept so the frontend's /set-timeframe call still
         # works). No auto-entry policy currently reads this - see auto_buy_loop().
-        self.timeframe_seconds = 30
+        self.timeframe_seconds = 60
 
     def _trade_metrics(self, t):
         """ RULE 6: True Net Profit = Gross Profit - (Entry Fee + Estimated Exit Fee).
@@ -1119,7 +1119,7 @@ def get_bybit_symbol(pair_label):
 # TAAPI CANDLE-PATTERN POLICY: interval translation tables.
 # Three different "interval" vocabularies have to agree here:
 #  - agent.timeframe_seconds: raw seconds, set by the frontend's chart timeframe
-#    selector (only 30S/1M/5M/15M/1H/1D exist there today).
+#    selector (1M/5M/15M/1H/1D).
 #  - TIMEFRAME_RULES keys (taapi_scanner.py / SYSTEM_RULES.md): "30s".."1D" -
 #    includes 3m/10m/30m, which nothing on the frontend can select yet. TAAPI's
 #    own query interval is translated FROM these keys inside taapi_scanner
@@ -1575,28 +1575,38 @@ async def bybit_balance_refresher():
         await asyncio.sleep(3)
 
 # Render's free tier spins a web service down after ~15 minutes with no
-# inbound HTTP traffic, so the next real request pays a cold-start delay
-# (up to ~50s). RENDER_EXTERNAL_URL is set automatically by Render on every
-# web service - self-pinging it periodically (safely under 15 minutes)
-# generates real inbound traffic so the service never silently goes to
-# sleep. No-op for local dev, where that env var isn't set.
-KEEPALIVE_INTERVAL_SECONDS = 11 * 60  # 11 minutes - safely inside the 10-14 minute window asked for
+# inbound HTTP traffic. Self-ping ONLY hits GET /health — it does not stop
+# the bot, sell trades, or restart the process; it just keeps the service warm.
+# RENDER_EXTERNAL_URL is set automatically on Render web services.
+KEEPALIVE_INTERVAL_SECONDS = 13 * 60  # 13 minutes — under Render's ~15m idle sleep window
+
+
+async def _ping_health(client: httpx.AsyncClient, self_url: str) -> bool:
+    try:
+        resp = await client.get(f"{self_url}/health")
+        print(f"[KEEPALIVE] Self-ping OK (HTTP {resp.status_code}) — /health only, no trades touched.")
+        return True
+    except Exception as exc:
+        print(f"[KEEPALIVE] Self-ping failed ({exc}) — will retry next interval.")
+        return False
+
 
 async def self_ping_keepalive():
     self_url = os.environ.get("RENDER_EXTERNAL_URL")
     if not self_url:
-        print("[KEEPALIVE] RENDER_EXTERNAL_URL not set (local dev) - keepalive disabled.")
+        print("[KEEPALIVE] RENDER_EXTERNAL_URL not set (local dev) — keepalive disabled.")
         return
 
-    print(f"[KEEPALIVE] Will self-ping {self_url}/health every {KEEPALIVE_INTERVAL_SECONDS // 60} minutes to prevent Render's free-tier sleep.")
+    interval = int(os.environ.get("KEEPALIVE_INTERVAL_SECONDS", str(KEEPALIVE_INTERVAL_SECONDS)))
+    print(
+        f"[KEEPALIVE] Pinging {self_url}/health every {interval // 60} minutes "
+        f"(read-only wake ping — bot/trades unchanged)."
+    )
     async with httpx.AsyncClient(timeout=15.0) as client:
+        await _ping_health(client, self_url)
         while True:
-            await asyncio.sleep(KEEPALIVE_INTERVAL_SECONDS)
-            try:
-                resp = await client.get(f"{self_url}/health")
-                print(f"[KEEPALIVE] Self-ping OK (HTTP {resp.status_code}) - service stays awake.")
-            except Exception as exc:
-                print(f"[KEEPALIVE] Self-ping failed ({exc}) - will retry next interval.")
+            await asyncio.sleep(interval)
+            await _ping_health(client, self_url)
 
 @app.on_event("startup")
 async def start_background_tasks():

@@ -7,9 +7,9 @@ import { fmtNum, getBinanceSymbol, getBybitSymbol } from '../data/pairs';
 // Timeframe -> candle interval in seconds. Drives BOTH historical bucketing
 // and live WebSocket tick bucketing so the chart genuinely reacts to the
 // selected timeframe (not just a cosmetic label change).
-const TIMEFRAME_SECONDS = { '30S': 30, '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 86400 };
+const TIMEFRAME_SECONDS = { '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 86400 };
 
-// Standard kline granularities on each exchange. 30S is built from recent trades.
+// Standard kline granularities on each exchange (1M and above).
 const BYBIT_KLINE_INTERVAL = { '1M': '1', '5M': '5', '15M': '15', '1H': '60', '1D': 'D' };
 const BINANCE_KLINE_INTERVAL = { '1M': '1m', '5M': '5m', '15M': '15m', '1H': '1h', '1D': '1d' };
 
@@ -266,7 +266,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
   const trailingLockLineRef = useRef(null);
   const mockDataRef = useRef([]);
   const entryPriceRef = useRef(pairPrice);
-  const currentIntervalRef = useRef(TIMEFRAME_SECONDS['30S']);
+  const currentIntervalRef = useRef(TIMEFRAME_SECONDS['1M']);
   const tradingModeRef = useRef(null);
   const freeSourceWsRef = useRef(null);
   const pairLabelRef = useRef(pairLabel);
@@ -277,7 +277,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
   const zoomTimeoutRef = useRef(null);
   pairLabelRef.current = pairLabel;
 
-  const [timeframe, setTimeframe] = useState('30S');
+  const [timeframe, setTimeframe] = useState('1M');
   const [chartSourceMode, setChartSourceModeState] = useState('PAPER_TRADING');
   const [chartHistorySource, setChartHistorySource] = useState('—');
   const [chartLiveSource, setChartLiveSource] = useState('—');
@@ -615,9 +615,8 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       }
     });
 
-    // Fetch real Binance history for the initial pair/timeframe (30S has no kline
-    // equivalent, so it falls back to bucketed real trades - see loadHistoricalData).
-    loadRealHistoryInBackground(pairLabelRef.current, '30S', entryPrice);
+    // Fetch real history for the initial pair on the default 1M timeframe.
+    loadRealHistoryInBackground(pairLabelRef.current, '1M', entryPrice);
 
     // RULE 2: Sync the default timeframe to the backend on load too, not just on every
     // subsequent switchTimeframe click, so a fresh page load and a fresh backend start
