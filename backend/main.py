@@ -1145,11 +1145,6 @@ TIMEFRAME_KEY_TO_BYBIT_KLINE = {
     "15m": "15", "30m": "30", "1h": "60", "1D": "D",
 }
 
-TIMEFRAME_KEY_TO_SECONDS = {
-    "30s": 30, "1m": 60, "3m": 180, "5m": 300, "10m": 600,
-    "15m": 900, "30m": 1800, "1h": 3600, "1D": 86400,
-}
-
 # Per-pair last-processed CLOSED candle timestamp, keyed by pair label - keeping
 # this per-pair (not one shared scalar) means switching pairs never needs a
 # manual reset: a pair's own last-seen timestamp is either genuinely stale
@@ -1184,103 +1179,6 @@ async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
     # Bybit's kline row is [startTime, open, high, low, close, volume, turnover] -
     # startTime doubles as a unique, strictly-increasing per-candle id.
     return {"high": float(closed[2]), "low": float(closed[3]), "close_time": int(closed[0])}
-
-
-async def fetch_recent_closed_kline_volumes(bybit_symbol: str, timeframe_key: str, closed_count: int = 3):
-    """Last N fully closed LINEAR klines (newest first) with total volume."""
-    bybit_interval = TIMEFRAME_KEY_TO_BYBIT_KLINE.get(timeframe_key, "1")
-    limit = closed_count + 1  # index 0 is still forming
-    url = (
-        f"https://api.bybit.com/v5/market/kline?category=linear"
-        f"&symbol={bybit_symbol}&interval={bybit_interval}&limit={limit}"
-    )
-    async with httpx.AsyncClient(timeout=6.0) as client:
-        resp = await client.get(url)
-    resp.raise_for_status()
-    candles = resp.json()["result"]["list"]
-    out = []
-    for row in candles[1 : closed_count + 1]:
-        out.append({
-            "start_time": int(row[0]),
-            "volume": float(row[5]),
-            "turnover": float(row[6]) if len(row) > 6 else 0.0,
-        })
-    return out
-
-
-async def fetch_candle_taker_volumes(bybit_symbol: str, candle_start_ms: int, duration_sec: int):
-    """Sum taker buy/sell base-asset size inside one closed candle window."""
-    end_ms = candle_start_ms + duration_sec * 1000
-    url = (
-        f"https://api.bybit.com/v5/market/recent-trade?category=linear"
-        f"&symbol={bybit_symbol}&limit=1000"
-    )
-    async with httpx.AsyncClient(timeout=6.0) as client:
-        resp = await client.get(url)
-    resp.raise_for_status()
-    trades = resp.json().get("result", {}).get("list", [])
-    buy_vol = 0.0
-    sell_vol = 0.0
-    for trade in trades:
-        ts = int(trade.get("time", 0))
-        if ts < candle_start_ms:
-            break
-        if candle_start_ms <= ts < end_ms:
-            size = float(trade.get("size", 0))
-            if trade.get("side") == "Buy":
-                buy_vol += size
-            else:
-                sell_vol += size
-    return {
-        "buy_volume": buy_vol,
-        "sell_volume": sell_vol,
-        "total_taker_volume": buy_vol + sell_vol,
-    }
-
-
-async def analyze_signal_candle_volume(bybit_symbol: str, timeframe_key: str) -> dict:
-    """After TAAPI BUY/SELL: signal candle volume must exceed both prior closed candles."""
-    duration_sec = TIMEFRAME_KEY_TO_SECONDS.get(timeframe_key, 60)
-    candles = await fetch_recent_closed_kline_volumes(bybit_symbol, timeframe_key, closed_count=3)
-    if len(candles) < 3:
-        return {
-            "passed": False,
-            "reason": f"Need 3 closed candles, got {len(candles)}.",
-            "candles": candles,
-        }
-
-    signal, prev1, prev2 = candles[0], candles[1], candles[2]
-    taker = await fetch_candle_taker_volumes(bybit_symbol, signal["start_time"], duration_sec)
-    signal_vol = signal["volume"]
-    prev1_vol = prev1["volume"]
-    prev2_vol = prev2["volume"]
-    passed = signal_vol > prev1_vol and signal_vol > prev2_vol
-
-    if passed:
-        reason = (
-            f"Signal vol {signal_vol:.4f} > prev-1 ({prev1_vol:.4f}) "
-            f"and prev-2 ({prev2_vol:.4f})"
-        )
-    else:
-        reason = (
-            f"Signal vol {signal_vol:.4f} not above both prior candles "
-            f"({prev1_vol:.4f}, {prev2_vol:.4f}) — trade blocked"
-        )
-
-    return {
-        "passed": passed,
-        "reason": reason,
-        "signal_candle": {
-            "start_time": signal["start_time"],
-            "kline_volume": signal_vol,
-            "buy_volume": taker["buy_volume"],
-            "sell_volume": taker["sell_volume"],
-            "turnover": signal.get("turnover", 0),
-        },
-        "prev_candle_1": {"start_time": prev1["start_time"], "kline_volume": prev1_vol},
-        "prev_candle_2": {"start_time": prev2["start_time"], "kline_volume": prev2_vol},
-    }
-
 
 # TAAPI auto-order sizing: 2% of total portfolio value per fired trade.
 # Example: $1,000 capital -> $20 position -> ~0.00021 BTC @ $97,000.
@@ -1475,27 +1373,6 @@ async def auto_buy_loop():
         system_log.set_last_taapi_scan(agent.active_pair, timeframe_key, signals, result, candle)
         if result["action"] not in ("BUY", "SELL"):
             print(f"[AUTO BUY LOOP] {result['action']}: {result['reason']}")
-            continue
-
-        try:
-            volume_analysis = await analyze_signal_candle_volume(bybit_symbol, timeframe_key)
-        except Exception as exc:
-            print(f"[AUTO BUY LOOP] Volume analysis failed: {exc}")
-            volume_analysis = {
-                "passed": False,
-                "reason": f"Volume check error: {exc}",
-            }
-        system_log.set_last_volume_analysis(
-            agent.active_pair, timeframe_key, result["action"], volume_analysis
-        )
-        if not volume_analysis.get("passed"):
-            _log_trade_skip(
-                result["action"],
-                bybit_symbol,
-                result.get("pattern"),
-                volume_analysis.get("reason", "Volume gate failed"),
-                volume_analysis=volume_analysis,
-            )
             continue
 
         capital_base = agent.get_trading_capital_base()
@@ -2036,14 +1913,10 @@ async def get_system_logs():
             "open_trades": len(agent.trades),
             "emergency_triggered": agent.emergency_triggered,
             "policy": (
-                f"TAAPI BUY->LONG / SELL->inverse SHORT | volume gate (signal > prev 2 candles) | "
-                f"{AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital per trade | "
+                f"TAAPI BUY->LONG / SELL->inverse SHORT | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital per trade | "
                 f"per-trade profit book (floor {agent.get_profit_floor_pct()}% + 30% trail)"
                 if bybit_api.mode == "PAPER_TRADING"
-                else (
-                    f"TAAPI BUY/SELL -> Bybit TESTNET linear | volume gate (signal > prev 2) | "
-                    f"{AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital | per-trade profit book"
-                )
+                else f"TAAPI BUY/SELL -> Bybit TESTNET linear | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital | per-trade profit book"
             ),
         },
         "chart": {
@@ -2052,7 +1925,6 @@ async def get_system_logs():
             "live_hint_live": "Live mode: backend /ws/market feed (Bybit price engine)",
         },
         "last_taapi_scan": system_log.last_taapi_scan,
-        "last_volume_analysis": system_log.last_volume_analysis,
         "last_trade_fire": system_log.last_trade_fire,
         "entries": system_log.entries[-60:],
         "notifications": notifications.notifications[-20:],

@@ -181,7 +181,6 @@ function formatIso(ts) {
 
 const CATEGORY_COLOR = {
   taapi: 'text-purple-300',
-  volume: 'text-orange-300',
   ai: 'text-blue-300',
   bybit: 'text-amber-300',
   trade: 'text-green-300',
@@ -227,7 +226,6 @@ export default function SystemLogModal({
   const conn = systemLogs?.connections || {};
   const agent = systemLogs?.agent || {};
   const taapi = systemLogs?.last_taapi_scan;
-  const volumeAnalysis = systemLogs?.last_volume_analysis;
   const tradeFire = systemLogs?.last_trade_fire;
   const backendEntries = systemLogs?.entries || [];
   const backendNotifications = systemLogs?.notifications || [];
@@ -254,15 +252,11 @@ export default function SystemLogModal({
   const decision = taapi?.decision || {};
   const bullish = taapi?.bullish || [];
   const bearish = taapi?.bearish || [];
-  const volSignal = volumeAnalysis?.signal_candle;
-  const volPrev1 = volumeAnalysis?.prev_candle_1;
-  const volPrev2 = volumeAnalysis?.prev_candle_2;
-  const volumePassed = volumeAnalysis?.passed;
 
   return (
     <div className="fixed inset-0 z-[115] pointer-events-none">
       <div
-        className="absolute inset-0 bg-transparent pointer-events-auto"
+        className="absolute inset-0 bg-black/80 backdrop-blur-sm pointer-events-auto"
         onClick={onClose}
         aria-hidden
       />
@@ -448,82 +442,6 @@ export default function SystemLogModal({
                     </div>
                   </div>
                 </div>
-              </div>
-            )}
-          </section>
-
-          {/* Volume gate — runs after TAAPI BUY/SELL */}
-          <section className="bg-[#161A1E] border border-gray-800 rounded-xl p-4">
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-3">
-              <i className="fas fa-chart-bar text-orange-400 mr-1.5" />
-              Volume Analysis (Signal Candle)
-              {volumeAnalysis?.timestamp ? (
-                <span className="text-gray-500 font-normal normal-case ml-2">{formatIso(volumeAnalysis.timestamp)}</span>
-              ) : null}
-            </h3>
-            {!volumeAnalysis ? (
-              <p className="text-sm text-gray-500">
-                No volume check yet. Runs when TAAPI returns BUY or SELL on a closed candle.
-              </p>
-            ) : (
-              <div className="space-y-3">
-                <div className="flex flex-wrap gap-2 text-xs">
-                  <span className="px-2 py-1 rounded bg-gray-800 text-gray-300">
-                    Gate:{' '}
-                    <strong className={volumePassed ? 'text-green-400' : 'text-red-400'}>
-                      {volumePassed ? 'PASSED' : 'BLOCKED'}
-                    </strong>
-                  </span>
-                  {volumeAnalysis.action ? (
-                    <span className="px-2 py-1 rounded bg-gray-800 text-gray-300">
-                      Signal: <strong className="text-white">{volumeAnalysis.action}</strong>
-                    </span>
-                  ) : null}
-                  {volumeAnalysis.reason ? (
-                    <span className="px-2 py-1 rounded bg-gray-800 text-gray-400">{volumeAnalysis.reason}</span>
-                  ) : null}
-                </div>
-                {volSignal ? (
-                  <div className="rounded-lg border border-orange-500/30 bg-orange-500/5 p-3 text-xs">
-                    <div className="text-orange-400 font-bold mb-2 uppercase tracking-wide">Signal candle</div>
-                    <dl className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                      <div>
-                        <dt className="text-gray-500">Kline volume</dt>
-                        <dd className="text-white font-mono">{Number(volSignal.kline_volume).toFixed(4)}</dd>
-                      </div>
-                      <div>
-                        <dt className="text-green-500">Buy (taker)</dt>
-                        <dd className="text-green-300 font-mono">{Number(volSignal.buy_volume).toFixed(4)}</dd>
-                      </div>
-                      <div>
-                        <dt className="text-red-500">Sell (taker)</dt>
-                        <dd className="text-red-300 font-mono">{Number(volSignal.sell_volume).toFixed(4)}</dd>
-                      </div>
-                      <div>
-                        <dt className="text-gray-500">Turnover</dt>
-                        <dd className="text-gray-200 font-mono">{Number(volSignal.turnover || 0).toFixed(2)}</dd>
-                      </div>
-                    </dl>
-                  </div>
-                ) : null}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                  <div className="rounded-lg border border-gray-700 bg-gray-900/50 p-3">
-                    <div className="text-gray-400 font-bold mb-1">Previous candle −1</div>
-                    <div className="text-gray-200 font-mono">
-                      {volPrev1 ? Number(volPrev1.kline_volume).toFixed(4) : '—'}
-                    </div>
-                  </div>
-                  <div className="rounded-lg border border-gray-700 bg-gray-900/50 p-3">
-                    <div className="text-gray-400 font-bold mb-1">Previous candle −2</div>
-                    <div className="text-gray-200 font-mono">
-                      {volPrev2 ? Number(volPrev2.kline_volume).toFixed(4) : '—'}
-                    </div>
-                  </div>
-                </div>
-                <p className="text-[11px] text-gray-500">
-                  Trade fires only when signal kline volume is strictly higher than both prior closed candles.
-                  Buy/sell split is from Bybit taker trades in that candle window.
-                </p>
               </div>
             )}
           </section>
