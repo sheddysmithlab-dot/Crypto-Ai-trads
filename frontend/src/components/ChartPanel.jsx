@@ -5,7 +5,7 @@ const TIMEFRAMES = ['1M', '5M', '15M', '1H', '1D'];
 
 export default function ChartPanel({ pairSelector, chartContainerRef, volumeContainerRef, timeframe, switchTimeframe, readouts }) {
   return (
-    <div className="bg-lightCard dark:bg-darkCard rounded-xl shadow border border-gray-200 dark:border-gray-800 overflow-hidden">
+    <div className="bg-lightCard dark:bg-darkCard rounded-xl shadow border border-gray-200 dark:border-gray-800 overflow-hidden shrink-0">
       {/* Chart Header */}
       <div className="flex justify-between items-center px-3 py-2 border-b border-gray-200 dark:border-gray-800">
         <PairSelectorDropdown
@@ -31,7 +31,7 @@ export default function ChartPanel({ pairSelector, chartContainerRef, volumeCont
       </div>
 
       {/* Candlestick Chart - zoomed by default to the last 10 candles */}
-      <div ref={chartContainerRef} className="w-full h-64 lg:h-80 relative">
+      <div ref={chartContainerRef} className="w-full h-80 lg:h-[28rem] relative">
         <div className="absolute left-2 bottom-1.5 flex items-center gap-1 pointer-events-none opacity-30 select-none z-10">
           <div className="w-3.5 h-3.5 rounded bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-black text-white text-[7px]">
             Ai

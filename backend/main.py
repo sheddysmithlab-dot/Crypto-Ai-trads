@@ -544,10 +544,16 @@ bybit_api = BybitAPIWrapper()
 # PILLAR 3: CORE AI AGENT LOGIC (State & Rules)
 # ==========================================
 class AITradingAgent:
-    # PROFIT BOOKING POLICY (updated): 0.40% strict floor + 30% dynamic trailing
-    # from the highest peak, with a floor override. See process_tick for the math.
-    PROFIT_FLOOR_PCT = 0.40      # never sell below this net profit %
-    TRAILING_DROP_PCT = 0.30     # sell when net drops 30% from its peak
+    # PROFIT BOOKING ONLY — no portfolio/trade stop-loss. Floor per chart TF + 30% trail.
+    TRAILING_DROP_PCT = 0.30
+    PROFIT_FLOOR_BY_TIMEFRAME = {
+        "1m": 0.40,
+        "5m": 0.60,
+        "15m": 0.08,
+        "1h": 1.0,
+        "1D": 1.2,
+    }
+    PROFIT_FLOOR_PCT = 0.40      # default fallback (1m chart)
 
     def __init__(self):
         self.is_active = False
@@ -561,23 +567,18 @@ class AITradingAgent:
         # emergency would both incorrectly re-show the "choose your action" popup.
         self.emergency_awaiting_decision = False
 
-        # POLICY 2 / RULE 5 Config: Portfolio Kill Switch
+        # Pre-start strategy config (AI Agent Instructions modal before START).
         self.starting_capital = 1000.0
         self.current_capital = self.starting_capital
-        # Default 3.0% per the AI Agent Instructions setup modal; the modal's
-        # /agent/config call updates this to whatever the user picks before start.
-        self.max_loss_pct = 3.0
-        # AI Agent Instructions modal: max stacked trades the bot may hold at once,
-        # derived as half-up round(stop_loss_pct * 1.5). Default 3% -> round(4.5) = 5.
+        # Risk % from modal -> max_concurrent_trades via round(risk_pct * 1.5). Not a stop-loss.
+        self.risk_level_pct = 3.0
         self.max_concurrent_trades = 5
         # AI Agent Instructions modal: optional "Capital profit of the day" target.
         # 0.0 means disabled. Once the day's profit % crosses this, new entries are
         # halted (existing positions keep being managed by the trailing lock).
         self.daily_profit_target_pct = 0.0
         self.daily_target_reached = False
-        # AI Season: profit tracked from the moment START AI AUTOMATION is clicked
-        # until STOP / Emergency Exit. Used for header display AND as the RULE 5/8
-        # kill-switch baseline (so loss % is vs session start, not old paper capital).
+        # AI Season: profit tracked from START until STOP.
         self.ai_season_start_capital = None
 
         # RULE 1: Position Sizing & Leverage (The "100/1" Rule)
@@ -599,6 +600,11 @@ class AITradingAgent:
         # Chart-only timeframe (kept so the frontend's /set-timeframe call still
         # works). No auto-entry policy currently reads this - see auto_buy_loop().
         self.timeframe_seconds = 60
+
+    def get_profit_floor_pct(self):
+        """ Net-profit floor for trailing lock / profit booking on the active chart TF. """
+        key = SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
+        return self.PROFIT_FLOOR_BY_TIMEFRAME.get(key, self.PROFIT_FLOOR_PCT)
 
     def _trade_metrics(self, t):
         """ RULE 6: True Net Profit = Gross Profit - (Entry Fee + Estimated Exit Fee).
@@ -900,7 +906,7 @@ class AITradingAgent:
 
     async def process_tick(self, new_price, volume_increment):
         """ Updates live price, clears corrupt entries, and books profit per open
-        auto trade (LONG + inverse SHORT) via the 0.40% floor + 30% trailing lock. """
+        auto trade (LONG + inverse SHORT) via the chart-timeframe floor + 30% trail. """
         clean_price = _sanitize_market_price(new_price)
         if clean_price is None:
             print(f"[PILLAR 3: AI AGENT] Ignoring invalid market tick: {new_price!r}")
@@ -918,7 +924,7 @@ class AITradingAgent:
         if not self.is_active or not self.trades:
             return
 
-        floor = self.PROFIT_FLOOR_PCT
+        floor = self.get_profit_floor_pct()
         still_open = []
         for trade in self.trades:
             if trade.get("source") == "manual":
@@ -1017,9 +1023,9 @@ class AITradingAgent:
         else:
             remaining = [self._trade_metrics(t)["net_pct"] for t in self.trades]
             new_avg = sum(remaining) / len(remaining)
-            if new_avg < self.PROFIT_FLOOR_PCT:
+            if new_avg < self.get_profit_floor_pct():
                 # Everything left is under the floor - drop the lock until the held
-                # positions climb back above 0.40% and start a fresh trail.
+                # positions climb back above the chart floor and start a fresh trail.
                 self.is_lock_active = False
                 self.peak_net_pct = 0.0
             else:
@@ -1073,14 +1079,12 @@ class AITradingAgent:
         system_log.push("ai", "AI automation STOPPED — emergency exit, all positions closed.", {"reason": reason})
         notifications.push("EMERGENCY EXIT: All positions closed and AI automation stopped.", "error")
 
-    def resume_trading_with_higher_buffer(self):
-        """ User chose 'CONTINUE' on the risk popup: raise the cumulative stop-loss
-        ceiling by another 2.5% (2.5% -> 5% -> 7.5% ...) and resume trading. """
-        self.max_loss_pct += 2.5
+    def resume_trading_after_emergency(self):
+        """ Legacy continue endpoint — portfolio stop-loss removed; clears halt flags only. """
         self.clear_emergency_state()
         self.is_active = True
-        print(f"[RULE 8: CONTINUE CHOSEN] Trading resumed by user choice. New cumulative stop-loss threshold: {self.max_loss_pct}%.")
-        notifications.push(f"✅ RULE 8: User chose CONTINUE. Trading resumed - stop-loss threshold raised to {self.max_loss_pct:.1f}%.", "warning")
+        print("[AI AGENT] Trading resumed (portfolio stop-loss disabled).")
+        notifications.push("Trading resumed.", "warning")
 
 agent = AITradingAgent()
 
@@ -1664,13 +1668,13 @@ async def emergency_exit():
 
 @app.post("/continue-trading")
 async def continue_trading():
-    """ RULE 5 (Popup 'CONTINUE' choice): resumes trading with the cumulative
-    stop-loss ceiling raised by another 2.5% (e.g. 2.5% -> 5% -> 7.5% ...). """
-    agent.resume_trading_with_higher_buffer()
+    """ Clears emergency halt flags. Portfolio stop-loss is disabled. """
+    agent.resume_trading_after_emergency()
     return {
         "status": "success",
-        "message": f"Trading resumed. New stop-loss threshold: {agent.max_loss_pct:.1f}% cumulative drop.",
-        "max_loss_pct": agent.max_loss_pct,
+        "message": "Trading resumed.",
+        "risk_level_pct": agent.risk_level_pct,
+        "max_concurrent_trades": agent.max_concurrent_trades,
     }
 
 @app.post("/connect-bybit")
@@ -1834,8 +1838,7 @@ def _half_up_round(value: float) -> int:
 async def set_agent_config(payload: AgentConfigPayload):
     """ Applied from the "AI Agent Instructions" pre-start modal.
     - stop_loss_pct (risk level from the popup) -> max_concurrent_trades via
-      round(stop_loss_pct * 1.5) (half-up). Portfolio stop-loss is disabled for
-      now; this value only caps how many trades can run at once.
+      round(stop_loss_pct * 1.5) (half-up). Pre-start strategy only — not a stop-loss.
     - daily_profit_pct -> optional "Capital profit of the day" target; 0 disables.
     Both are validated and stored before /start-bot is called by the frontend. """
     if payload.stop_loss_pct < 0.5 or payload.stop_loss_pct > 50:
@@ -1843,6 +1846,7 @@ async def set_agent_config(payload: AgentConfigPayload):
     if payload.daily_profit_pct < 0 or payload.daily_profit_pct > 1000:
         return {"status": "error", "message": "Daily profit target must be between 0% and 1000%."}
 
+    agent.risk_level_pct = payload.stop_loss_pct
     agent.max_concurrent_trades = max(1, _half_up_round(payload.stop_loss_pct * 1.5))
     agent.daily_profit_target_pct = payload.daily_profit_pct
     agent.daily_target_reached = False
@@ -1860,7 +1864,9 @@ async def set_agent_config(payload: AgentConfigPayload):
 async def get_agent_config():
     """ Lets the modal show the currently-applied config when reopened. """
     # Derive the popup risk % from the stored concurrent-trades cap (inverse of * 1.5).
-    risk_pct = round(agent.max_concurrent_trades / 1.5, 1) if agent.max_concurrent_trades else 3.0
+    risk_pct = agent.risk_level_pct or (
+        round(agent.max_concurrent_trades / 1.5, 1) if agent.max_concurrent_trades else 3.0
+    )
     return {
         "stop_loss_pct": risk_pct,
         "risk_pct": risk_pct,
@@ -1908,7 +1914,7 @@ async def get_system_logs():
             "emergency_triggered": agent.emergency_triggered,
             "policy": (
                 f"TAAPI BUY->LONG / SELL->inverse SHORT | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital per trade | "
-                f"per-trade profit book (floor {agent.PROFIT_FLOOR_PCT}% + 30% trail)"
+                f"per-trade profit book (floor {agent.get_profit_floor_pct()}% + 30% trail)"
                 if bybit_api.mode == "PAPER_TRADING"
                 else f"TAAPI BUY/SELL -> Bybit TESTNET linear | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital | per-trade profit book"
             ),
@@ -2007,6 +2013,7 @@ async def market_feed(websocket: WebSocket):
         while True:
             payload = {
                 "price": round(agent.current_price, 4),
+                "active_pair": agent.active_pair,
                 "lock_active": agent.is_lock_active,
                 "peak_pct": round(agent.peak_net_pct, 4),
                 "trading_mode": bybit_api.mode,
@@ -2054,13 +2061,12 @@ async def portfolio_feed(websocket: WebSocket):
                 "ai_season_profit": round(ai_season_profit, 2),
                 "ai_season_profit_pct": round(ai_season_profit_pct, 2),
                 "ai_season_active": agent.ai_season_start_capital is not None and agent.is_active,
-                "portfolio_drop_pct": round(portfolio_drop, 2),  # RULE 8: session loss for emergency modal
+                "portfolio_drop_pct": round(portfolio_drop, 2),
                 "is_active": agent.is_active,
-                # RULE 8: Only true while a decision is genuinely pending - NOT emergency_triggered,
-                # which stays true long after resolution and would otherwise re-pop the modal on
-                # every reconnect/reload (and even on a plain manual STOP TRADING click).
-                "emergency": agent.emergency_awaiting_decision,
-                "max_loss_pct": agent.max_loss_pct,
+                "emergency": False,
+                "risk_level_pct": agent.risk_level_pct,
+                "max_concurrent_trades": agent.max_concurrent_trades,
+                "profit_floor_pct": agent.get_profit_floor_pct(),
                 "trades": len(agent.trades)
             }
             # POLICY 4: Alerting Frontend on Emergency Exit

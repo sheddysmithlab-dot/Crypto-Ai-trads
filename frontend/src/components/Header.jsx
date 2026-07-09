@@ -16,6 +16,7 @@ const DOT_COLOR = {
 
 export default function Header({
   totalCapital,
+  tradeValue = 0,
   dailyProfit,
   dailyProfitPct,
   seasonProfit,
@@ -42,6 +43,7 @@ export default function Header({
   const isProfit = dailyProfit >= 0;
   const isSeasonProfit = seasonProfit >= 0;
   const capStr = totalCapital.toLocaleString('en-US', { minimumFractionDigits: 2 });
+  const tradeValStr = tradeValue.toLocaleString('en-US', { minimumFractionDigits: 2 });
   const profitStr = `${isProfit ? '+' : '-'}$${Math.abs(dailyProfit).toLocaleString('en-US', {
     minimumFractionDigits: 2,
   })} (${isProfit ? '+' : ''}${dailyProfitPct.toFixed(2)}%)`;
@@ -66,6 +68,10 @@ export default function Header({
         <div className="flex flex-col">
           <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Total Capital</span>
           <span className="font-bold text-sm">${capStr}</span>
+        </div>
+        <div className="flex flex-col">
+          <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Trade Value</span>
+          <span className="font-bold text-sm text-amber-500">${tradeValStr}</span>
         </div>
         <div className="flex flex-col">
           <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Daily Profit</span>

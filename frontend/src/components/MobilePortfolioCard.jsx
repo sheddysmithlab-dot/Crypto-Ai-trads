@@ -1,7 +1,15 @@
-export default function MobilePortfolioCard({ totalCapital, dailyProfit, seasonProfit, seasonActive, tradesCount }) {
+export default function MobilePortfolioCard({
+  totalCapital,
+  tradeValue = 0,
+  dailyProfit,
+  seasonProfit,
+  seasonActive,
+  tradesCount,
+}) {
   const isProfit = dailyProfit >= 0;
   const isSeasonProfit = seasonProfit >= 0;
   const capStr = totalCapital.toLocaleString('en-US', { minimumFractionDigits: 2 });
+  const tradeValStr = tradeValue.toLocaleString('en-US', { minimumFractionDigits: 2 });
   const pnlStr = `${isProfit ? '+' : '-'}$${Math.abs(dailyProfit).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
   const seasonStr = seasonActive
     ? `${isSeasonProfit ? '+' : '-'}$${Math.abs(seasonProfit).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
@@ -14,6 +22,10 @@ export default function MobilePortfolioCard({ totalCapital, dailyProfit, seasonP
         <div>
           <div className="text-[11px] text-gray-500 dark:text-gray-400">Total Capital</div>
           <div className="font-bold text-sm">${capStr}</div>
+        </div>
+        <div>
+          <div className="text-[11px] text-gray-500 dark:text-gray-400">Trade Value</div>
+          <div className="font-bold text-sm text-amber-500">${tradeValStr}</div>
         </div>
         <div>
           <div className="text-[11px] text-gray-500 dark:text-gray-400">Daily Profit</div>

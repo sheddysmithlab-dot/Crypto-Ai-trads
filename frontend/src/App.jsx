@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from './hooks/useAuth.jsx';
 import { authFetch } from './config/api';
 import { debugLog } from './config/debug';
@@ -17,7 +17,6 @@ import ChartPanel from './components/ChartPanel';
 import LiveTradesPanel from './components/LiveTradesPanel';
 import ControlBar from './components/ControlBar';
 import PaperTradingModal from './components/PaperTradingModal';
-import RiskAlertModal from './components/RiskAlertModal';
 import AlertModal from './components/AlertModal';
 import SettingsModal from './components/SettingsModal';
 import AgentInstructionsModal from './components/AgentInstructionsModal';
@@ -32,7 +31,6 @@ export default function App() {
   const { trades, activeCount, activePair: activeTradesPair, closeTrade } = useTrades(setConnected);
   const { notifications, unreadCount, markAllRead } = useNotifications();
 
-  const [riskModal, setRiskModal] = useState({ open: false, lossPct: 0, threshold: 2.5 });
   const [alertOpen, setAlertOpen] = useState(false);
   const [paperModalOpen, setPaperModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -46,9 +44,7 @@ export default function App() {
   const [actionLogs, setActionLogs] = useState([]);
   const [exitConfirm, setExitConfirm] = useState({ open: false, type: null, tradeId: null });
 
-  const portfolio = usePortfolio(setConnected, {
-    onEmergencyTriggered: (lossPct, threshold) => setRiskModal({ open: true, lossPct, threshold }),
-  });
+  const portfolio = usePortfolio(setConnected);
 
   const uptime = useUptime(portfolio.isActive);
   const dayStats = useDayStats(pairSelector.activePairLabel);
@@ -104,7 +100,7 @@ export default function App() {
     if (!portfolio.isActive) {
       // START AI AUTOMATION opens the AI Agent Instructions pre-start popup first.
       // The actual /start-bot call happens inside handleAgentStart once the user
-      // confirms stop-loss / daily-profit and clicks Start.
+      // confirms risk level / daily-profit and clicks Start.
       debugLog('User clicked START AI AUTOMATION. Opening AI Agent Instructions modal...');
       pushActionLog('START AI AUTOMATION requested. Showing AI instructions popup.');
       setAgentModalOpen(true);
@@ -124,7 +120,7 @@ export default function App() {
   // open the "Emergency Exit & Continue" final safety check with the config.
   function handleAgentStartRequest(config) {
     debugLog('AI Instructions confirmed. Opening Emergency Exit & Continue safety check...', config);
-    pushActionLog(`AI config confirmed. stop_loss=${config.stopLossPct}%, daily_profit=${config.dailyProfitPct}%`);
+    pushActionLog(`AI config confirmed. risk_level=${config.stopLossPct}%, daily_profit=${config.dailyProfitPct}%`);
     setAgentModalOpen(false);
     setPendingConfig(config);
     setStartConfirmOpen(true);
@@ -135,8 +131,8 @@ export default function App() {
     if (!pendingConfig) return;
     const { stopLossPct, dailyProfitPct } = pendingConfig;
     setStartConfirmOpen(false);
-    pushActionLog(`Safety check continued. Starting bot with stop_loss=${stopLossPct}%, daily_profit=${dailyProfitPct}%`);
-    debugLog(`Safety check: Continue. Applying config (stopLoss=${stopLossPct}%, dailyProfit=${dailyProfitPct}%) and starting bot...`);
+    pushActionLog(`Safety check continued. Starting bot with risk_level=${stopLossPct}%, daily_profit=${dailyProfitPct}%`);
+    debugLog(`Safety check: Continue. Applying config (riskLevel=${stopLossPct}%, dailyProfit=${dailyProfitPct}%) and starting bot...`);
     try {
       await authFetch('/agent/config', {
         method: 'POST',
@@ -159,18 +155,6 @@ export default function App() {
     debugLog('Safety check: Emergency Exit. Bot start cancelled.');
     setStartConfirmOpen(false);
     setPendingConfig(null);
-  }
-
-  async function handleRiskExit() {
-    setRiskModal((r) => ({ ...r, open: false }));
-    pushActionLog('Emergency exit action confirmed from risk modal.');
-    try {
-      debugLog('Emergency Exit button clicked from modal');
-      await authFetch('/emergency-exit', { method: 'POST' });
-    } catch (err) {
-      console.error('Emergency exit request failed:', err);
-    }
-    setAlertOpen(true);
   }
 
   function requestForceClose(tradeId) {
@@ -274,25 +258,22 @@ export default function App() {
     requestManualSell();
   }
 
-  async function handleRiskContinue() {
-    setRiskModal((r) => ({ ...r, open: false }));
-    pushActionLog('Risk modal continue chosen. Raising stop-loss threshold and resuming trading.');
-    try {
-      debugLog('Continue button clicked - raising stop-loss threshold');
-      const res = await authFetch('/continue-trading', { method: 'POST' });
-      const data = await res.json();
-      debugLog('[RULE 8] ' + data.message);
-    } catch (err) {
-      console.error('Continue-trading request failed:', err);
-    }
-  }
-
-  const displayCapital = manualCapital ?? portfolio.totalCapital;
+  const grossCapital = manualCapital ?? portfolio.totalCapital;
+  const tradeValue = useMemo(
+    () =>
+      trades.reduce((sum, t) => {
+        if (t.status === 'sold') return sum;
+        return sum + (Number(t.position_size) || 0);
+      }, 0),
+    [trades],
+  );
+  const displayCapital = grossCapital - tradeValue;
 
   return (
     <div className="min-h-screen flex flex-col">
       <Header
         totalCapital={displayCapital}
+        tradeValue={tradeValue}
         dailyProfit={portfolio.dailyProfit}
         dailyProfitPct={portfolio.dailyProfitPct}
         seasonProfit={portfolio.seasonProfit}
@@ -318,13 +299,14 @@ export default function App() {
 
       <MobilePortfolioCard
         totalCapital={displayCapital}
+        tradeValue={tradeValue}
         dailyProfit={portfolio.dailyProfit}
         seasonProfit={portfolio.seasonProfit}
         seasonActive={portfolio.seasonActive}
         tradesCount={activeCount}
       />
 
-      <main className="flex-grow p-2 lg:p-4 space-y-3">
+      <main className="flex-grow flex flex-col min-h-0 p-2 lg:p-4 gap-3">
         <ChartPanel
           pairSelector={pairSelector}
           chartContainerRef={chartContainerRef}
@@ -354,17 +336,9 @@ export default function App() {
       <PaperTradingModal
         open={paperModalOpen}
         onClose={() => setPaperModalOpen(false)}
-        currentCapital={displayCapital}
+        currentCapital={grossCapital}
         onCapitalSet={(capital) => setManualCapital(capital)}
         isLive={portfolio.tradingMode === 'LIVE_TRADING'}
-      />
-
-      <RiskAlertModal
-        open={riskModal.open}
-        lossPct={riskModal.lossPct}
-        currentThreshold={riskModal.threshold}
-        onExit={handleRiskExit}
-        onContinue={handleRiskContinue}
       />
 
       <AlertModal open={alertOpen} onClose={() => setAlertOpen(false)} />

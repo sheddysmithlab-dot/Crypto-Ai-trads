@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { backendWsUrl } from '../config/api';
 
-// Single source of truth for portfolio value, daily PnL, bot active state,
-// trading mode (paper/live) and the automatic emergency-exit trigger.
-export function usePortfolio(setConnected, { onEmergencyTriggered } = {}) {
+// Portfolio value, daily PnL, bot active state, and trading mode (paper/live).
+export function usePortfolio(setConnected) {
   const [portfolio, setPortfolio] = useState({
     totalCapital: 0,
     dailyProfit: 0,
@@ -14,10 +13,7 @@ export function usePortfolio(setConnected, { onEmergencyTriggered } = {}) {
     isActive: false,
     tradingMode: null,
   });
-  const lastEmergencyState = useRef(false);
   const reconnectTimer = useRef(null);
-  const onEmergencyRef = useRef(onEmergencyTriggered);
-  onEmergencyRef.current = onEmergencyTriggered;
 
   useEffect(() => {
     function connect() {
@@ -38,15 +34,6 @@ export function usePortfolio(setConnected, { onEmergencyTriggered } = {}) {
           isActive: data.is_active,
           tradingMode: data.trading_mode,
         });
-
-        // Only show the risk modal on transition from false -> true, not every tick.
-        if (data.emergency && !lastEmergencyState.current) {
-          console.warn(
-            `[EMERGENCY] Modal triggered - Portfolio drop: ${data.portfolio_drop_pct}%, Threshold: ${data.max_loss_pct}%`
-          );
-          onEmergencyRef.current?.(data.portfolio_drop_pct, data.max_loss_pct || 2.5);
-        }
-        lastEmergencyState.current = data.emergency;
       };
 
       ws.onclose = () => {

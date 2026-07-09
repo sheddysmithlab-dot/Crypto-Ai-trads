@@ -16,15 +16,16 @@ function StatusIcon({ trade }) {
 
 export default function LiveTradesPanel({ trades, activeCount, activePair, onRequestClose }) {
   return (
-    <div className="bg-lightCard dark:bg-darkCard rounded-xl shadow border border-gray-200 dark:border-gray-800 overflow-hidden">
-      <div className="flex justify-between items-center px-3 py-2 border-b border-gray-200 dark:border-gray-800">
+    <div className="bg-lightCard dark:bg-darkCard rounded-xl shadow border border-gray-200 dark:border-gray-800 overflow-hidden flex-1 flex flex-col min-h-0">
+      <div className="flex justify-between items-center px-3 py-2 border-b border-gray-200 dark:border-gray-800 shrink-0">
         <h2 className="font-bold text-xs uppercase tracking-wide">
           Live Trades <span className="text-blue-500">({activeCount} Active)</span>
         </h2>
       </div>
 
       {/* Desktop Table */}
-      <div className="hidden lg:block overflow-x-auto max-h-64 overflow-y-auto">
+      <div className="hidden lg:flex flex-1 min-h-0 flex-col overflow-hidden">
+        <div className="flex-1 min-h-0 overflow-x-auto overflow-y-auto">
         <table className="w-full text-xs">
           <thead>
             <tr className="text-left text-gray-500 dark:text-gray-400 text-[10px] uppercase border-b border-gray-200 dark:border-gray-800">
@@ -100,10 +101,11 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
             )}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* Mobile List */}
-      <div className="lg:hidden divide-y divide-gray-100 dark:divide-gray-800 max-h-64 overflow-y-auto">
+      <div className="lg:hidden flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800">
         {trades.length === 0 ? (
           <div className="text-center py-6 text-gray-500 text-sm">No active positions. All trades closed.</div>
         ) : (

@@ -28,8 +28,10 @@ BYBIT_TAKER_FEE = 0.002  # 0.2% total (0.1% open + 0.1% close)
 
 # ==========================================
 # 2. TIMEFRAME PROFIT & MAX SL MATRIX (STRICT LOOKUP)
+# Shifted one step after 30s chart removal: each TF inherits the prior
+# (faster) row so 1m now starts at the old 30s targets (0.40% net / 0.60% gross).
 # ==========================================
-TIMEFRAME_RULES = {
+_TIMEFRAME_RULES_PRE_SHIFT = {
     "30s": {"net_profit": 0.004, "gross_tp": 0.006, "max_allowed_sl": 0.006, "buffer": 0.0005},
     "1m":  {"net_profit": 0.006, "gross_tp": 0.008, "max_allowed_sl": 0.008, "buffer": 0.0005},
     "3m":  {"net_profit": 0.006, "gross_tp": 0.008, "max_allowed_sl": 0.008, "buffer": 0.0010},
@@ -40,6 +42,15 @@ TIMEFRAME_RULES = {
     "1h":  {"net_profit": 0.012, "gross_tp": 0.014, "max_allowed_sl": 0.014, "buffer": 0.0015},
     "1D":  {"net_profit": 0.015, "gross_tp": 0.017, "max_allowed_sl": 0.017, "buffer": 0.0015},
 }
+_TIMEFRAME_RULE_SHIFT_FROM = {
+    "1m": "30s", "3m": "1m", "5m": "3m", "10m": "5m", "15m": "10m",
+    "30m": "15m", "1h": "30m", "1D": "1h",
+}
+TIMEFRAME_RULES = {
+    tf: dict(_TIMEFRAME_RULES_PRE_SHIFT[src])
+    for tf, src in _TIMEFRAME_RULE_SHIFT_FROM.items()
+}
+TIMEFRAME_RULES["30s"] = dict(_TIMEFRAME_RULES_PRE_SHIFT["30s"])
 
 # ==========================================
 # 3. TAAPI.IO PATTERN DICTIONARY
@@ -205,24 +216,12 @@ def evaluate_trade(signals_list, interval, candle_high, candle_low):
     if rules is None:
         return {"action": "NO_TRADE", "reason": f"Unknown timeframe '{interval}'"}
     buffer_pct = rules["buffer"]
-    max_allowed_sl = rules["max_allowed_sl"]
     gross_tp = rules["gross_tp"]
 
     if candle_low <= 0:
         return {"action": "NO_TRADE", "reason": "Invalid candle price data"}
 
-    # TIMEFRAME_RULES' buffer/max_allowed_sl are FRACTIONS of price (e.g. 0.008
-    # = 0.8%), but candle_high/candle_low are absolute prices. Comparing a raw
-    # dollar range against a thousandths-of-a-percent threshold would reject
-    # every real-priced asset unconditionally (e.g. BTC's ~$100k candles are
-    # always many dollars wide, always "greater than" 0.008) - so the range is
-    # expressed as a percentage of price first, and buffer is converted to an
-    # absolute price offset off candle_low before being added/subtracted below.
-    range_pct = (candle_high - candle_low) / candle_low
-    sl_distance_pct = range_pct + (2 * buffer_pct)
-    if sl_distance_pct > max_allowed_sl:
-        return {"action": "REJECT", "reason": "SL exceeds timeframe limit"}
-
+    # No trade stop-loss rejection — exits are profit-book only (per-trade trailing lock).
     buffer = candle_low * buffer_pct
 
     # d) FINAL PRICE CALCULATIONS

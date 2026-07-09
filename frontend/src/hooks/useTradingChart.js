@@ -312,6 +312,30 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     zoomTimeoutRef.current = setTimeout(applyZoom, 300);
   }, []);
 
+  const refreshTrailingLockLine = useCallback((basePrice) => {
+    const series = candleSeriesRef.current;
+    if (!series || !basePrice || basePrice <= 0) return;
+    if (trailingLockLineRef.current) {
+      try {
+        series.removePriceLine(trailingLockLineRef.current);
+      } catch {
+        /* line may already be detached */
+      }
+    }
+    trailingLockLineRef.current = series.createPriceLine({
+      price: basePrice * 1.0008,
+      color: '#3b82f6',
+      lineWidth: 2,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: 'Lock +0.08',
+    });
+  }, []);
+
+  const resetPriceScale = useCallback(() => {
+    chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+  }, []);
+
   const updateReadouts = useCallback((bar, data) => {
     const now = new Date();
     const volSeries = calcVolumeSMA(data.slice(-(VOLUME_MA_PERIOD + 5)), VOLUME_MA_PERIOD);
@@ -339,10 +363,11 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       mockDataRef.current = data;
       candleSeriesRef.current?.setData(data);
       applyAllOverlays(data);
+      resetPriceScale();
       if (zoomToRecent) zoomToRecentCandles(data.length);
       if (data.length > 0) updateReadouts(data[data.length - 1], data);
     },
-    [updateReadouts, applyAllOverlays, zoomToRecentCandles]
+    [updateReadouts, applyAllOverlays, zoomToRecentCandles, resetPriceScale]
   );
 
   // Kicks off the async real-history fetch and swaps it in once ready, unless
@@ -350,11 +375,15 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
   const loadRealHistoryInBackground = useCallback(
     (pairLabelArg, tfKey, basePrice) => {
       const myGeneration = ++loadGenerationRef.current;
-      loadHistoricalData(pairLabelArg, tfKey, basePrice).then(({ data, source }) => {
-        if (myGeneration !== loadGenerationRef.current) return;
-        setChartHistorySource(source);
-        applyDataset(data, { zoomToRecent: true });
-      });
+      loadHistoricalData(pairLabelArg, tfKey, basePrice)
+        .then(({ data, source }) => {
+          if (myGeneration !== loadGenerationRef.current) return;
+          setChartHistorySource(source);
+          applyDataset(data, { zoomToRecent: true });
+        })
+        .catch((err) => {
+          console.error(`[CHART] Failed to load history for ${pairLabelArg}:`, err);
+        });
     },
     [applyDataset]
   );
@@ -385,6 +414,15 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       if (!lastCandle || !lastCandle.time) {
         console.warn('[CHART] Last candle is invalid, regenerating chart data');
         return;
+      }
+
+      // Ignore ticks from the wrong pair (e.g. stale BTC feed after switching to ETH).
+      if (lastCandle.close > 0) {
+        const ratio = newClose / lastCandle.close;
+        if (ratio > 2.5 || ratio < 0.4) {
+          console.warn(`[CHART] Ignoring out-of-range tick ${newClose} vs last close ${lastCandle.close}`);
+          return;
+        }
       }
 
       const bucketTime = Math.floor(Date.now() / 1000 / currentIntervalRef.current) * currentIntervalRef.current;
@@ -519,10 +557,11 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       // Clear the chart rather than showing a fake synthetic placeholder -
       // everything displayed should be real, wired data or nothing at all.
       applyDataset([]);
-      trailingLockLineRef.current?.applyOptions({ price: basePrice * 1.0008, title: 'Lock +0.08', color: '#3b82f6' });
+      refreshTrailingLockLine(basePrice);
+      resetPriceScale();
       loadRealHistoryInBackground(pairLabelRef.current, timeframe, basePrice);
     },
-    [applyDataset, loadRealHistoryInBackground, timeframe]
+    [applyDataset, loadRealHistoryInBackground, timeframe, refreshTrailingLockLine, resetPriceScale]
   );
 
   const switchTimeframe = useCallback(
@@ -594,14 +633,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     // Chart starts empty - no fake synthetic placeholder - until real data arrives below.
     mockDataRef.current = [];
 
-    trailingLockLineRef.current = candleSeries.createPriceLine({
-      price: entryPrice * 1.0008,
-      color: '#3b82f6',
-      lineWidth: 2,
-      lineStyle: LineStyle.Dashed,
-      axisLabelVisible: true,
-      title: 'Lock +0.08',
-    });
+    refreshTrailingLockLine(entryPrice);
 
     // Sync time scales between the main chart and the volume panel.
     // When data is cleared (pair/timeframe switch), lightweight-charts fires this
@@ -665,7 +697,12 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
             applyLivePriceTick(data.price);
           }
 
-          if (data.lock_active) {
+          const wsPair = data.active_pair;
+          if (
+            data.lock_active &&
+            (!wsPair || wsPair === pairLabelRef.current) &&
+            entryPriceRef.current > 0
+          ) {
             trailingLockLineRef.current?.applyOptions({
               price: entryPriceRef.current + entryPriceRef.current * (data.peak_pct / 100),
               title: `Active Lock Peak (+${data.peak_pct.toFixed(2)}%)`,
@@ -737,8 +774,8 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     if (!candleSeriesRef.current) return;
     debugLog(`[CHART] Regenerating candlestick data for ${pairLabel}`);
     switchSymbolRef.current?.(pairPrice);
-    if (tradingModeRef.current === 'PAPER_TRADING') {
-      debugLog(`[FREE SOURCE] Re-subscribing to Binance feed for ${pairLabel}`);
+    if (tradingModeRef.current !== 'LIVE_TRADING') {
+      debugLog(`[FREE SOURCE] Re-subscribing to public feed for ${pairLabel}`);
       connectFreeSourceRef.current?.(pairLabel);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
