@@ -8,6 +8,7 @@ class SystemLogStore:
         self.entries: list[dict] = []
         self.seq = 0
         self.last_taapi_scan: dict | None = None
+        self.last_volume_analysis: dict | None = None
         self.last_trade_fire: dict | None = None
 
     def push(self, category: str, message: str, details: dict | None = None):
@@ -49,6 +50,23 @@ class SystemLogStore:
             "taapi",
             f"{pair} @ {timeframe}: {action} — {reason}",
             {"bullish": bullish, "bearish": bearish, "decision": decision},
+        )
+
+    def set_last_volume_analysis(self, pair, timeframe, action, analysis: dict):
+        self.last_volume_analysis = {
+            "pair": pair,
+            "timeframe": timeframe,
+            "action": action,
+            "timestamp": time.time(),
+            **analysis,
+        }
+        passed = analysis.get("passed")
+        status = "PASSED" if passed else "BLOCKED"
+        reason = analysis.get("reason") or ("Volume gate OK" if passed else "Volume gate failed")
+        self.push(
+            "volume",
+            f"{pair} @ {timeframe}: {status} — {reason}",
+            {"action": action, **analysis},
         )
 
     def set_last_trade_fire(self, payload: dict):
