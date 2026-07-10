@@ -1286,6 +1286,24 @@ def _log_trade_skip(action: str, symbol: str, pattern: str | None, reason: str, 
     system_log.push("trade", f"SKIPPED: {action} {symbol} — {reason}", {"pattern": pattern, **extra})
     print(f"[AUTO BUY LOOP] Trade skipped: {reason}")
 
+def taapi_action_to_trade_side(taapi_action: str) -> str:
+    """Inverse auto-entry: TAAPI BUY -> SHORT, TAAPI SELL -> LONG."""
+    if taapi_action == "BUY":
+        return "SHORT"
+    if taapi_action == "SELL":
+        return "LONG"
+    return "LONG"
+
+
+def taapi_action_to_bybit_order_action(taapi_action: str) -> str:
+    """Bybit market open for inverse policy: BUY signal -> Sell (short), SELL -> Buy (long)."""
+    if taapi_action == "BUY":
+        return "SELL"
+    if taapi_action == "SELL":
+        return "BUY"
+    return taapi_action
+
+
 def agent_policy_summary() -> str:
     """Single policy text for paper and live — same TAAPI / fixed-TP / sizing rules."""
     floor = agent.get_profit_floor_pct()
@@ -1295,7 +1313,7 @@ def agent_policy_summary() -> str:
         else "Bybit TESTNET linear (real open/close)"
     )
     return (
-        f"TAAPI BUY->LONG / SELL->inverse SHORT | fixed TP @ {floor}% gross "
+        f"TAAPI BUY->SHORT / SELL->LONG (inverse) | fixed TP @ {floor}% gross "
         f"(fees incl., instant close) | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital/trade | {exec_mode}"
     )
 
@@ -1354,11 +1372,11 @@ async def fire_taapi_auto_trade(
     position_size_usd: float,
     qty,
 ) -> tuple[dict | None, bool, str | None]:
-    """Unified TAAPI auto-entry for paper and live — same register shape, sizing, and logs."""
-    side = "LONG" if result["action"] == "BUY" else "SHORT"
+    """Unified TAAPI auto-entry for paper and live — inverse: BUY opens SHORT, SELL opens LONG."""
+    side = taapi_action_to_trade_side(result["action"])
     entry_px = result.get("entry") or agent.current_price
     pattern = result.get("pattern")
-    reason = f"TAAPI {pattern or 'signal'}"
+    reason = f"TAAPI inverse {pattern or 'signal'} ({result['action']})"
 
     if bybit_api.mode == "PAPER_TRADING":
         trade = agent.open_trade(
@@ -1382,7 +1400,8 @@ async def fire_taapi_auto_trade(
             )
 
         executor = get_bybit_executor_agent()
-        fired, order_error = await asyncio.to_thread(executor.execute_trade, result, qty)
+        bybit_order = {**result, "action": taapi_action_to_bybit_order_action(result["action"])}
+        fired, order_error = await asyncio.to_thread(executor.execute_trade, bybit_order, qty)
         trade = None
         if fired:
             trade = agent.open_trade(
@@ -1425,10 +1444,9 @@ async def fire_taapi_auto_trade(
     )
 
     if fired and trade:
-        side_label = "inverse SHORT" if side == "SHORT" else "LONG"
         venue = "PAPER" if log_mode == "PAPER_TRADING" else "TESTNET"
         notifications.push(
-            f"{venue} {side_label} opened: {agent.active_pair} | {qty} @ ~${plan['price']:,.0f} | "
+            f"{venue} {side} opened (inverse TAAPI {result['action']}): {agent.active_pair} | {qty} @ ~${plan['price']:,.0f} | "
             f"${position_size_usd} ({plan['capital_pct']:.0f}% of ${plan['total_capital']:,.0f}) | "
             f"pattern={pattern} #{trade['id']}",
             "success",

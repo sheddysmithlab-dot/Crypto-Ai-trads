@@ -152,7 +152,8 @@ class TradingEngine:
                         if qty is None:
                             print("[ENGINE] Order skipped — could not size at 2% of total capital.")
                             continue
-                        fired, err = self.bybit_agent.execute_trade(result, qty=qty)
+                        bybit_action = "SELL" if result["action"] == "BUY" else "BUY"
+                        fired, err = self.bybit_agent.execute_trade({**result, "action": bybit_action}, qty=qty)
                         if not fired:
                             print(f"[ENGINE] Order failed: {err}")
                     else:
