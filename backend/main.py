@@ -1500,7 +1500,7 @@ def agent_policy_summary() -> str:
             else "Bybit TESTNET linear (real open/close)"
         )
         return (
-            f"Blue Box + Marubozu pullback | EMA 50/200 trend | 1:{RR_RATIO:.0f} R:R | "
+            f"Blue Box + VSA + Marubozu | EMA 50/200 + 200 VSA trend | 1:1/1:2 R:R | "
             f"risk {RISK_PCT_PER_TRADE * 100:.0f}% of balance per trade | {exec_mode}"
         )
     return "Auto trade policies not active."
@@ -1838,7 +1838,7 @@ async def auto_buy_loop():
 
         system_log.push_agent_chat(
             f"AI agent is scanning the closed {timeframe_key} candle on {agent.active_pair} "
-            f"— Blue Box trap + Marubozu pullback check…",
+            f"— Blue Box + VSA + Marubozu check…",
             status="scanning",
             details={
                 "pair": agent.active_pair,

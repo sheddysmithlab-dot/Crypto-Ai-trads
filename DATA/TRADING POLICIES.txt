@@ -1,39 +1,36 @@
-# Blue Box + Marubozu Trend Continuation — Active Entry Policies
+# Blue Box + VSA + Marubozu — Active Entry Policies
 
 Signals fire **once per closed candle** only. Data: **Bybit LINEAR klines**.
 
-## Blue Box trap (state machine)
+## Priority (first match wins)
+1. Blue Box displacement (BB-L / BB-S)
+2. VSA + SMC rules (L1–L4, S1–S3, plus L5/S4 momentum-style)
+3. Marubozu pullback (MBZ-L / MBZ-S)
+4. Standalone momentum (MOM-L / MOM-S)
 
-### Bullish trap → LONG (BB-L)
-1. Sweep: `low < lowest_20` AND `close > lowest_20`
-2. Displacement: next 1–2 bars green, `body ≥ 2× expected_body`
+## Blue Box trap
+- Sweep + displacement on next 1–2 bars → **BB-L / BB-S** (1:2 R:R)
 
-### Bearish trap → SHORT (BB-S)
-1. Sweep: `high > highest_20` AND `close < highest_20`
-2. Displacement: next 1–2 bars red, `body ≥ 2× expected_body`
+## VSA + SMC (200 EMA trend filter; L3/L5/S2/S4 bypass)
 
-## Momentum (MOM-L / MOM-S)
-Green or red candle with `body ≥ 2× expected_body` (no sweep required).
+| Code | Setup | R:R |
+|------|--------|-----|
+| L1 | Red exhaustion, uptrend | 1:1 |
+| L2 | Hammer, uptrend | 1:2 |
+| L3 | Spring: low < L20, close top 50%, vol > 1.5× SMA20 | 1:2 |
+| L4 | Buy absorption, uptrend | 1:2 |
+| L5 | Green body ≥ 2× expected | 1:1 |
+| S1 | Green exhaustion, downtrend | 1:1 |
+| S2 | Up-thrust: high > H20, close bottom 50%, vol > 1.5× SMA20 | 1:2 |
+| S3 | Sell absorption, downtrend | 1:2 |
+| S4 | Red body ≥ 2× expected | 1:1 |
 
-## Marubozu trend continuation (MBZ-L / MBZ-S)
+## Marubozu pullback (EMA 50/200)
+- **MBZ-L / MBZ-S** — pullback + marubozu trigger (1:2 R:R)
 
-### Trend filter (50 & 200 EMA)
-- **Uptrend:** EMA50 > EMA200 AND close > EMA50
-- **Downtrend:** EMA50 < EMA200 AND close < EMA50
+## Momentum
+- **MOM-L / MOM-S** — body ≥ 2× expected (1:2 R:R)
 
-### Marubozu candle
-- `body > avg_body_20 × 1.5`
-- `upper_wick ≤ body × 5%` AND `lower_wick ≤ body × 5%`
-
-### Pullback + trigger
-| Code | Trend | Pullback (prior 2–4 bars) | Trigger |
-|------|--------|---------------------------|---------|
-| MBZ-L | Uptrend | Mostly red (retracement down) | Green marubozu |
-| MBZ-S | Downtrend | Mostly green (retracement up) | Red marubozu |
-
-## Execution & risk (all patterns)
-- **Entry:** signal candle close
-- **SL:** pattern-specific extreme ± 0.1% buffer (marubozu uses trigger candle high/low)
-- **TP:** fixed **1:2 R:R**
-- **Size:** 1% of balance risked to SL
-- Priority: Blue Box displacement → momentum → Marubozu
+## Execution
+- Entry at close; SL at candle extreme ± 0.1%; TP per rule R:R (1:1 or 1:2)
+- Size: 1% balance risked to SL

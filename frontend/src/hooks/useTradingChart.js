@@ -5,6 +5,11 @@ import { debugLog } from '../config/debug';
 import { fmtNum, getBinanceSymbol, getBybitSymbol } from '../data/pairs';
 import { formatChartAxisTime, formatLiveClock } from '../utils/time';
 import { decorateCandlestickSeries, computeTradeFireMarkers } from '../utils/chartCandles';
+import {
+  renderBlueBoxChartOverlay,
+  clearBlueBoxChartGraphics,
+  blueBoxStatusLabel,
+} from '../utils/blueBoxChart';
 
 // Timeframe -> candle interval in seconds. Drives BOTH historical bucketing
 // and live WebSocket tick bucketing so the chart genuinely reacts to the

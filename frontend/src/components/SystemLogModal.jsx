@@ -335,7 +335,7 @@ export default function SystemLogModal({
             <div className="bg-[#161A1E] border border-cyan-800/50 rounded-xl p-2">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Entry Engine</div>
               <StatusPill ok label="BLUE BOX ACTIVE" />
-              <p className="text-[11px] text-gray-500 mt-2">6 patterns · EMA 50/200 · 1:2 R:R · Bybit klines</p>
+              <p className="text-[11px] text-gray-500 mt-2">15 patterns · VSA+Blue Box · Bybit klines</p>
               {taapiPaused ? (
                 <p className="text-[10px] text-gray-600 mt-1">TAAPI.io paused</p>
               ) : null}

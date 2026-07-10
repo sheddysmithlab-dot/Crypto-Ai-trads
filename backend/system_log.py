@@ -85,7 +85,7 @@ class SystemLogStore:
             "bullish": long_rules,
             "bearish": short_rules,
             "active_count": len(long_rules) + len(short_rules),
-            "total_patterns": 6,
+            "total_patterns": 15,
             "decision": decision,
             "candle": {
                 "high": candle.get("high"),

@@ -1,8 +1,7 @@
-"""Blue Box + Marubozu trend-continuation pullback entry system (closed-bar only).
+"""Blue Box + VSA + Marubozu entry system (closed-bar only).
 
-Blue Box: liquidity sweep → displacement state machine + momentum.
-Marubozu: EMA 50/200 trend + 2–4 bar pullback + marubozu trigger candle.
-SL/TP: candle extreme ± buffer, fixed 1:2 R:R. Size: 1% balance risk to SL.
+Modules: Blue Box sweep/displacement, classic VSA+SMC (9 rules), Marubozu pullback,
+momentum. SL/TP: pattern-specific with 1:1 or 1:2 R:R. Size: 1% risk to SL.
 """
 from __future__ import annotations
 
@@ -23,12 +22,40 @@ RISK_PCT_PER_TRADE = 0.01
 RR_RATIO = 2.0
 
 PATTERN_LABELS = {
-    "BB-L": "Blue Box LONG — bullish sweep + green displacement (2:1 R:R)",
-    "BB-S": "Blue Box SHORT — bearish sweep + red displacement (2:1 R:R)",
-    "MOM-L": "Momentum LONG — green body ≥ 2× expected (2:1 R:R)",
-    "MOM-S": "Momentum SHORT — red body ≥ 2× expected (2:1 R:R)",
-    "MBZ-L": "Marubozu LONG — uptrend pullback + green marubozu (2:1 R:R)",
-    "MBZ-S": "Marubozu SHORT — downtrend pullback + red marubozu (2:1 R:R)",
+    "BB-L": "Blue Box LONG — bullish sweep + green displacement",
+    "BB-S": "Blue Box SHORT — bearish sweep + red displacement",
+    "MOM-L": "Momentum LONG — green body ≥ 2× expected",
+    "MOM-S": "Momentum SHORT — red body ≥ 2× expected",
+    "MBZ-L": "Marubozu LONG — uptrend pullback + green marubozu",
+    "MBZ-S": "Marubozu SHORT — downtrend pullback + red marubozu",
+    "L1": "VSA L1: Red exhaustion (uptrend)",
+    "L2": "VSA L2: Hammer (uptrend)",
+    "L3": "VSA L3: Bullish spring sweep (no EMA)",
+    "L4": "VSA L4: Buy absorption (uptrend)",
+    "L5": "VSA L5: Momentum long (no EMA)",
+    "S1": "VSA S1: Green exhaustion (downtrend)",
+    "S2": "VSA S2: Bearish up-thrust (no EMA)",
+    "S3": "VSA S3: Sell absorption (downtrend)",
+    "S4": "VSA S4: Momentum short (no EMA)",
+}
+
+# R:R multiplier per rule (1 = 1:1, 2 = 1:2)
+RULE_RR: dict[str, float] = {
+    "BB-L": 2.0,
+    "BB-S": 2.0,
+    "MOM-L": 2.0,
+    "MOM-S": 2.0,
+    "MBZ-L": 2.0,
+    "MBZ-S": 2.0,
+    "L1": 1.0,
+    "L2": 2.0,
+    "L3": 2.0,
+    "L4": 2.0,
+    "L5": 1.0,
+    "S1": 1.0,
+    "S2": 2.0,
+    "S3": 2.0,
+    "S4": 1.0,
 }
 
 
@@ -167,6 +194,122 @@ def _trend_state(candles: list[dict], close: float) -> tuple[str | None, float |
     return "neutral", ema50, ema200
 
 
+def _sma(values: list[float], period: int) -> float | None:
+    if len(values) < period:
+        return None
+    return sum(values[-period:]) / period
+
+
+def _is_hammer(upper: float, body: float, lower: float) -> bool:
+    if body <= 0:
+        return False
+    return upper <= body * 0.1 and body <= lower * 0.5
+
+
+def _vsa_ema200_trend(candles: list[dict], close: float) -> str | None:
+    ema200 = compute_ema([x["close"] for x in candles], EMA_SLOW)
+    if ema200 is None:
+        return None
+    if close > ema200:
+        return "uptrend"
+    if close < ema200:
+        return "downtrend"
+    return "neutral"
+
+
+def _signal_sl(action: str, candle: dict) -> float:
+    h, l = candle["high"], candle["low"]
+    if action == "BUY":
+        return l * (1.0 - SL_BUFFER_PCT)
+    return h * (1.0 + SL_BUFFER_PCT)
+
+
+def _rr_for_pattern(pattern: str) -> float:
+    codes = pattern.split("+")
+    return max(RULE_RR.get(c, RR_RATIO) for c in codes)
+
+
+def _check_vsa_rules(
+    candles: list[dict],
+    signal: dict,
+    expected_body: float,
+    lowest_20: float,
+    highest_20: float,
+) -> dict | None:
+    """Classic VSA + SMC nine-rule set on the closed bar (L5/S4 overlap momentum)."""
+    c = signal["close"]
+    h, l, v = signal["high"], signal["low"], signal["volume"]
+    body = _body(signal)
+    upper = _upper_wick(signal)
+    lower = _lower_wick(signal)
+    mid = (h + l) / 2.0
+    vsa_trend = _vsa_ema200_trend(candles, c)
+    is_uptrend = vsa_trend == "uptrend"
+    is_downtrend = vsa_trend == "downtrend"
+    volumes = [x["volume"] for x in candles]
+    vol_sma_20 = _sma(volumes, 20)
+    vol_sma_30 = _sma(volumes, 30)
+    high_effort = vol_sma_30 is not None and v > vol_sma_30 * 2
+    no_result = body <= expected_body * 0.5
+
+    long_hits: list[str] = []
+    if _is_red(signal) and body >= 2 * expected_body and is_uptrend:
+        long_hits.append("L1")
+    if (
+        (_is_red(signal) or _is_green(signal))
+        and _is_hammer(upper, body, lower)
+        and body <= 0.5 * expected_body
+        and is_uptrend
+    ):
+        long_hits.append("L2")
+    if (
+        l < lowest_20
+        and c > mid
+        and vol_sma_20 is not None
+        and v > vol_sma_20 * 1.5
+    ):
+        long_hits.append("L3")
+    if _is_red(signal) and high_effort and no_result and lower >= body and is_uptrend:
+        long_hits.append("L4")
+    if _is_green(signal) and body >= 2 * expected_body:
+        long_hits.append("L5")
+
+    short_hits: list[str] = []
+    if _is_green(signal) and body >= 2 * expected_body and is_downtrend:
+        short_hits.append("S1")
+    if (
+        h > highest_20
+        and c < mid
+        and vol_sma_20 is not None
+        and v > vol_sma_20 * 1.5
+    ):
+        short_hits.append("S2")
+    if _is_green(signal) and high_effort and no_result and upper >= body and is_downtrend:
+        short_hits.append("S3")
+    if _is_red(signal) and body >= 2 * expected_body:
+        short_hits.append("S4")
+
+    if long_hits and short_hits:
+        return {"conflict": True, "long_rules": long_hits, "short_rules": short_hits}
+
+    if not long_hits and not short_hits:
+        return None
+
+    hits = long_hits if long_hits else short_hits
+    action = "BUY" if long_hits else "SELL"
+    pattern = "+".join(hits)
+    return {
+        "pattern": pattern,
+        "action": action,
+        "sl": _signal_sl(action, signal),
+        "setup": "vsa",
+        "rr": _rr_for_pattern(pattern),
+        "rules_fired": hits,
+        "long_rules": long_hits,
+        "short_rules": short_hits,
+    }
+
+
 def _marubozu_sl(action: str, candle: dict) -> float:
     h, l = candle["high"], candle["low"]
     if action == "BUY":
@@ -188,6 +331,7 @@ def _check_marubozu_continuation(
             "action": "BUY",
             "sl": _marubozu_sl("BUY", signal),
             "setup": "marubozu_pullback",
+            "rr": RULE_RR["MBZ-L"],
         }
 
     if trend == "downtrend" and _is_red(signal) and _pullback_mostly(candles, "green"):
@@ -196,6 +340,7 @@ def _check_marubozu_continuation(
             "action": "SELL",
             "sl": _marubozu_sl("SELL", signal),
             "setup": "marubozu_pullback",
+            "rr": RULE_RR["MBZ-S"],
         }
     return None
 
@@ -355,6 +500,7 @@ def _check_bullish_displacement(
             "action": "BUY",
             "sl": state.bullish_sweep_low,
             "setup": "sweep",
+            "rr": RULE_RR["BB-L"],
         }
     return None
 
@@ -377,6 +523,7 @@ def _check_bearish_displacement(
             "action": "SELL",
             "sl": state.bearish_sweep_high,
             "setup": "sweep",
+            "rr": RULE_RR["BB-S"],
         }
     return None
 
@@ -423,15 +570,17 @@ def _check_momentum(candle: dict, expected_body: float) -> dict | None:
         return {
             "pattern": "MOM-L",
             "action": "BUY",
-            "sl": candle["low"],
+            "sl": _signal_sl("BUY", candle),
             "setup": "momentum",
+            "rr": RULE_RR["MOM-L"],
         }
     if _is_red(candle) and body >= 2 * expected_body:
         return {
             "pattern": "MOM-S",
             "action": "SELL",
-            "sl": candle["high"],
+            "sl": _signal_sl("SELL", candle),
             "setup": "momentum",
+            "rr": RULE_RR["MOM-S"],
         }
     return None
 
@@ -463,7 +612,7 @@ def evaluate_uvss(
     *,
     pair: str = "default",
 ) -> dict:
-    """Blue Box + Marubozu pullback on the last closed candle only."""
+    """Blue Box + VSA + Marubozu on the last closed candle only."""
     if not UVSS_POLICIES_ENABLED:
         return {"action": "NO_TRADE", "reason": "Entry policies disabled"}
 
@@ -521,14 +670,29 @@ def evaluate_uvss(
         _clear_bearish(state)
 
     if signal_hit is None:
-        mom = _check_momentum(signal, expected_body)
-        if mom:
-            signal_hit = mom
+        vsa = _check_vsa_rules(candles, signal, expected_body, lowest_20, highest_20)
+        if vsa:
+            if vsa.get("conflict"):
+                return {
+                    "action": "NO_TRADE",
+                    "reason": "Conflicting VSA long and short rules on same bar",
+                    "long_rules": vsa.get("long_rules", []),
+                    "short_rules": vsa.get("short_rules", []),
+                    **diagnostics,
+                }
+            signal_hit = vsa
+            diagnostics["long_rules"] = vsa.get("long_rules", [])
+            diagnostics["short_rules"] = vsa.get("short_rules", [])
 
     if signal_hit is None:
         mbz = _check_marubozu_continuation(candles, signal, trend)
         if mbz:
             signal_hit = mbz
+
+    if signal_hit is None:
+        mom = _check_momentum(signal, expected_body)
+        if mom:
+            signal_hit = mom
 
     if _detect_bullish_sweep(state, current_index, l, c, lowest_20, signal):
         sweep_events.append("bullish_sweep")
@@ -554,7 +718,7 @@ def evaluate_uvss(
             }
         return {
             "action": "NO_TRADE",
-            "reason": "No Blue Box, momentum, or Marubozu signal",
+            "reason": "No Blue Box, VSA, Marubozu, or momentum signal",
             **diagnostics,
         }
 
@@ -562,23 +726,29 @@ def evaluate_uvss(
     pattern = signal_hit["pattern"]
     sl = signal_hit["sl"]
     entry_px = c
-    prices = compute_sl_tp(action, entry_px, sl)
+    rr = float(signal_hit.get("rr", RR_RATIO))
+    prices = compute_sl_tp(action, entry_px, sl, rr=rr)
     if not prices:
         return {"action": "NO_TRADE", "reason": "Could not compute SL/TP", **diagnostics}
 
     entry_px, sl, tp = prices
     risk_dist = abs(entry_px - sl)
-    long_rules = [pattern] if action == "BUY" else []
-    short_rules = [pattern] if action == "SELL" else []
+    codes = signal_hit.get("rules_fired") or pattern.split("+")
+    long_rules = [c for c in codes if c.startswith(("L", "BB-L", "MOM-L", "MBZ-L"))]
+    short_rules = [c for c in codes if c.startswith(("S", "BB-S", "MOM-S", "MBZ-S"))]
+    if not long_rules and action == "BUY":
+        long_rules = codes
+    if not short_rules and action == "SELL":
+        short_rules = codes
 
     return {
         "action": action,
         "pattern": pattern,
-        "reason": PATTERN_LABELS.get(pattern, pattern),
+        "reason": " | ".join(PATTERN_LABELS.get(r, r) for r in codes),
         "setup": signal_hit.get("setup"),
-        "size_mult": RR_RATIO,
-        "target_mult": RR_RATIO,
-        "rules_fired": [pattern],
+        "size_mult": rr,
+        "target_mult": rr,
+        "rules_fired": codes,
         "long_rules": long_rules,
         "short_rules": short_rules,
         "entry": entry_px,
