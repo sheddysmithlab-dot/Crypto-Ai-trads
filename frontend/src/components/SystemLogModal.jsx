@@ -301,16 +301,17 @@ export default function SystemLogModal({
           </div>
         </div>
 
-        <div className="overflow-y-auto flex-1 min-h-0 p-4 sm:p-6 space-y-4">
+        <div className="flex flex-col flex-1 min-h-0">
+          <div className="overflow-y-auto shrink-0 max-h-[38%] p-3 sm:p-4 space-y-2">
           {/* Connection grid */}
-          <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-            <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">
+          <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+            <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-2">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-2">Backend WebSockets</div>
               <StatusPill ok={wsOk} label={apiStatus?.label || 'UNKNOWN'} />
               <p className="text-[11px] text-gray-500 mt-2">market · portfolio · trades pipes</p>
             </div>
-            <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-2">Bybit API</div>
+            <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-2">
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Bybit API</div>
               <StatusPill ok={bybitOk} label={conn.bybit_configured ? conn.bybit_mode || 'CONFIGURED' : 'NOT SET'} />
               <p className="text-[11px] text-gray-500 mt-2">
                 {conn.bybit_environment || 'mainnet'}
@@ -320,20 +321,20 @@ export default function SystemLogModal({
                 <p className="text-[10px] text-red-400 mt-1 truncate" title={conn.bybit_last_error}>{conn.bybit_last_error}</p>
               ) : null}
             </div>
-            <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-2">AI Provider</div>
+            <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-2">
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">AI Provider</div>
               <StatusPill ok={aiOk} label={conn.ai_configured ? 'CONNECTED' : 'NOT CONFIGURED'} />
               <p className="text-[11px] text-gray-500 mt-2 truncate" title={conn.ai_model}>
                 {conn.ai_provider || '—'} / {conn.ai_model || '—'}
               </p>
             </div>
-            <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-2">TAAPI.io</div>
+            <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-2">
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">TAAPI.io</div>
               <StatusPill ok={taapiOk} label={taapiOk ? 'CONFIGURED' : 'MISSING KEY'} />
               <p className="text-[11px] text-gray-500 mt-2">exchange: {conn.taapi_exchange || 'binance'}</p>
             </div>
-            <div className="bg-[#161A1E] border border-amber-700/40 rounded-xl p-3">
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-2">Bybit TESTNET</div>
+            <div className="bg-[#161A1E] border border-amber-700/40 rounded-xl p-2">
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Bybit TESTNET</div>
               <StatusPill
                 ok={bybitTestnetOk}
                 label={isPaper ? 'PAPER MODE' : bybitTestnetOk ? 'KEYS SET' : 'KEYS MISSING'}
@@ -345,9 +346,9 @@ export default function SystemLogModal({
           </section>
 
           {/* AI Agent + Chart */}
-          <section className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-4">
-              <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-3">
+          <section className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+            <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">
+              <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-2">
                 <i className="fas fa-robot text-blue-400 mr-1.5" />
                 AI Agent
               </h3>
@@ -387,8 +388,8 @@ export default function SystemLogModal({
               <p className="text-[10px] text-gray-600 mt-3 leading-relaxed">{agent.policy}</p>
             </div>
 
-            <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-4">
-              <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-3">
+            <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">
+              <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-2">
                 <i className="fas fa-chart-line text-cyan-400 mr-1.5" />
                 Chart Data
               </h3>
@@ -414,8 +415,8 @@ export default function SystemLogModal({
           </section>
 
           {/* TAAPI last scan */}
-          <section className="bg-[#161A1E] border border-gray-800 rounded-xl p-4">
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-3">
+          <section className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">
+            <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-2">
               <i className="fas fa-wave-square text-purple-400 mr-1.5" />
               Last TAAPI Scan
               {taapi?.timestamp ? (
@@ -425,7 +426,7 @@ export default function SystemLogModal({
             {!taapi ? (
               <p className="text-sm text-gray-500">No candle scan yet. Start AI automation and wait for a closed candle.</p>
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-2">
                 <div className="flex flex-wrap gap-2 text-xs">
                   <span className="px-2 py-1 rounded bg-gray-800 text-gray-300">
                     Decision: <strong className={decision.action === 'BUY' ? 'text-green-400' : decision.action === 'SELL' ? 'text-red-400' : 'text-yellow-400'}>{decision.action}</strong>
@@ -510,8 +511,8 @@ export default function SystemLogModal({
           </section>
 
           {/* Last trade fire */}
-          <section className="bg-[#161A1E] border border-gray-800 rounded-xl p-4">
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-3">
+          <section className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">
+            <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-2">
               <i className="fas fa-bolt text-amber-400 mr-1.5" />
               Last Trade Fire ({tradeFire?.mode || (isPaper ? 'PAPER_TRADING' : 'BYBIT_TESTNET')})
             </h3>
@@ -571,8 +572,17 @@ export default function SystemLogModal({
             )}
           </section>
 
-          {/* Live log stream — grows when panel is resized */}
-          <section className="bg-[#0d1117] border border-gray-800 rounded-xl overflow-hidden flex flex-col min-h-[140px]">
+          {settingsStatus ? (
+            <p className="text-[10px] text-gray-600 text-center pb-1">
+              Settings: Bybit mainnet {settingsStatus.bybit_configured ? 'configured' : 'not set'} · TESTNET{' '}
+              {conn.bybit_testnet_configured ? 'keys set' : 'keys missing'} · AI {settingsStatus.ai_provider} (
+              {settingsStatus.ai_configured ? 'ready' : 'key missing'})
+            </p>
+          ) : null}
+          </div>
+
+          {/* Live log stream — fills remaining panel height */}
+          <section className="bg-[#0d1117] border border-gray-800 rounded-xl overflow-hidden flex flex-col flex-1 min-h-[220px] mx-3 sm:mx-4 mb-3 sm:mb-4">
             <div className="px-4 py-2 border-b border-gray-800 flex justify-between items-center shrink-0">
               <h3 className="text-xs font-bold text-white uppercase tracking-wider">
                 <i className="fas fa-list text-gray-400 mr-1.5" />
@@ -587,7 +597,7 @@ export default function SystemLogModal({
                 Refresh
               </button>
             </div>
-            <div ref={scrollRef} className="flex-1 min-h-[100px] overflow-y-auto p-3 font-mono text-[11px] space-y-1">
+            <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto p-3 font-mono text-[11px] space-y-1">
               {mergedLogs.length === 0 && backendNotifications.length === 0 ? (
                 <p className="text-gray-600">Waiting for events…</p>
               ) : (
@@ -603,14 +613,6 @@ export default function SystemLogModal({
               )}
             </div>
           </section>
-
-          {settingsStatus ? (
-            <p className="text-[10px] text-gray-600 text-center">
-              Settings: Bybit mainnet {settingsStatus.bybit_configured ? 'configured' : 'not set'} · TESTNET{' '}
-              {conn.bybit_testnet_configured ? 'keys set' : 'keys missing'} · AI {settingsStatus.ai_provider} (
-              {settingsStatus.ai_configured ? 'ready' : 'key missing'})
-            </p>
-          ) : null}
         </div>
 
         {/* Resize handle — bottom-right */}

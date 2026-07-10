@@ -59,7 +59,7 @@ export default function ChartPanel({ pairSelector, chartContainerRef, volumeCont
           VOL:{pairSelector.activePair.symbol}: <span className="text-blue-400 font-bold">{fmtNum(readouts.vol)}</span>
         </span>
       </div>
-      <div ref={volumeContainerRef} className="w-full h-16 lg:h-24 pb-1.5"></div>
+      <div ref={volumeContainerRef} className="w-full h-32 lg:h-44 pb-1.5"></div>
     </div>
   );
 }
