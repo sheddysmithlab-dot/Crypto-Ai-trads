@@ -27,10 +27,17 @@ Signals fire **once per closed candle**. Data: **Bybit LINEAR klines** (TAAPI pa
 | R11 | Green, vol > 2× SMA(30), small body, long upper tail | Short | 2x |
 | R12 | Red, volume < 0.5× SMA(15) dry-up | Long | 1x |
 
+## Momentum rules (A/B) — no EMA filter
+
+| Rule | Setup | Side | Size |
+|------|--------|------|------|
+| RA | Green candle, body ≥ 2× expected body | Long | 1x |
+| RB | Red candle, body ≥ 2× expected body | Short | 1x |
+
 ## Alerts (Pine-aligned)
 
-- **Long:** R1 ∨ R2 ∨ R3 ∨ R5 ∨ R8 ∨ R10 ∨ R12  
-- **Short:** R4 ∨ R6 ∨ R7 ∨ R9 ∨ R11  
+- **Long:** R1 ∨ R2 ∨ R3 ∨ R5 ∨ R8 ∨ R10 ∨ R12 ∨ **RA**  
+- **Short:** R4 ∨ R6 ∨ R7 ∨ R9 ∨ R11 ∨ **RB**  
 
 ## Execution
 

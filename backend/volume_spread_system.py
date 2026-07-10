@@ -1,7 +1,7 @@
-"""Ultimate SMC + VSA System — 11 rule groups (R1–R12) + 200 EMA trend filter.
+"""Ultimate SMC + VSA System — VSA, SMC, and momentum rules + 200 EMA filter.
 
 Port of TradingView Pine indicator (bar-close signals only).
-VSA rules R1–R7 + SMC pro-filters R8–R12 (liquidity sweep, absorption, no supply).
+VSA R1–R7, SMC R8–R12, momentum RA/RB (no EMA required).
 """
 from __future__ import annotations
 
@@ -28,6 +28,8 @@ RULE_SIZE_MULT = {
     "R10": 2,
     "R11": 2,
     "R12": 1,
+    "RA": 1,
+    "RB": 1,
 }
 
 RULE_LABELS = {
@@ -43,6 +45,8 @@ RULE_LABELS = {
     "R10": "R10: Buy Absorption — SMC Long 2x",
     "R11": "R11: Sell Absorption — SMC Short 2x",
     "R12": "R12: No Supply Dry-Up — SMC Long 1x",
+    "RA": "RA: Green Momentum — body ≥ 2× expected (Long 1x)",
+    "RB": "RB: Red Momentum — body ≥ 2× expected (Short 1x)",
 }
 
 
@@ -234,6 +238,10 @@ def evaluate_uvss(candles: list[dict], timeframe_key: str) -> dict:
     rule11 = is_green and high_effort and no_result and upper_tail >= body and is_downtrend
     rule12 = is_red and vol_sma_15 is not None and v < vol_sma_15 * 0.5 and is_uptrend
 
+    # --- Momentum rules A/B (no EMA trend filter) ---
+    momo_long = is_green and body >= 2 * expected_body
+    momo_short = is_red and body >= 2 * expected_body
+
     long_hits = []
     for flag, code in (
         (rule1, "R1"),
@@ -243,6 +251,7 @@ def evaluate_uvss(candles: list[dict], timeframe_key: str) -> dict:
         (rule8, "R8"),
         (rule10, "R10"),
         (rule12, "R12"),
+        (momo_long, "RA"),
     ):
         if flag:
             long_hits.append(code)
@@ -254,6 +263,7 @@ def evaluate_uvss(candles: list[dict], timeframe_key: str) -> dict:
         (rule7, "R7"),
         (rule9, "R9"),
         (rule11, "R11"),
+        (momo_short, "RB"),
     ):
         if flag:
             short_hits.append(code)

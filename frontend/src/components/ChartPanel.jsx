@@ -39,7 +39,7 @@ export default function ChartPanel({ pairSelector, chartContainerRef, volumeCont
         </div>
       </div>
 
-      {/* Candlestick Chart - zoomed by default to the last 10 candles */}
+      {/* Candlestick Chart - default zoom shows the last 40 candles */}
       <div ref={chartContainerRef} className="w-full h-80 lg:h-[28rem] relative">
         <div className="absolute left-2 bottom-1.5 flex items-center gap-1 pointer-events-none opacity-30 select-none z-10">
           <div className="w-3.5 h-3.5 rounded bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-black text-white text-[7px]">

@@ -1425,7 +1425,7 @@ def agent_policy_summary() -> str:
             else "Bybit TESTNET linear (real open/close)"
         )
         return (
-            f"SMC+VSA 11 rules + 200 EMA | BUY=LONG / SELL=SHORT | 1x/2x size | "
+            f"SMC+VSA + momentum (RA/RB) + 200 EMA | BUY=LONG / SELL=SHORT | 1x/2x size | "
             f"base {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital/trade | fixed TP @ {eff_floor}% gross | "
             f"{exec_mode}"
         )
@@ -1711,7 +1711,7 @@ REAL_FEED_STALE_AFTER_SECONDS = 10
 # ==========================================
 
 async def auto_buy_loop():
-    print("[AUTO BUY LOOP] SMC+VSA (11 rules + 200 EMA) — signals on each closed candle.")
+    print("[AUTO BUY LOOP] SMC+VSA + momentum (RA/RB) — signals on each closed candle.")
     while True:
         timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
         if timeframe_key in ("30s", "1m"):

@@ -20,7 +20,7 @@ const VOLUME_MA_PERIOD = 20;
 // Default zoom: only the most recent candles are visible, on both the main
 // chart and the volume panel (they're time-synced), instead of the whole
 // fetched history all at once.
-const DEFAULT_VISIBLE_CANDLES = 10;
+const DEFAULT_VISIBLE_CANDLES = 40;
 
 function generateMockData(basePrice, intervalSeconds) {
   const data = [];
@@ -265,7 +265,7 @@ function buildTimeScaleOptions(intervalSeconds) {
 // Candlestick + MA(5,10,20,30) overlay chart with a Volume histogram
 // sub-panel, real Binance historical candles + live public feed (paper
 // trading), and the backend/Bybit feed (live trading). Defaults to showing
-// only the last 10 candles, zoomed in, instead of the whole history at once.
+// only the last 40 candles, zoomed out 4× vs prior default, instead of the whole history at once.
 export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLabel, pairPrice, externalTradingMode, setConnected }) {
   const chartRef = useRef(null);
   const volumeChartRef = useRef(null);
