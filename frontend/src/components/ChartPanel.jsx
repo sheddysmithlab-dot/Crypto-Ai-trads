@@ -3,7 +3,15 @@ import { fmtNum } from '../data/pairs';
 
 const TIMEFRAMES = ['1M', '5M', '15M', '1H', '1D'];
 
-export default function ChartPanel({ pairSelector, chartContainerRef, volumeContainerRef, timeframe, switchTimeframe, readouts }) {
+export default function ChartPanel({
+  pairSelector,
+  chartContainerRef,
+  volumeContainerRef,
+  timeframe,
+  switchTimeframe,
+  readouts,
+  botIsActive,
+}) {
   return (
     <div className="bg-lightCard dark:bg-darkCard rounded-xl shadow border border-gray-200 dark:border-gray-800 overflow-hidden shrink-0">
       {/* Chart Header */}
@@ -16,6 +24,15 @@ export default function ChartPanel({ pairSelector, chartContainerRef, volumeCont
           toggleStar={pairSelector.toggleStar}
         />
         <div className="flex flex-wrap justify-end items-center gap-2 text-xs font-semibold">
+          {botIsActive && readouts.blueBoxStatus ? (
+            <div
+              className="flex items-center gap-1.5 px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-[10px] font-bold uppercase tracking-wide text-cyan-300"
+              title="AI is using the Blue Box sweep + displacement engine"
+            >
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+              {readouts.blueBoxStatus}
+            </div>
+          ) : null}
           <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-gray-100 dark:bg-gray-800/80 text-[10px] font-mono text-gray-600 dark:text-gray-300 tabular-nums">
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" title="Live clock" />
             <span title="Live local time">{readouts.liveClock}</span>
@@ -41,6 +58,20 @@ export default function ChartPanel({ pairSelector, chartContainerRef, volumeCont
 
       {/* Candlestick Chart - default zoom shows the last 40 candles */}
       <div ref={chartContainerRef} className="w-full h-80 lg:h-[28rem] relative">
+        {botIsActive ? (
+          <div className="absolute top-2 right-2 z-20 pointer-events-none flex flex-col items-end gap-1">
+            <div className="px-2 py-1 rounded-md bg-cyan-950/80 border border-cyan-500/50 text-[9px] font-black uppercase tracking-widest text-cyan-200 shadow-lg">
+              Blue Box AI
+            </div>
+            <div className="text-[8px] text-cyan-300/80 font-mono text-right leading-tight">
+              <span className="text-cyan-400">—</span> L20 · <span className="text-yellow-400">—</span> EMA50
+              <br />
+              <span className="text-pink-400">—</span> H20 · <span className="text-purple-400">—</span> EMA200
+              <br />
+              <span className="text-cyan-300">▢</span> trap · <span className="text-lime-400">█</span> trade fire
+            </div>
+          </div>
+        ) : null}
         <div className="absolute left-2 bottom-1.5 flex items-center gap-1 pointer-events-none opacity-30 select-none z-10">
           <div className="w-3.5 h-3.5 rounded bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-black text-white text-[7px]">
             Ai

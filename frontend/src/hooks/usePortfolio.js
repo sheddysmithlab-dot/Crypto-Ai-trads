@@ -12,6 +12,8 @@ export function usePortfolio(setConnected) {
     seasonActive: false,
     isActive: false,
     tradingMode: null,
+    agentChat: [],
+    blueBoxOverlay: null,
   });
   const reconnectTimer = useRef(null);
 
@@ -33,6 +35,8 @@ export function usePortfolio(setConnected) {
           seasonActive: Boolean(data.ai_season_active),
           isActive: data.is_active,
           tradingMode: data.trading_mode,
+          agentChat: data.agent_chat || [],
+          blueBoxOverlay: data.blue_box_overlay || null,
         });
       };
 

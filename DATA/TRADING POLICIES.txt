@@ -1,48 +1,39 @@
-# Ultimate SMC + VSA System — Active Entry Policies
+# Blue Box + Marubozu Trend Continuation — Active Entry Policies
 
-Trend filter: **200 EMA** — VSA long rules need uptrend (close > EMA); VSA short rules need downtrend.
-SMC liquidity rules (R8, R9) use sweep logic without an extra EMA check (matches Pine alerts).
+Signals fire **once per closed candle** only. Data: **Bybit LINEAR klines**.
 
-Signals fire **once per closed candle**. Data: **Bybit LINEAR klines** (TAAPI paused).
+## Blue Box trap (state machine)
 
-## VSA rules (1–7)
+### Bullish trap → LONG (BB-L)
+1. Sweep: `low < lowest_20` AND `close > lowest_20`
+2. Displacement: next 1–2 bars green, `body ≥ 2× expected_body`
 
-| Rule | Setup | Side | Size |
-|------|--------|------|------|
-| R1 | Red candle, body ≥ 2× expected body | Long | 1x (10%) |
-| R2 | Red hammer, body ≤ 0.5× expected | Long | 2x (20%) |
-| R3 | Green bars 9–11, red in 1–3, buy vol < sell vol (12 bars) | Long | 2x |
-| R4 | Green candle, body ≥ 2× expected | Short | 1x |
-| R5 | Green hammer, body ≤ 0.5× expected | Long | 2x |
-| R6 | Red bars 9–11, green in 1–3, buy vol < sell vol | Short | 2x |
-| R7 | Green, volume ≥ 30-bar high, upper tail ≥ 50% body | Short | 2x |
+### Bearish trap → SHORT (BB-S)
+1. Sweep: `high > highest_20` AND `close < highest_20`
+2. Displacement: next 1–2 bars red, `body ≥ 2× expected_body`
 
-## SMC pro-filters (8–12)
+## Momentum (MOM-L / MOM-S)
+Green or red candle with `body ≥ 2× expected_body` (no sweep required).
 
-| Rule | Setup | Side | Size |
-|------|--------|------|------|
-| R8 | Low sweeps prior 20-bar low, close above mid, vol > 1.5× SMA(20) | Long | 2x |
-| R9 | High sweeps prior 20-bar high, close below mid, vol > 1.5× SMA(20) | Short | 2x |
-| R10 | Red, vol > 2× SMA(30), small body, long lower tail | Long | 2x |
-| R11 | Green, vol > 2× SMA(30), small body, long upper tail | Short | 2x |
-| R12 | Red, volume < 0.5× SMA(15) dry-up | Long | 1x |
+## Marubozu trend continuation (MBZ-L / MBZ-S)
 
-## Momentum rules (A/B) — no EMA filter
+### Trend filter (50 & 200 EMA)
+- **Uptrend:** EMA50 > EMA200 AND close > EMA50
+- **Downtrend:** EMA50 < EMA200 AND close < EMA50
 
-| Rule | Setup | Side | Size |
-|------|--------|------|------|
-| RA | Green candle, body ≥ 2× expected body | Long | 1x |
-| RB | Red candle, body ≥ 2× expected body | Short | 1x |
+### Marubozu candle
+- `body > avg_body_20 × 1.5`
+- `upper_wick ≤ body × 5%` AND `lower_wick ≤ body × 5%`
 
-## Alerts (Pine-aligned)
+### Pullback + trigger
+| Code | Trend | Pullback (prior 2–4 bars) | Trigger |
+|------|--------|---------------------------|---------|
+| MBZ-L | Uptrend | Mostly red (retracement down) | Green marubozu |
+| MBZ-S | Downtrend | Mostly green (retracement up) | Red marubozu |
 
-- **Long:** R1 ∨ R2 ∨ R3 ∨ R5 ∨ R8 ∨ R10 ∨ R12 ∨ **RA**  
-- **Short:** R4 ∨ R6 ∨ R7 ∨ R9 ∨ R11 ∨ **RB**  
-
-## Execution
-
-- BUY → LONG, SELL → SHORT  
-- Multiple rules same bar → one trade, **max size multiplier**  
-- Conflicting long + short → no trade  
-- Cost-aware entry filter: **OFF** for SMC+VSA  
-- Fixed TP exit per chart timeframe  
+## Execution & risk (all patterns)
+- **Entry:** signal candle close
+- **SL:** pattern-specific extreme ± 0.1% buffer (marubozu uses trigger candle high/low)
+- **TP:** fixed **1:2 R:R**
+- **Size:** 1% of balance risked to SL
+- Priority: Blue Box displacement → momentum → Marubozu

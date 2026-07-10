@@ -4,6 +4,7 @@ import { authFetch, backendWsUrl } from '../config/api';
 import { debugLog } from '../config/debug';
 import { fmtNum, getBinanceSymbol, getBybitSymbol } from '../data/pairs';
 import { formatChartAxisTime, formatLiveClock } from '../utils/time';
+import { decorateCandlestickSeries, computeTradeFireMarkers } from '../utils/chartCandles';
 
 // Timeframe -> candle interval in seconds. Drives BOTH historical bucketing
 // and live WebSocket tick bucketing so the chart genuinely reacts to the
@@ -266,7 +267,17 @@ function buildTimeScaleOptions(intervalSeconds) {
 // sub-panel, real Binance historical candles + live public feed (paper
 // trading), and the backend/Bybit feed (live trading). Defaults to showing
 // only the last 40 candles, zoomed out 4× vs prior default, instead of the whole history at once.
-export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLabel, pairPrice, externalTradingMode, setConnected }) {
+export function useTradingChart({
+  chartContainerRef,
+  volumeContainerRef,
+  pairLabel,
+  pairPrice,
+  externalTradingMode,
+  setConnected,
+  botIsActive = false,
+  blueBoxOverlay = null,
+  entryCandles = [],
+}) {
   const chartRef = useRef(null);
   const volumeChartRef = useRef(null);
   const candleSeriesRef = useRef(null);
@@ -274,6 +285,11 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
   const volumeSeriesRef = useRef(null);
   const volumeMaSeriesRef = useRef(null);
   const trailingLockLineRef = useRef(null);
+  const blueBoxOverlayElRef = useRef(null);
+  const blueBoxLineRefsRef = useRef([]);
+  const blueBoxOverlayDataRef = useRef(null);
+  const entryCandlesRef = useRef([]);
+  const botIsActiveRef = useRef(botIsActive);
   const mockDataRef = useRef([]);
   const entryPriceRef = useRef(pairPrice);
   const currentIntervalRef = useRef(TIMEFRAME_SECONDS['1M']);
@@ -297,7 +313,46 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     lastUpdated: '--:--:--',
     liveClock: '--:--:--',
     chartCandleTime: '—',
+    blueBoxStatus: null,
   });
+
+  botIsActiveRef.current = botIsActive;
+  blueBoxOverlayDataRef.current = blueBoxOverlay;
+  entryCandlesRef.current = entryCandles;
+
+  const pushCandlesToChart = useCallback((data) => {
+    const series = candleSeriesRef.current;
+    if (!series || !data?.length) {
+      series?.setData([]);
+      return;
+    }
+    const decorated = decorateCandlestickSeries(data, entryCandlesRef.current);
+    series.setData(decorated);
+    const fireMarkers = computeTradeFireMarkers(entryCandlesRef.current);
+    series.setMarkers(fireMarkers.length ? fireMarkers : computeExtremeMarkers(data));
+  }, []);
+
+  const redrawBlueBoxOverlay = useCallback(() => {
+    const chart = chartRef.current;
+    const series = candleSeriesRef.current;
+    const overlayEl = blueBoxOverlayElRef.current;
+    if (!chart || !series || !overlayEl) return;
+
+    renderBlueBoxChartOverlay({
+      chart,
+      series,
+      overlayEl,
+      overlay: blueBoxOverlayDataRef.current,
+      botIsActive: botIsActiveRef.current,
+      intervalSecs: currentIntervalRef.current,
+      lineRefs: blueBoxLineRefsRef,
+    });
+
+    setReadouts((prev) => ({
+      ...prev,
+      blueBoxStatus: blueBoxStatusLabel(blueBoxOverlayDataRef.current, botIsActiveRef.current),
+    }));
+  }, []);
 
   const zoomToRecentCandles = useCallback((dataLength) => {
     if (zoomTimeoutRef.current) {
@@ -369,20 +424,20 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     });
     volumeSeriesRef.current?.setData(toVolumeBars(data));
     volumeMaSeriesRef.current?.setData(calcVolumeSMA(data, VOLUME_MA_PERIOD));
-    candleSeriesRef.current?.setMarkers(computeExtremeMarkers(data));
-  }, []);
+    pushCandlesToChart(data);
+  }, [pushCandlesToChart]);
 
   // Pushes a full dataset (synthetic or real) into every series + the readouts.
   const applyDataset = useCallback(
     (data, { zoomToRecent = false } = {}) => {
       mockDataRef.current = data;
-      candleSeriesRef.current?.setData(data);
       applyAllOverlays(data);
       resetPriceScale();
       if (zoomToRecent) zoomToRecentCandles(data.length);
       if (data.length > 0) updateReadouts(data[data.length - 1], data);
+      redrawBlueBoxOverlay();
     },
-    [updateReadouts, applyAllOverlays, zoomToRecentCandles, resetPriceScale]
+    [updateReadouts, applyAllOverlays, zoomToRecentCandles, resetPriceScale, redrawBlueBoxOverlay]
   );
 
   // Kicks off the async real-history fetch and swaps it in once ready, unless
@@ -460,7 +515,9 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
         mockData[mockData.length - 1] = updated;
       }
 
-      candleSeriesRef.current.update(updated);
+      candleSeriesRef.current.update(
+        decorateCandlestickSeries([updated], entryCandlesRef.current)[0],
+      );
       updateReadouts(updated, mockData);
       applyAllOverlays(mockData);
       if (newCandle) {
@@ -473,8 +530,9 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
           /* chart may be mid-reset */
         }
       }
+      redrawBlueBoxOverlay();
     },
-    [updateReadouts, applyAllOverlays, zoomToRecentCandles]
+    [updateReadouts, applyAllOverlays, zoomToRecentCandles, redrawBlueBoxOverlay]
   );
 
   const connectFreeSource = useCallback(
@@ -613,6 +671,10 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     const volumeContainer = volumeContainerRef.current;
     if (!chartContainer || !volumeContainer) return;
 
+    if (getComputedStyle(chartContainer).position === 'static') {
+      chartContainer.style.position = 'relative';
+    }
+
     const chart = createChart(chartContainer, {
       width: chartContainer.clientWidth,
       height: chartContainer.clientHeight,
@@ -632,6 +694,12 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       wickDownColor: '#ef4444',
     });
     candleSeriesRef.current = candleSeries;
+
+    const blueBoxLayer = document.createElement('div');
+    blueBoxLayer.setAttribute('aria-hidden', 'true');
+    blueBoxLayer.className = 'absolute inset-0 pointer-events-none z-[15] overflow-hidden';
+    chartContainer.appendChild(blueBoxLayer);
+    blueBoxOverlayElRef.current = blueBoxLayer;
 
     // MA(5,10,20,30) overlay lines
     maSeriesRef.current = {};
@@ -690,7 +758,11 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       body: JSON.stringify({ seconds: currentIntervalRef.current }),
     }).catch((err) => console.error('Failed to sync initial timeframe with backend:', err));
 
-    // Live crosshair OHLC readout (hover to inspect any candle). lightweight-charts'
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+      redrawBlueBoxOverlay();
+    });
+
+    // Live crosshair OHLC readout
     // own seriesData only carries {time,open,high,low,close} - it strips our custom
     // `volume` field - so look the full bar up in mockDataRef.current by time instead
     // of using param.seriesData.get() directly (that was producing "NaN" volume).
@@ -703,6 +775,7 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     const handleResize = () => {
       chart.applyOptions({ width: chartContainer.clientWidth, height: chartContainer.clientHeight });
       volumeChart.applyOptions({ width: volumeContainer.clientWidth, height: volumeContainer.clientHeight });
+      redrawBlueBoxOverlay();
     };
     window.addEventListener('resize', handleResize);
 
@@ -781,6 +854,12 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
         marketWs.close();
       }
       disconnectFreeSource();
+      clearBlueBoxChartGraphics({
+        series: candleSeriesRef.current,
+        overlayEl: blueBoxOverlayElRef.current,
+        lineRefs: blueBoxLineRefsRef,
+      });
+      if (blueBoxLayer.parentNode) blueBoxLayer.parentNode.removeChild(blueBoxLayer);
       chart.remove();
       volumeChart.remove();
     };
@@ -823,6 +902,16 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    redrawBlueBoxOverlay();
+  }, [botIsActive, blueBoxOverlay, timeframe, redrawBlueBoxOverlay]);
+
+  useEffect(() => {
+    if (mockDataRef.current.length > 0) {
+      pushCandlesToChart(mockDataRef.current);
+    }
+  }, [entryCandles, pushCandlesToChart]);
 
   return { timeframe, switchTimeframe, readouts, chartSourceMode, chartHistorySource, chartLiveSource };
 }

@@ -23,12 +23,13 @@ import AgentInstructionsModal from './components/AgentInstructionsModal';
 import StartConfirmModal from './components/StartConfirmModal';
 import TradeExitConfirmModal from './components/TradeExitConfirmModal';
 import SystemLogModal from './components/SystemLogModal';
+import AgentChatStrip from './components/AgentChatStrip';
 
 export default function App() {
   const { logout, username } = useAuth();
   const { status: apiStatus, setConnected } = useApiStatus();
   const pairSelector = usePairSelector();
-  const { trades, activeCount, activePair: activeTradesPair, closeTrade } = useTrades(setConnected);
+  const { trades, activeCount, activePair: activeTradesPair, closeTrade, entryCandles } = useTrades(setConnected);
   const { notifications, unreadCount, markAllRead } = useNotifications();
 
   const [alertOpen, setAlertOpen] = useState(false);
@@ -87,6 +88,9 @@ export default function App() {
     pairPrice: pairSelector.activePair.price,
     externalTradingMode: portfolio.tradingMode,
     setConnected,
+    botIsActive: portfolio.isActive,
+    blueBoxOverlay: portfolio.blueBoxOverlay,
+    entryCandles,
   });
 
   function pushActionLog(message) {
@@ -327,7 +331,10 @@ export default function App() {
           timeframe={timeframe}
           switchTimeframe={switchTimeframe}
           readouts={readouts}
+          botIsActive={portfolio.isActive}
         />
+
+        <AgentChatStrip isActive={portfolio.isActive} lines={portfolio.agentChat} />
 
         <LiveTradesPanel
           trades={trades}

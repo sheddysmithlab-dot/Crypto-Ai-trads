@@ -9,6 +9,7 @@ export function useTrades(setConnected) {
   const [trades, setTrades] = useState([]);
   const [activeCount, setActiveCount] = useState(0);
   const [activePair, setActivePair] = useState('BTC/USDT');
+  const [entryCandles, setEntryCandles] = useState([]);
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
 
@@ -23,6 +24,7 @@ export function useTrades(setConnected) {
         const data = JSON.parse(event.data);
         setActivePair(data.pair);
         setTrades(data.trades);
+        setEntryCandles(data.entry_candles || []);
         setActiveCount(data.active_count ?? (data.trades || []).filter((t) => t.status !== 'sold').length);
       };
 
@@ -64,5 +66,5 @@ export function useTrades(setConnected) {
     // Next /ws/trades tick will refresh the table with the authoritative state
   }, []);
 
-  return { trades, activeCount, activePair, closeTrade };
+  return { trades, activeCount, activePair, closeTrade, entryCandles };
 }

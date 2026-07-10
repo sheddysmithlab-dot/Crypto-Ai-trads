@@ -1,16 +1,14 @@
 const HOW_IT_WORKS = [
   'Pick a coin pair and chart timeframe (1M, 5M, 15M, etc.).',
   'Press START AI AUTOMATION and set your risk level (max open trades).',
-  'On each closed candle the bot runs SMC+VSA + momentum rules (RA/RB) with a 200 EMA filter on VSA/SMC entries.',
-  'VSA long (uptrend): R1 red big candle, R2 red hammer, R3 volume divergence, R5 green hammer.',
-  'SMC long: R8 liquidity sweep spring, R10 buy absorption, R12 no-supply dry-up.',
-  'VSA short (downtrend): R4 green big candle, R6 hidden selling, R7 volume climax.',
-  'SMC short: R9 up-thrust sweep, R11 sell absorption.',
-  'Momentum (any trend): RA green body ≥ 2× expected → LONG 1x; RB red body ≥ 2× expected → SHORT 1x.',
-  'Size: 1x = 10% capital (R1, R4, R12, RA, RB). 2x = 20% (other rules). Multiple rules → highest size wins.',
+  'On each closed candle the bot runs Blue Box traps, momentum, and Marubozu pullback logic.',
+  'Blue Box: liquidity sweep below L20 or above H20, then displacement in the next 1–2 bars.',
+  'Marubozu LONG: EMA50 > EMA200, price above EMA50, 2–4 red pullback bars, then a large green marubozu.',
+  'Marubozu SHORT: EMA50 < EMA200, price below EMA50, 2–4 green pullback bars, then a large red marubozu.',
+  'Marubozu = big body (>1.5× avg), tiny wicks (<5% of body).',
+  'Stop beyond the trigger candle; take profit at 1:2 risk-reward. Size = 1% balance risk to stop.',
   'BUY → LONG, SELL → SHORT. Opposite positions close before a flip.',
   'PAPER simulates fills; testnet sends real orders. STOP ends automation.',
-  'Bot keeps running on the cloud server after you close the browser.',
 ];
 
 export default function BotHelpModal({ open, onClose }) {
@@ -45,7 +43,7 @@ export default function BotHelpModal({ open, onClose }) {
 
         <div className="px-5 py-4 max-h-[70vh] overflow-y-auto">
           <p className="text-sm text-gray-600 dark:text-gray-300 mb-4 leading-relaxed">
-            SMC + VSA system in plain English. Not financial advice.
+            Blue Box + Marubozu continuation in plain English. Not financial advice.
           </p>
           <ul className="space-y-2.5 text-sm text-gray-700 dark:text-gray-200 list-disc pl-5 leading-relaxed">
             {HOW_IT_WORKS.map((line) => (

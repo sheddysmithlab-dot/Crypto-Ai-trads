@@ -3,12 +3,30 @@ import time
 
 
 class SystemLogStore:
-    def __init__(self, max_entries: int = 120):
+    def __init__(self, max_entries: int = 120, max_agent_chat: int = 40):
         self.max_entries = max_entries
+        self.max_agent_chat = max_agent_chat
         self.entries: list[dict] = []
+        self.agent_chat: list[dict] = []
         self.seq = 0
         self.last_taapi_scan: dict | None = None
         self.last_trade_fire: dict | None = None
+
+    def push_agent_chat(self, message: str, *, status: str = "scanning", details: dict | None = None):
+        """Live chat line for the main dashboard — pattern scan activity."""
+        self.seq += 1
+        entry = {
+            "id": self.seq,
+            "message": message,
+            "status": status,
+            "details": details or {},
+            "timestamp": time.time(),
+        }
+        self.agent_chat.append(entry)
+        if len(self.agent_chat) > self.max_agent_chat:
+            self.agent_chat = self.agent_chat[-self.max_agent_chat :]
+        print(f"[AGENT-CHAT] {message}")
+        return entry
 
     def push(self, category: str, message: str, details: dict | None = None):
         self.seq += 1
@@ -67,7 +85,7 @@ class SystemLogStore:
             "bullish": long_rules,
             "bearish": short_rules,
             "active_count": len(long_rules) + len(short_rules),
-            "total_patterns": 14,
+            "total_patterns": 6,
             "decision": decision,
             "candle": {
                 "high": candle.get("high"),
