@@ -24,6 +24,9 @@ DEFAULT_TAAPI_SECRET = (
 )
 DEFAULT_TAAPI_EXCHANGE = "binance"
 
+# TAAPI pattern scans replaced by SMC+VSA (Bybit klines). Keep credentials dormant.
+TAAPI_PAUSED = True
+
 
 def get_zai_api_key() -> str:
     return (
@@ -58,6 +61,8 @@ def is_zai_configured() -> bool:
 
 
 def is_taapi_configured() -> bool:
+    if TAAPI_PAUSED:
+        return False
     return bool(get_taapi_secret())
 
 

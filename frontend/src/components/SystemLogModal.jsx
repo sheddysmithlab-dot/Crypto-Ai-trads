@@ -181,6 +181,8 @@ function formatIso(ts) {
 
 const CATEGORY_COLOR = {
   taapi: 'text-purple-300',
+  uvss: 'text-cyan-300',
+  smc_vsa: 'text-cyan-300',
   ai: 'text-blue-300',
   bybit: 'text-amber-300',
   trade: 'text-green-300',
@@ -225,7 +227,10 @@ export default function SystemLogModal({
 
   const conn = systemLogs?.connections || {};
   const agent = systemLogs?.agent || {};
-  const taapi = systemLogs?.last_taapi_scan;
+  const scan = systemLogs?.last_taapi_scan;
+  const scanEngine =
+    scan?.engine === 'smc_vsa' ? 'SMC+VSA' : scan?.engine === 'uvss' ? 'UVSS' : 'Signal';
+  const taapiPaused = conn.taapi_paused !== false;
   const tradeFire = systemLogs?.last_trade_fire;
   const backendEntries = systemLogs?.entries || [];
   const backendNotifications = systemLogs?.notifications || [];
@@ -235,7 +240,6 @@ export default function SystemLogModal({
   const bybitOk = isPaper || (conn.bybit_configured && (conn.bybit_mode === 'LIVE_TRADING' ? conn.bybit_connected : true));
   const aiOk = conn.ai_configured;
   const bybitTestnetOk = isPaper || conn.bybit_testnet_configured;
-  const taapiOk = conn.taapi_configured;
 
   const mergedLogs = [
     ...(actionLogs || []).map((row) => ({
@@ -249,10 +253,10 @@ export default function SystemLogModal({
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
     .slice(0, 80);
 
-  const decision = taapi?.decision || {};
-  const bullish = taapi?.bullish || [];
-  const bearish = taapi?.bearish || [];
-  const costAware = taapi?.cost_aware;
+  const decision = scan?.decision || {};
+  const bullish = scan?.bullish || [];
+  const bearish = scan?.bearish || [];
+  const costAware = scan?.cost_aware;
 
   return (
     <div className="fixed inset-0 z-[115] pointer-events-none">
@@ -328,10 +332,13 @@ export default function SystemLogModal({
                 {conn.ai_provider || '—'} / {conn.ai_model || '—'}
               </p>
             </div>
-            <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-2">
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">TAAPI.io</div>
-              <StatusPill ok={taapiOk} label={taapiOk ? 'CONFIGURED' : 'MISSING KEY'} />
-              <p className="text-[11px] text-gray-500 mt-2">exchange: {conn.taapi_exchange || 'binance'}</p>
+            <div className="bg-[#161A1E] border border-cyan-800/50 rounded-xl p-2">
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Entry Engine</div>
+              <StatusPill ok label="SMC+VSA ACTIVE" />
+              <p className="text-[11px] text-gray-500 mt-2">11 rules · 200 EMA · Bybit klines</p>
+              {taapiPaused ? (
+                <p className="text-[10px] text-gray-600 mt-1">TAAPI.io paused</p>
+              ) : null}
             </div>
             <div className="bg-[#161A1E] border border-amber-700/40 rounded-xl p-2">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Bybit TESTNET</div>
@@ -340,7 +347,7 @@ export default function SystemLogModal({
                 label={isPaper ? 'PAPER MODE' : bybitTestnetOk ? 'KEYS SET' : 'KEYS MISSING'}
               />
               <p className="text-[11px] text-gray-500 mt-2">
-                {isPaper ? 'Paper ledger — same TAAPI / fixed-TP rules as TESTNET' : 'Bybit TESTNET — real orders, same rules as paper'}
+                {isPaper ? 'Paper ledger — same SMC+VSA rules as TESTNET' : 'Bybit TESTNET — real orders, same rules as paper'}
               </p>
             </div>
           </section>
@@ -414,16 +421,16 @@ export default function SystemLogModal({
             </div>
           </section>
 
-          {/* TAAPI last scan */}
+          {/* Last signal scan */}
           <section className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">
             <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-2">
-              <i className="fas fa-wave-square text-purple-400 mr-1.5" />
-              Last TAAPI Scan
-              {taapi?.timestamp ? (
-                <span className="text-gray-500 font-normal normal-case ml-2">{formatIso(taapi.timestamp)}</span>
+              <i className={`fas ${scanEngine === 'SMC+VSA' ? 'fa-chart-bar' : 'fa-wave-square'} text-cyan-400 mr-1.5`} />
+              Last {scanEngine} Scan
+              {scan?.timestamp ? (
+                <span className="text-gray-500 font-normal normal-case ml-2">{formatIso(scan.timestamp)}</span>
               ) : null}
             </h3>
-            {!taapi ? (
+            {!scan ? (
               <p className="text-sm text-gray-500">No candle scan yet. Start AI automation and wait for a closed candle.</p>
             ) : (
               <div className="space-y-2">
@@ -436,6 +443,12 @@ export default function SystemLogModal({
                   ) : null}
                   {decision.reason ? (
                     <span className="px-2 py-1 rounded bg-gray-800 text-gray-400">{decision.reason}</span>
+                  ) : null}
+                  {decision.size_mult ? (
+                    <span className="px-2 py-1 rounded bg-gray-800 text-gray-300">Size: <strong className="text-amber-400">{decision.size_mult}x</strong></span>
+                  ) : null}
+                  {decision.ema200 != null ? (
+                    <span className="px-2 py-1 rounded bg-gray-800 text-gray-400">EMA200: {decision.ema200} · {decision.trend || '—'}</span>
                   ) : null}
                 </div>
                 {costAware ? (
@@ -494,13 +507,13 @@ export default function SystemLogModal({
                 ) : null}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div>
-                    <div className="text-green-500 font-bold mb-1">Bullish ({bullish.length})</div>
+                    <div className="text-green-500 font-bold mb-1">Long rules ({bullish.length})</div>
                     <div className="text-gray-400 font-mono text-[11px] break-words">
                       {bullish.length ? bullish.join(', ') : '—'}
                     </div>
                   </div>
                   <div>
-                    <div className="text-red-500 font-bold mb-1">Bearish ({bearish.length})</div>
+                    <div className="text-red-500 font-bold mb-1">Short rules ({bearish.length})</div>
                     <div className="text-gray-400 font-mono text-[11px] break-words">
                       {bearish.length ? bearish.join(', ') : '—'}
                     </div>

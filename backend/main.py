@@ -32,12 +32,13 @@ from api_secrets import (
     is_bybit_testnet_configured,
     is_taapi_configured,
     is_zai_configured,
+    TAAPI_PAUSED,
 )
 from chart_24h import chart_24h_refresh_loop, chart_24h_store
 from system_log import system_log
-from taapi_scanner import fetch_taapi_signals, evaluate_trade
+from volume_spread_system import UVSS_POLICIES_ENABLED, UVSS_COST_AWARE_ENTRY, evaluate_uvss, MIN_CANDLES
 from bybit_executor import BybitAgent
-from trading_policy import evaluate_cost_aware_entry, get_effective_exit_floor_pct, policy_summary_suffix
+from trading_policy import evaluate_cost_aware_entry, get_effective_exit_floor_pct
 
 from pathlib import Path
 
@@ -195,7 +196,7 @@ class SettingsStore:
         if is_taapi_configured():
             print(f"[SETTINGS] TAAPI.io loaded (exchange={get_taapi_exchange()}).")
         else:
-            print("[SETTINGS] TAAPI_SECRET not set — pattern scans disabled.")
+            print("[SETTINGS] TAAPI.io paused — SMC+VSA uses Bybit klines only.")
 
     def save(self, payload: SettingsPayload):
         # Only overwrite secret fields if the user actually typed a new value
@@ -235,6 +236,7 @@ class SettingsStore:
             "ai_base_url": self.ai_base_url,
             "ai_configured": self.is_ai_configured(),
             "taapi_configured": is_taapi_configured(),
+            "taapi_paused": TAAPI_PAUSED,
             "taapi_exchange": get_taapi_exchange(),
             "bybit_testnet_configured": is_bybit_testnet_configured(),
         }
@@ -965,6 +967,9 @@ class AITradingAgent:
         if not self.is_active or not self.trades:
             return
 
+        if not UVSS_POLICIES_ENABLED:
+            return
+
         floor = get_effective_exit_floor_pct(
             self.get_profit_floor_pct(),
             bybit_api.get_taker_fee_pct(),
@@ -1270,6 +1275,26 @@ _recent_signal_fire_keys: set[str] = set()
 # failed poll cycle, so a genuinely-unsupported pair doesn't spam the bell.
 _CANDLE_FETCH_WARNED_PAIRS = set()
 
+async def fetch_kline_history(bybit_symbol, timeframe_key, limit=None):
+    """Fetch chronological OHLCV history (oldest first) for UVSS."""
+    from volume_spread_system import parse_bybit_kline, MIN_CANDLES as _min
+
+    need = limit or max(_min + 5, 220)
+    bybit_interval = TIMEFRAME_KEY_TO_BYBIT_KLINE.get(timeframe_key, "1")
+    url = (
+        f"https://api.bybit.com/v5/market/kline?category=linear"
+        f"&symbol={bybit_symbol}&interval={bybit_interval}&limit={need}"
+    )
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(url)
+    resp.raise_for_status()
+    rows = resp.json()["result"]["list"]
+    candles = [parse_bybit_kline(row) for row in reversed(rows)]
+    if len(candles) >= 2:
+        candles = candles[:-1]
+    return candles
+
+
 async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
     """ Reads the last 2 klines from Bybit's LINEAR (USDT Perpetual) market -
     matching where bybit_executor.py actually places orders, not the spot
@@ -1306,16 +1331,16 @@ def qty_decimals_for_price(price: float) -> int:
     return 2
 
 
-def compute_auto_trade_plan(agent, price: float | None = None) -> dict | None:
-    """ Single source of truth for TAAPI auto entries.
-    Returns USD notional (10% of total capital), base-asset qty, and margin. """
+def compute_auto_trade_plan(agent, price: float | None = None, size_mult: float = 1.0) -> dict | None:
+    """Single source for auto entries. Base = AUTO_TRADE_CAPITAL_PCT × size_mult (1x or 2x)."""
     entry_price = _sanitize_market_price(price if price is not None else agent.current_price)
     if entry_price is None:
         return None
     total = agent.get_total_portfolio_value()
     if total is None or total <= 0:
         return None
-    position_usd = round(total * AUTO_TRADE_CAPITAL_PCT, 2)
+    mult = max(1.0, float(size_mult))
+    position_usd = round(total * AUTO_TRADE_CAPITAL_PCT * mult, 2)
     if position_usd <= 0:
         return None
     decimals = qty_decimals_for_price(entry_price)
@@ -1326,7 +1351,8 @@ def compute_auto_trade_plan(agent, price: float | None = None) -> dict | None:
     return {
         "total_capital": round(total, 2),
         "position_usd": position_usd,
-        "capital_pct": AUTO_TRADE_CAPITAL_PCT * 100,
+        "capital_pct": AUTO_TRADE_CAPITAL_PCT * 100 * mult,
+        "size_mult": mult,
         "qty": qty,
         "qty_decimals": decimals,
         "margin": margin,
@@ -1389,19 +1415,21 @@ def taapi_action_to_bybit_order_action(taapi_action: str) -> str:
 
 
 def agent_policy_summary() -> str:
-    """Single policy text for paper and live — same TAAPI / fixed-TP / sizing rules."""
-    chart_floor = agent.get_profit_floor_pct()
-    eff_floor = get_effective_exit_floor_pct(chart_floor, bybit_api.get_taker_fee_pct())
-    exec_mode = (
-        "paper ledger (simulated fills)"
-        if bybit_api.mode == "PAPER_TRADING"
-        else "Bybit TESTNET linear (real open/close)"
-    )
-    return (
-        f"TAAPI BUY->LONG / SELL->SHORT | no hedge (flip closes opposite) | fixed TP @ {eff_floor}% gross "
-        f"(fees incl., instant close) | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital/trade | {exec_mode} | "
-        f"{policy_summary_suffix(bybit_api.get_taker_fee_pct(), chart_floor)}"
-    )
+    """Policy text shown in System Log."""
+    if UVSS_POLICIES_ENABLED:
+        chart_floor = agent.get_profit_floor_pct()
+        eff_floor = get_effective_exit_floor_pct(chart_floor, bybit_api.get_taker_fee_pct())
+        exec_mode = (
+            "paper ledger (simulated fills)"
+            if bybit_api.mode == "PAPER_TRADING"
+            else "Bybit TESTNET linear (real open/close)"
+        )
+        return (
+            f"SMC+VSA 11 rules + 200 EMA | BUY=LONG / SELL=SHORT | 1x/2x size | "
+            f"base {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital/trade | fixed TP @ {eff_floor}% gross | "
+            f"{exec_mode}"
+        )
+    return "Auto trade policies not active."
 
 
 def _auto_entry_skip_reason(trade, fired: bool, order_error: str | None) -> str | None:
@@ -1477,7 +1505,7 @@ async def fire_taapi_auto_trade(
         side = taapi_action_to_trade_side(result["action"])
         entry_px = result.get("entry") or agent.current_price
         pattern = result.get("pattern")
-        reason = f"TAAPI {pattern or 'signal'} ({result['action']})"
+        reason = f"SMC+VSA {pattern or 'signal'} ({result['action']}) {result.get('size_mult', 1)}x"
 
         if candle_close_time is not None and timeframe_key:
             fire_key = _signal_fire_key(
@@ -1679,16 +1707,13 @@ _last_real_feed_update = 0.0
 REAL_FEED_STALE_AFTER_SECONDS = 10
 
 # ==========================================
-# ENTRY POLICY: TAAPI CANDLE-PATTERN SCAN
-# PAPER_TRADING (default): simulated positions via agent.open_trade() — no Bybit
-# API keys required. LIVE_TRADING + TESTNET keys: real orders via bybit_executor.
+# ENTRY POLICY: SMC + VSA (11 rule groups + 200 EMA)
 # ==========================================
 
 async def auto_buy_loop():
-    print("[AUTO BUY LOOP] TAAPI candle-pattern policy active (paper simulation by default).")
+    print("[AUTO BUY LOOP] SMC+VSA (11 rules + 200 EMA) — signals on each closed candle.")
     while True:
         timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
-        # Smart sleep - avoids spamming Bybit/TAAPI on fast timeframes.
         if timeframe_key in ("30s", "1m"):
             sleep_seconds = 5
         elif timeframe_key in ("5m", "15m"):
@@ -1700,67 +1725,66 @@ async def auto_buy_loop():
         if not agent.is_active or agent.emergency_triggered:
             continue
 
+        if not UVSS_POLICIES_ENABLED:
+            continue
+
         bybit_symbol = get_bybit_symbol(agent.active_pair)
         if bybit_symbol is None:
-            continue  # no real market mapping for this pair - nothing to scan
+            continue
 
         try:
-            candle = await fetch_closed_candle_ohlc(bybit_symbol, timeframe_key)
+            history = await fetch_kline_history(bybit_symbol, timeframe_key)
         except Exception as exc:
-            print(f"[AUTO BUY LOOP] Candle fetch failed for {bybit_symbol}: {exc}")
+            print(f"[AUTO BUY LOOP] Kline history failed for {bybit_symbol}: {exc}")
             if agent.active_pair not in _CANDLE_FETCH_WARNED_PAIRS:
                 _CANDLE_FETCH_WARNED_PAIRS.add(agent.active_pair)
                 notifications.push(
-                    f"TAAPI policy can't read {bybit_symbol} candles (no Bybit LINEAR market for "
-                    f"this pair?) - auto-entries paused for {agent.active_pair} until this resolves.",
+                    f"SMC+VSA can't read {bybit_symbol} candles — auto-entries paused for {agent.active_pair}.",
                     "warning",
                 )
             continue
-        _CANDLE_FETCH_WARNED_PAIRS.discard(agent.active_pair)  # recovered - clear so a future failure re-warns
+        _CANDLE_FETCH_WARNED_PAIRS.discard(agent.active_pair)
 
-        close_time = candle["close_time"]
+        if len(history) < MIN_CANDLES:
+            continue
+
+        signal_candle = history[-1]
+        close_time = signal_candle["close_time"]
         if close_time <= LAST_CANDLE_TIMESTAMPS.get(agent.active_pair, 0):
-            continue  # already scanned this candle
+            continue
         LAST_CANDLE_TIMESTAMPS[agent.active_pair] = close_time
-        print(f"🔄 New {timeframe_key} candle detected for {agent.active_pair}. Scanning patterns...")
+        print(f"🔄 New {timeframe_key} candle for {agent.active_pair}. Running SMC+VSA...")
 
-        taapi_key = get_taapi_secret()
-        if not taapi_key:
-            system_log.push("taapi", "TAAPI_SECRET not configured — pattern scan skipped.", {"pair": agent.active_pair})
-            continue
-
-        taapi_exchange = get_taapi_exchange()
-        try:
-            signals = await asyncio.to_thread(
-                fetch_taapi_signals, agent.active_pair, timeframe_key, taapi_exchange, taapi_key
+        result = evaluate_uvss(history, timeframe_key)
+        candle = {
+            "high": signal_candle["high"],
+            "low": signal_candle["low"],
+            "close": signal_candle["close"],
+            "close_time": close_time,
+        }
+        cost_aware = None
+        if UVSS_COST_AWARE_ENTRY:
+            fee_pct = bybit_api.get_taker_fee_pct()
+            cost_aware = evaluate_cost_aware_entry(
+                result,
+                candle,
+                agent.current_price,
+                timeframe_key,
+                fee_pct,
             )
-        except Exception as exc:
-            print(f"[AUTO BUY LOOP] TAAPI fetch failed: {exc}")
-            system_log.push("taapi", f"TAAPI fetch failed: {exc}", {"pair": agent.active_pair, "timeframe": timeframe_key})
-            continue
-
-        result = evaluate_trade(signals, timeframe_key, candle["high"], candle["low"])
-        fee_pct = bybit_api.get_taker_fee_pct()
-        cost_aware = evaluate_cost_aware_entry(
-            result,
-            candle,
-            agent.current_price,
-            timeframe_key,
-            fee_pct,
-        )
-        system_log.set_last_taapi_scan(
-            agent.active_pair, timeframe_key, signals, result, candle, cost_aware=cost_aware
+        system_log.set_last_uvss_scan(
+            agent.active_pair, timeframe_key, result, candle, cost_aware=cost_aware
         )
         if result["action"] not in ("BUY", "SELL"):
             print(f"[AUTO BUY LOOP] {result['action']}: {result['reason']}")
             continue
 
-        if cost_aware.get("would_block") and not cost_aware.get("dry_run"):
+        if cost_aware and cost_aware.get("would_block") and not cost_aware.get("dry_run"):
             reason = cost_aware.get("block_reason") or "Cost-aware entry gate blocked weak signal."
             _log_trade_skip(result["action"], bybit_symbol, result.get("pattern"), reason, cost_aware=cost_aware)
             continue
 
-        if cost_aware.get("would_block") and cost_aware.get("dry_run"):
+        if cost_aware and cost_aware.get("would_block") and cost_aware.get("dry_run"):
             print(
                 f"[AUTO BUY LOOP] Cost-aware DRY-RUN would block {result['action']} "
                 f"{result.get('pattern')}: {cost_aware.get('block_reason')}"
@@ -1774,7 +1798,8 @@ async def auto_buy_loop():
             )
             continue
 
-        plan = compute_auto_trade_plan(agent, agent.current_price)
+        size_mult = result.get("size_mult", 1)
+        plan = compute_auto_trade_plan(agent, agent.current_price, size_mult=size_mult)
         if plan is None:
             _log_trade_skip(
                 result["action"], bybit_symbol, result.get("pattern"),
@@ -2199,9 +2224,8 @@ async def get_settings_status():
 
 @app.get("/system/logs")
 async def get_system_logs():
-    """ Transparency snapshot for the System Log modal — connections, TAAPI scan,
+    """ Transparency snapshot for the System Log modal — connections, SMC+VSA scan,
     trade pipeline, and rolling backend event log. No secrets are returned. """
-    taapi_key = is_taapi_configured()
     timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     return {
         "connections": {
@@ -2215,7 +2239,8 @@ async def get_system_logs():
             "ai_provider": settings_store.ai_provider,
             "ai_model": settings_store.ai_model,
             "ai_base_url": settings_store.ai_base_url,
-            "taapi_configured": taapi_key,
+            "taapi_configured": is_taapi_configured(),
+            "taapi_paused": TAAPI_PAUSED,
             "taapi_exchange": get_taapi_exchange(),
             "bybit_testnet_configured": is_bybit_testnet_configured(),
         },

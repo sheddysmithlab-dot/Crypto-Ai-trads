@@ -1,16 +1,16 @@
 const HOW_IT_WORKS = [
   'Pick a coin pair and chart timeframe (1M, 5M, 15M, etc.).',
-  'Press START AI AUTOMATION and set your risk level and optional daily profit goal.',
-  'After each candle closes, the bot scans for bullish or bearish candlestick patterns.',
-  'A BUY signal opens a LONG trade. A SELL signal opens a SHORT trade.',
-  'Your risk % sets how many trades can run at the same time.',
-  'Each auto trade uses a small share of your capital and a fixed take-profit target.',
-  'A fee-aware filter can skip weak signals that may not cover trading costs.',
-  'Before flipping direction, the bot closes the opposite side — it does not hedge both ways.',
-  'PAPER mode simulates fills on your dashboard. LIVE / test mode sends real orders to the exchange test environment.',
-  'Press STOP to end automation. Use System Log to see scans, blocks, and trade results.',
-  'You can still open or close positions manually with + Add Position anytime.',
-  'After you start automation, the bot keeps running on the cloud server. You can close the browser or turn off your PC. Log in again later and you will see the same running state.',
+  'Press START AI AUTOMATION and set your risk level (max open trades).',
+  'On each closed candle the bot runs SMC+VSA: 11 rule groups with a 200 EMA trend filter.',
+  'VSA long (uptrend): R1 red big candle, R2 red hammer, R3 volume divergence, R5 green hammer.',
+  'SMC long: R8 liquidity sweep spring, R10 buy absorption, R12 no-supply dry-up.',
+  'VSA short (downtrend): R4 green big candle, R6 hidden selling, R7 volume climax.',
+  'SMC short: R9 up-thrust sweep, R11 sell absorption.',
+  'Size: 1x = 10% capital (R1, R4, R12). 2x = 20% (other rules). Multiple rules → highest size wins.',
+  'BUY → LONG, SELL → SHORT. Opposite positions close before a flip.',
+  'TAAPI.io is paused — all signals come from Bybit candle math only.',
+  'PAPER simulates fills; testnet sends real orders. STOP ends automation.',
+  'Bot keeps running on the cloud server after you close the browser.',
 ];
 
 export default function BotHelpModal({ open, onClose }) {
@@ -45,7 +45,7 @@ export default function BotHelpModal({ open, onClose }) {
 
         <div className="px-5 py-4 max-h-[70vh] overflow-y-auto">
           <p className="text-sm text-gray-600 dark:text-gray-300 mb-4 leading-relaxed">
-            Short overview in plain English. This is automated pattern trading — not financial advice.
+            SMC + VSA system in plain English. Not financial advice.
           </p>
           <ul className="space-y-2.5 text-sm text-gray-700 dark:text-gray-200 list-disc pl-5 leading-relaxed">
             {HOW_IT_WORKS.map((line) => (

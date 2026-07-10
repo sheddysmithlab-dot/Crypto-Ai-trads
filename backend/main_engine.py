@@ -12,7 +12,7 @@ import threading
 import requests
 
 from bybit_executor import BybitAgent
-from taapi_scanner import fetch_taapi_signals, evaluate_trade
+from taapi_scanner import fetch_taapi_signals, evaluate_trade, PATTERN_TRADE_POLICIES_ENABLED
 
 # Bybit's /v5/market/kline `interval` param uses its own codes (plain minute
 # numbers + "D"), not the "30s"/"1m"/"1D" style used by TIMEFRAME_RULES/TAAPI.

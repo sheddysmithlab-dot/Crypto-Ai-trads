@@ -32,6 +32,7 @@ class SystemLogStore:
             "pair": pair,
             "timeframe": timeframe,
             "timestamp": time.time(),
+            "engine": "taapi",
             "bullish": bullish,
             "bearish": bearish,
             "active_count": len(active),
@@ -50,6 +51,38 @@ class SystemLogStore:
             "taapi",
             f"{pair} @ {timeframe}: {action} — {reason}",
             {"bullish": bullish, "bearish": bearish, "decision": decision},
+        )
+
+    def set_last_uvss_scan(self, pair, timeframe, decision, candle, cost_aware=None):
+        long_rules = decision.get("long_rules") or decision.get("rules_fired") if decision.get("action") == "BUY" else []
+        short_rules = decision.get("short_rules") or decision.get("rules_fired") if decision.get("action") == "SELL" else []
+        if decision.get("action") == "NO_TRADE":
+            long_rules = decision.get("long_rules") or []
+            short_rules = decision.get("short_rules") or []
+        self.last_taapi_scan = {
+            "pair": pair,
+            "timeframe": timeframe,
+            "timestamp": time.time(),
+            "engine": "smc_vsa",
+            "bullish": long_rules,
+            "bearish": short_rules,
+            "active_count": len(long_rules) + len(short_rules),
+            "total_patterns": 12,
+            "decision": decision,
+            "candle": {
+                "high": candle.get("high"),
+                "low": candle.get("low"),
+                "close": candle.get("close"),
+                "close_time": candle.get("close_time"),
+            },
+            "cost_aware": cost_aware,
+        }
+        action = decision.get("action", "UNKNOWN")
+        reason = decision.get("reason") or decision.get("pattern") or ""
+        self.push(
+            "smc_vsa",
+            f"{pair} @ {timeframe}: {action} — {reason}",
+            {"long_rules": long_rules, "short_rules": short_rules, "decision": decision},
         )
 
     def set_last_trade_fire(self, payload: dict, *, emit_log: bool = True):

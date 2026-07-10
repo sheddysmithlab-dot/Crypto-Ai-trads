@@ -71,41 +71,16 @@ TIMEFRAME_RULES["30s"] = dict(_TIMEFRAME_RULES_PRE_SHIFT["30s"])
 # 'BOTH' patterns (engulfing, harami, ...) use the value's sign (+1 bullish
 # variant / -1 bearish variant).
 # ==========================================
-TAAPI_PATTERNS = {
-    # --- BULLISH REVERSALS (BUY) ---
-    "hammer": "BUY",
-    "invertedhammer": "BUY",
-    "dragonflydoji": "BUY",
-    "belthold": "BOTH",            # Value 1 = BUY, -1 = SELL
-    "engulfing": "BOTH",           # Value 1 = BUY, -1 = SELL
-    "piercing": "BUY",
-    "harami": "BOTH",              # Value 1 = BUY, -1 = SELL
-    "kicking": "BOTH",             # Value 1 = BUY, -1 = SELL
-    "matchinglow": "BUY",
-    "separatinglines": "BUY",
-    "counterattack": "BUY",
-    "morningstar": "BUY",
-    "morningdojistar": "BUY",
-    "3whitesoldiers": "BUY",
-    "abandonedbaby": "BOTH",       # Value 1 = BUY, -1 = SELL
-    "3inside": "BOTH",             # Value 1 = BUY, -1 = SELL
-    "3outside": "BOTH",            # Value 1 = BUY, -1 = SELL
-    "concealbabyswall": "BUY",
-    "ladderbottom": "BUY",
-    # --- BEARISH REVERSALS (SELL) ---
-    "hangingman": "SELL",
-    "shootingstar": "SELL",
-    "gravestonedoji": "SELL",
-    "darkcloudcover": "SELL",
-    "3blackcrows": "SELL",
-    "eveningstar": "SELL",
-    "eveningdojistar": "SELL",
-    "upsidegap2crows": "SELL",
-    # --- TREND CONTINUATION (HOLD/ADD) ---
-    "risefall3methods": "BOTH",    # Value 1 = Bullish Continuation, -1 = Bearish Continuation
-    "mathold": "BUY",
-    "3linestrike": "BOTH",         # Value 1 = Buy the dip, -1 = Sell the rally
-}
+# TAAPI pattern engine — paused; SMC+VSA uses Bybit klines. TIMEFRAME_RULES still used for TP/SL %.
+PATTERN_TRADE_POLICIES_ENABLED = False
+TAAPI_PAUSED = True
+
+# Pattern → action map (BUY / SELL / BOTH). Empty until owner defines rules.
+# Example when ready:
+#   "hammer": "BUY",
+#   "engulfing": "BOTH",
+#   "shootingstar": "SELL",
+TAAPI_PATTERNS = {}
 
 # TAAPI only supports these query intervals: 1m/5m/15m/30m/1h/2h/4h/12h/1d/1w.
 # TIMEFRAME_RULES' "30s"/"3m"/"10m"/"1D" keys have no TAAPI equivalent and map
@@ -193,8 +168,11 @@ def fetch_taapi_signals(symbol, interval, exchange, api_key):
 
 
 def evaluate_trade(signals_list, interval, candle_high, candle_low):
-    """ Reduces a batch of pattern signals + the signal candle's High/Low into
-    one final trade decision, strictly per SYSTEM_RULES.md's boundary rules. """
+    """Reduce pattern signals + candle OHLC into a trade decision (owner rules)."""
+    if not PATTERN_TRADE_POLICIES_ENABLED:
+        return {"action": "NO_TRADE", "reason": "Trade policies blank — waiting for candle pattern rules"}
+    if not TAAPI_PATTERNS:
+        return {"action": "NO_TRADE", "reason": "No candle patterns mapped yet"}
 
     # a) CONFLICT CHECK - a bullish AND a bearish pattern firing at once is an
     # unreliable, contradictory read - skip the candle entirely.
