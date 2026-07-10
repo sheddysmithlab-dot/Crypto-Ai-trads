@@ -54,9 +54,12 @@ class SystemLogStore:
     def set_last_trade_fire(self, payload: dict):
         self.last_trade_fire = {**payload, "timestamp": time.time()}
         status = "FIRED" if payload.get("success") else "FAILED"
+        msg = f"{status}: {payload.get('action')} {payload.get('symbol')} | {payload.get('pattern', 'n/a')}"
+        if not payload.get("success") and payload.get("error"):
+            msg += f" — {payload.get('error')}"
         self.push(
             "trade",
-            f"{status}: {payload.get('action')} {payload.get('symbol')} | {payload.get('pattern', 'n/a')}",
+            msg,
             payload,
         )
 

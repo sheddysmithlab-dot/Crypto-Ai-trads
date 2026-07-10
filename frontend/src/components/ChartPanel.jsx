@@ -15,7 +15,16 @@ export default function ChartPanel({ pairSelector, chartContainerRef, volumeCont
           selectPair={pairSelector.selectPair}
           toggleStar={pairSelector.toggleStar}
         />
-        <div className="flex flex-wrap justify-end gap-1 text-xs font-semibold">
+        <div className="flex flex-wrap justify-end items-center gap-2 text-xs font-semibold">
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-gray-100 dark:bg-gray-800/80 text-[10px] font-mono text-gray-600 dark:text-gray-300 tabular-nums">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" title="Live clock" />
+            <span title="Live local time">{readouts.liveClock}</span>
+            {readouts.chartCandleTime && readouts.chartCandleTime !== '—' ? (
+              <span className="text-gray-400" title="Current candle time">
+                · {readouts.chartCandleTime}
+              </span>
+            ) : null}
+          </div>
           {TIMEFRAMES.map((tf) => (
             <button
               key={tf}

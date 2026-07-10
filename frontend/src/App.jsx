@@ -129,16 +129,29 @@ export default function App() {
   // Safety check -> Continue: actually apply the config and start the bot.
   async function handleConfirmContinue() {
     if (!pendingConfig) return;
-    const { stopLossPct, dailyProfitPct } = pendingConfig;
+    const { stopLossPct, dailyProfitPct, trades } = pendingConfig;
     setStartConfirmOpen(false);
-    pushActionLog(`Safety check continued. Starting bot with risk_level=${stopLossPct}%, daily_profit=${dailyProfitPct}%`);
-    debugLog(`Safety check: Continue. Applying config (riskLevel=${stopLossPct}%, dailyProfit=${dailyProfitPct}%) and starting bot...`);
+    pushActionLog(`Safety check continued. Starting bot with risk_level=${stopLossPct}%, daily_profit=${dailyProfitPct}%, max_trades=${trades}`);
+    debugLog(`Safety check: Continue. Applying config (riskLevel=${stopLossPct}%, dailyProfit=${dailyProfitPct}%, maxTrades=${trades}) and starting bot...`);
     try {
-      await authFetch('/agent/config', {
+      const configRes = await authFetch('/agent/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stop_loss_pct: stopLossPct, daily_profit_pct: dailyProfitPct }),
+        body: JSON.stringify({
+          stop_loss_pct: stopLossPct,
+          daily_profit_pct: dailyProfitPct,
+          max_concurrent_trades: trades,
+        }),
       });
+      const configData = await configRes.json();
+      if (configData.status === 'error') {
+        pushActionLog(`Agent config rejected: ${configData.message}`);
+        console.error('Agent config rejected:', configData.message);
+        window.alert(configData.message || 'Could not apply AI agent settings. Bot not started.');
+        setPendingConfig(null);
+        return;
+      }
+      pushActionLog(`Agent config applied. max_concurrent_trades=${configData.max_concurrent_trades}`);
       const res = await authFetch('/start-bot', { method: 'POST' });
       const data = await res.json();
       debugLog('Bot started successfully:', data.message);

@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { authFetch } from '../config/api';
 
 // "AI Agent Instructions" pre-start popup.
 // Entry point: the green START AI AUTOMATION button in the ControlBar opens this
@@ -62,6 +63,18 @@ export default function AgentInstructionsModal({ open, onClose, onStart }) {
   const [stopLoss, setStopLoss] = useState(3);
   const [dailyProfit, setDailyProfit] = useState(10);
 
+  useEffect(() => {
+    if (!open) return;
+    authFetch('/agent/config')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!data) return;
+        if (typeof data.stop_loss_pct === 'number') setStopLoss(data.stop_loss_pct);
+        if (typeof data.daily_profit_pct === 'number') setDailyProfit(data.daily_profit_pct);
+      })
+      .catch(() => {});
+  }, [open]);
+
   if (!open) return null;
 
   const risk = calcRisk(stopLoss);
@@ -84,7 +97,7 @@ export default function AgentInstructionsModal({ open, onClose, onStart }) {
 
   function handleStopLossChange(e) {
     const v = parseFloat(e.target.value);
-    setStopLoss(Number.isFinite(v) ? v : 0);
+    setStopLoss(Number.isFinite(v) ? Math.min(100, Math.max(0.5, v)) : 0.5);
   }
 
   function handleDailyProfitChange(e) {
@@ -125,6 +138,7 @@ export default function AgentInstructionsModal({ open, onClose, onStart }) {
                 <input
                   type="number"
                   min="0.5"
+                  max="100"
                   step="0.5"
                   value={stopLoss}
                   onChange={handleStopLossChange}

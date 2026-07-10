@@ -3,6 +3,7 @@ import { createChart, CrosshairMode, LineStyle } from 'lightweight-charts';
 import { authFetch, backendWsUrl } from '../config/api';
 import { debugLog } from '../config/debug';
 import { fmtNum, getBinanceSymbol, getBybitSymbol } from '../data/pairs';
+import { formatChartAxisTime, formatLiveClock } from '../utils/time';
 
 // Timeframe -> candle interval in seconds. Drives BOTH historical bucketing
 // and live WebSocket tick bucketing so the chart genuinely reacts to the
@@ -249,8 +250,17 @@ const darkThemeConfig = {
   grid: { vertLines: { color: '#1E2329' }, horzLines: { color: '#1E2329' } },
   crosshair: { mode: CrosshairMode.Normal },
   rightPriceScale: { borderColor: '#1E2329' },
-  timeScale: { borderColor: '#1E2329' },
+  timeScale: { borderColor: '#1E2329', timeVisible: true, secondsVisible: true },
 };
+
+function buildTimeScaleOptions(intervalSeconds) {
+  return {
+    borderColor: '#1E2329',
+    timeVisible: true,
+    secondsVisible: intervalSeconds <= 60,
+    tickMarkFormatter: (time) => formatChartAxisTime(time, intervalSeconds),
+  };
+}
 
 // Candlestick + MA(5,10,20,30) overlay chart with a Volume histogram
 // sub-panel, real Binance historical candles + live public feed (paper
@@ -284,7 +294,9 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
   const [readouts, setReadouts] = useState({
     vol: 0,
     volMA: 0,
-    lastUpdated: '--:-- UTC',
+    lastUpdated: '--:--:--',
+    liveClock: '--:--:--',
+    chartCandleTime: '—',
   });
 
   const zoomToRecentCandles = useCallback((dataLength) => {
@@ -339,12 +351,15 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
   const updateReadouts = useCallback((bar, data) => {
     const now = new Date();
     const volSeries = calcVolumeSMA(data.slice(-(VOLUME_MA_PERIOD + 5)), VOLUME_MA_PERIOD);
+    const clock = formatLiveClock(now);
 
     setReadouts((prev) => ({
       ...prev,
       vol: bar.volume,
       volMA: volSeries.length ? volSeries[volSeries.length - 1].value : bar.volume,
-      lastUpdated: `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')} UTC`,
+      lastUpdated: clock,
+      liveClock: clock,
+      chartCandleTime: bar?.time ? formatChartAxisTime(bar.time, currentIntervalRef.current) : prev.chartCandleTime,
     }));
   }, []);
 
@@ -428,7 +443,9 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       const bucketTime = Math.floor(Date.now() / 1000 / currentIntervalRef.current) * currentIntervalRef.current;
 
       let updated;
+      let newCandle = false;
       if (bucketTime > lastCandle.time) {
+        newCandle = true;
         updated = { time: bucketTime, open: lastCandle.close, high: newClose, low: newClose, close: newClose, volume: Math.random() * 2 };
         mockData.push(updated);
         if (mockData.length > 200) mockData.shift();
@@ -446,8 +463,18 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
       candleSeriesRef.current.update(updated);
       updateReadouts(updated, mockData);
       applyAllOverlays(mockData);
+      if (newCandle) {
+        zoomToRecentCandles(mockData.length);
+      } else {
+        try {
+          chartRef.current?.timeScale().scrollToRealTime();
+          volumeChartRef.current?.timeScale().scrollToRealTime();
+        } catch {
+          /* chart may be mid-reset */
+        }
+      }
     },
-    [updateReadouts, applyAllOverlays]
+    [updateReadouts, applyAllOverlays, zoomToRecentCandles]
   );
 
   const connectFreeSource = useCallback(
@@ -562,6 +589,9 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     (tf) => {
       setTimeframe(tf);
       currentIntervalRef.current = TIMEFRAME_SECONDS[tf] || 3600;
+      const timeScaleOpts = buildTimeScaleOptions(currentIntervalRef.current);
+      chartRef.current?.applyOptions({ timeScale: { ...darkThemeConfig.timeScale, ...timeScaleOpts } });
+      volumeChartRef.current?.applyOptions({ timeScale: timeScaleOpts });
       // Clear the chart rather than showing a fake synthetic placeholder.
       applyDataset([]);
       loadRealHistoryInBackground(pairLabelRef.current, tf, entryPriceRef.current);
@@ -586,7 +616,10 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     const chart = createChart(chartContainer, {
       width: chartContainer.clientWidth,
       height: chartContainer.clientHeight,
-      timeScale: { ...darkThemeConfig.timeScale, visible: false },
+      timeScale: { ...darkThemeConfig.timeScale, ...buildTimeScaleOptions(currentIntervalRef.current), visible: false },
+      localization: {
+        timeFormatter: (time) => formatChartAxisTime(time, currentIntervalRef.current),
+      },
       ...darkThemeConfig,
     });
     chartRef.current = chart;
@@ -615,6 +648,10 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
     const volumeChart = createChart(volumeContainer, {
       width: volumeContainer.clientWidth,
       height: volumeContainer.clientHeight,
+      timeScale: buildTimeScaleOptions(currentIntervalRef.current),
+      localization: {
+        timeFormatter: (time) => formatChartAxisTime(time, currentIntervalRef.current),
+      },
       ...darkThemeConfig,
     });
     volumeChartRef.current = volumeChart;
@@ -776,6 +813,16 @@ export function useTradingChart({ chartContainerRef, volumeContainerRef, pairLab
   useEffect(() => {
     if (externalTradingMode) setChartDataSourceMode(externalTradingMode);
   }, [externalTradingMode, setChartDataSourceMode]);
+
+  // Live wall-clock in the chart header (updates every second even between ticks).
+  useEffect(() => {
+    const tick = () => {
+      setReadouts((prev) => ({ ...prev, liveClock: formatLiveClock() }));
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   return { timeframe, switchTimeframe, readouts, chartSourceMode, chartHistorySource, chartLiveSource };
 }

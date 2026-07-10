@@ -256,8 +256,7 @@ export default function SystemLogModal({
   return (
     <div className="fixed inset-0 z-[115] pointer-events-none">
       <div
-        className="absolute inset-0 bg-black/80 backdrop-blur-sm pointer-events-auto"
-        onClick={onClose}
+        className="absolute inset-0 bg-transparent pointer-events-none"
         aria-hidden
       />
       <div
@@ -369,6 +368,15 @@ export default function SystemLogModal({
                 <div className="flex justify-between gap-2">
                   <dt className="text-gray-500">Open positions</dt>
                   <dd className="text-gray-200">{agent.open_trades ?? 0}</dd>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <dt className="text-gray-500">Max concurrent</dt>
+                  <dd className="text-gray-200">
+                    {agent.max_concurrent_trades ?? '—'}
+                    {agent.risk_level_pct != null ? (
+                      <span className="text-gray-500"> (risk {agent.risk_level_pct}%)</span>
+                    ) : null}
+                  </dd>
                 </div>
                 <div className="flex justify-between gap-2">
                   <dt className="text-gray-500">Mode</dt>

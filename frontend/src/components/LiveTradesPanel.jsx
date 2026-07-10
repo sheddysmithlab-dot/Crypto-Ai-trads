@@ -1,13 +1,26 @@
 import { getPairMeta, fmtNum } from '../data/pairs';
+import { formatTradeFireTime } from '../utils/time';
+
+function isTradeWinning(trade) {
+  if (trade.gross_pnl_pct != null) return trade.gross_pnl_pct >= 0;
+  if (trade.side === 'LONG' && trade.entry != null && trade.current != null) {
+    return trade.current >= trade.entry;
+  }
+  if (trade.side === 'SHORT' && trade.entry != null && trade.current != null) {
+    return trade.current <= trade.entry;
+  }
+  return trade.pnl >= 0;
+}
 
 function StatusIcon({ trade }) {
+  const winning = isTradeWinning(trade);
   if (trade.status === 'sold') {
     return <i className="fas fa-check-double text-white/80" title="Sold"></i>;
   }
   if (trade.status === 'locked') {
     return <i className="fas fa-lock text-blue-400" title="Trailing Lock Active"></i>;
   }
-  return trade.pnl >= 0 ? (
+  return winning ? (
     <i className="fas fa-check-circle text-green-500" title="In Profit"></i>
   ) : (
     <i className="fas fa-exclamation-circle text-red-500" title="At Loss"></i>
@@ -31,6 +44,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
             <tr className="text-left text-gray-500 dark:text-gray-400 text-[10px] uppercase border-b border-gray-200 dark:border-gray-800">
               <th className="px-3 py-1.5 font-semibold">Asset</th>
               <th className="px-3 py-1.5 font-semibold">Side</th>
+              <th className="px-3 py-1.5 font-semibold">Fired</th>
               <th className="px-3 py-1.5 font-semibold">Entry</th>
               <th className="px-3 py-1.5 font-semibold">Current</th>
               <th className="px-3 py-1.5 font-semibold">PnL (gross)</th>
@@ -40,7 +54,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
           <tbody>
             {trades.length === 0 ? (
               <tr>
-                <td colSpan={6} className="text-center py-6 text-gray-500">
+                <td colSpan={7} className="text-center py-6 text-gray-500">
                   No active positions on {activePair}. Use "+ Add Position" to open a live trade.
                 </td>
               </tr>
@@ -49,7 +63,8 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                 const meta = getPairMeta(trade.pair);
                 const isSold = trade.status === 'sold';
                 const isProtected = trade.protected || trade.source === 'manual';
-                const isProfit = trade.pnl >= 0;
+                const isProfit = isTradeWinning(trade);
+                const netPnl = trade.pnl ?? 0;
                 const rowBg = isSold
                   ? 'bg-white/5 dark:bg-white/5'
                   : isProfit
@@ -81,11 +96,14 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                         <span className="text-blue-400 font-bold ml-1" title="Paper simulation (same rules as live)">📄</span>
                       ) : null}
                     </td>
+                    <td className="px-3 py-1.5 font-mono text-[10px] text-gray-400 whitespace-nowrap" title="Trade fire time">
+                      {formatTradeFireTime(trade.opened_at)}
+                    </td>
                     <td className="px-3 py-1.5 font-mono">${fmtNum(trade.entry)}</td>
                     <td className="px-3 py-1.5 font-mono">${fmtNum(trade.current)}</td>
                     <td className={`px-3 py-1.5 font-bold ${pnlColor}`}>
                       {trade.gross_pnl_pct != null ? (
-                        <span title={`Net after fees: ${trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}%`}>
+                        <span title={`Net after fees: ${netPnl >= 0 ? '+' : ''}${netPnl.toFixed(2)}%`}>
                           {trade.gross_pnl_pct >= 0 ? '+' : ''}
                           {trade.gross_pnl_pct.toFixed(2)}%
                           <span className="text-[9px] font-normal text-gray-500 ml-0.5">gross</span>
@@ -129,7 +147,8 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
             const meta = getPairMeta(trade.pair);
             const isSold = trade.status === 'sold';
             const isProtected = trade.protected || trade.source === 'manual';
-            const isProfit = trade.pnl >= 0;
+            const isProfit = isTradeWinning(trade);
+            const netPnl = trade.pnl ?? 0;
             const rowBg = isSold
               ? 'bg-white/5 dark:bg-white/5'
               : isProfit
@@ -150,6 +169,9 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                     <div className={`text-[10px] ${isSold ? 'text-white/80' : trade.side === 'LONG' ? 'text-green-500' : 'text-red-500'} font-bold`}>
                       {trade.side} {isSold ? '(SOLD)' : isProtected ? '(MANUAL)' : ''}
                     </div>
+                    <div className="text-[9px] text-gray-500 font-mono mt-0.5">
+                      Fired: {formatTradeFireTime(trade.opened_at)}
+                    </div>
                   </div>
                 </div>
                 <div className="text-right text-[10px] text-gray-500 dark:text-gray-400">
@@ -161,7 +183,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <span className={`font-bold ${pnlColor} text-xs`} title={`Net: ${trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}%`}>
+                  <span className={`font-bold ${pnlColor} text-xs`} title={`Net: ${netPnl >= 0 ? '+' : ''}${netPnl.toFixed(2)}%`}>
                     {trade.gross_pnl_pct != null ? (
                       <>
                         {trade.gross_pnl_pct >= 0 ? '+' : ''}

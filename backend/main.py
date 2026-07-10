@@ -748,6 +748,7 @@ class AITradingAgent:
         "already seen" and skip it until the next boundary. """
         self.timeframe_seconds = seconds
         LAST_CANDLE_TIMESTAMPS.clear()
+        _recent_signal_fire_keys.clear()
         print(f"[TIMEFRAME SYNC] Backend timeframe set to {seconds}s.")
 
     def open_trade(
@@ -761,6 +762,9 @@ class AITradingAgent:
         entry_price=None,
         exchange=None,
         bybit_symbol=None,
+        pattern=None,
+        signal_candle_time=None,
+        taapi_action=None,
     ):
         """ RULE 1: Opens a position as a Market Order (RULE 7) with simulated minor slippage.
         Manual entries default to 1% margin x 100x leverage. Auto entries pass
@@ -778,6 +782,15 @@ class AITradingAgent:
             if not self.is_active:
                 return None
             if self.daily_target_reached:
+                return None
+
+            if self.has_duplicate_auto_entry(
+                side, self.active_pair, pattern, signal_candle_time, float(entry_price or self.current_price)
+            ):
+                print(
+                    f"[PILLAR 3: AI AGENT] Duplicate auto-entry blocked on {self.active_pair} "
+                    f"({side}, pattern={pattern}, candle={signal_candle_time})."
+                )
                 return None
 
         # AI Agent Instructions modal: cap stacked positions at max_concurrent_trades.
@@ -843,11 +856,15 @@ class AITradingAgent:
             "entry_fee_pct": entry_fee_pct,
             "entry_fee_usd": entry_fee_usd,
             "source": source,
+            "opened_at": time.time(),
             "peak_gross_pct": 0.0,
             "peak_net_pct": 0.0,
             "is_lock_active": False,
             "exchange": exchange,
             "bybit_symbol": bybit_symbol,
+            "pattern": pattern,
+            "signal_candle_time": signal_candle_time,
+            "taapi_action": taapi_action,
         }
         self.trades.append(trade)
         self._append_trade_history(trade)
@@ -862,9 +879,8 @@ class AITradingAgent:
               f"(margin=${margin}, position=${position_size}, qty={qty}, entry_fee=${entry_fee_usd}, source={source})")
         qty_note = f" | {qty} coins" if qty is not None else ""
         if source == "auto" and position_size_usd is not None:
-            inverse_note = " inverse SHORT" if side == "SHORT" else ""
             fill_msg = (
-                f"Order Filled:{inverse_note} {self.active_pair} {side} @ {filled_price:,.4f} "
+                f"Order Filled: {self.active_pair} {side} @ {filled_price:,.4f} "
                 f"(${position_size:,.2f} = {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of capital{qty_note})"
             )
         else:
@@ -1018,6 +1034,59 @@ class AITradingAgent:
             "success" if metrics["net_usd"] >= 0 else "error",
         )
         return True
+
+    def close_opposite_auto_positions(self, new_side: str, pair: str, reason: str) -> bool:
+        """Close auto-managed positions on the opposite side before a flip entry."""
+        opposite = "SHORT" if new_side == "LONG" else "LONG"
+        to_close = [
+            t for t in self.trades
+            if t["pair"] == pair and t["side"] == opposite and t.get("source") == "auto"
+        ]
+        if not to_close:
+            return True
+
+        closed_ids: set[int] = set()
+        for trade in to_close:
+            metrics = self._trade_metrics(trade)
+            if not self._close_single_trade(trade, metrics, reason):
+                return False
+            closed_ids.add(trade["id"])
+
+        self.trades = [t for t in self.trades if t["id"] not in closed_ids]
+        system_log.push(
+            "trade",
+            f"Closed {len(closed_ids)} opposite {opposite} position(s) on {pair} before {new_side} entry.",
+            {"pair": pair, "new_side": new_side, "closed_ids": list(closed_ids)},
+        )
+        return True
+
+    def has_opposite_position(self, side: str, pair: str) -> bool:
+        opposite = "SHORT" if side == "LONG" else "LONG"
+        return any(t["pair"] == pair and t["side"] == opposite for t in self.trades)
+
+    def has_duplicate_auto_entry(
+        self,
+        side: str,
+        pair: str,
+        pattern: str | None,
+        signal_candle_time: int | None,
+        entry_price: float,
+    ) -> bool:
+        """Block double-fire: same candle+pattern+side, or same pattern+entry on this pair."""
+        for t in self.trades:
+            if t.get("source") != "auto" or t["pair"] != pair or t["side"] != side:
+                continue
+            if (
+                pattern
+                and signal_candle_time
+                and t.get("pattern") == pattern
+                and t.get("signal_candle_time") == signal_candle_time
+            ):
+                return True
+            if pattern and t.get("pattern") == pattern and entry_price > 0:
+                if abs(t["entry"] - entry_price) / entry_price < 0.0002:
+                    return True
+        return False
 
     def execute_sell(self, reason):
         # RULE 4/6 & 7: Profit-protection sell. Exit orders are Market Orders.
@@ -1187,6 +1256,10 @@ TIMEFRAME_KEY_TO_BYBIT_KLINE = {
 # different candle granularities.
 LAST_CANDLE_TIMESTAMPS = {}
 
+# Prevent concurrent / duplicate TAAPI fires for the same candle+pattern.
+_trade_fire_lock = asyncio.Lock()
+_recent_signal_fire_keys: set[str] = set()
+
 # Pairs already warned about a failing candle fetch (e.g. no Bybit LINEAR/USDT
 # Perpetual market for that symbol - several of BYBIT_SYMBOL_MAP's smaller-cap
 # tokens may only have a SPOT listing). Warns once per pair instead of every
@@ -1287,21 +1360,19 @@ def _log_trade_skip(action: str, symbol: str, pattern: str | None, reason: str, 
     print(f"[AUTO BUY LOOP] Trade skipped: {reason}")
 
 def taapi_action_to_trade_side(taapi_action: str) -> str:
-    """Inverse auto-entry: TAAPI BUY -> SHORT, TAAPI SELL -> LONG."""
+    """TAAPI BUY -> LONG, TAAPI SELL -> SHORT."""
     if taapi_action == "BUY":
-        return "SHORT"
-    if taapi_action == "SELL":
         return "LONG"
+    if taapi_action == "SELL":
+        return "SHORT"
     return "LONG"
 
 
 def taapi_action_to_bybit_order_action(taapi_action: str) -> str:
-    """Bybit market open for inverse policy: BUY signal -> Sell (short), SELL -> Buy (long)."""
-    if taapi_action == "BUY":
-        return "SELL"
-    if taapi_action == "SELL":
-        return "BUY"
-    return taapi_action
+    """Bybit market open: BUY signal -> Buy (long), SELL signal -> Sell (short)."""
+    if taapi_action in ("BUY", "SELL"):
+        return taapi_action
+    return "BUY"
 
 
 def agent_policy_summary() -> str:
@@ -1313,7 +1384,7 @@ def agent_policy_summary() -> str:
         else "Bybit TESTNET linear (real open/close)"
     )
     return (
-        f"TAAPI BUY->SHORT / SELL->LONG (inverse) | fixed TP @ {floor}% gross "
+        f"TAAPI BUY->LONG / SELL->SHORT | no hedge (flip closes opposite) | fixed TP @ {floor}% gross "
         f"(fees incl., instant close) | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital/trade | {exec_mode}"
     )
 
@@ -1365,96 +1436,159 @@ def _log_auto_trade_fire(
     })
 
 
+def _signal_fire_key(pair: str, timeframe_key: str, action: str, pattern: str | None, candle_close_time: int) -> str:
+    return f"{pair}|{timeframe_key}|{action}|{pattern or ''}|{candle_close_time}"
+
+
+def _register_signal_fire(key: str) -> None:
+    _recent_signal_fire_keys.add(key)
+    if len(_recent_signal_fire_keys) > 200:
+        # Bound memory — keys are per unique candle; old entries drop off naturally.
+        _recent_signal_fire_keys.clear()
+
+
 async def fire_taapi_auto_trade(
     result: dict,
     bybit_symbol: str,
     plan: dict,
     position_size_usd: float,
     qty,
+    *,
+    candle_close_time: int | None = None,
+    timeframe_key: str | None = None,
 ) -> tuple[dict | None, bool, str | None]:
-    """Unified TAAPI auto-entry for paper and live — inverse: BUY opens SHORT, SELL opens LONG."""
-    side = taapi_action_to_trade_side(result["action"])
-    entry_px = result.get("entry") or agent.current_price
-    pattern = result.get("pattern")
-    reason = f"TAAPI inverse {pattern or 'signal'} ({result['action']})"
+    """Unified TAAPI auto-entry for paper and live — BUY opens LONG, SELL opens SHORT."""
+    async with _trade_fire_lock:
+        side = taapi_action_to_trade_side(result["action"])
+        entry_px = result.get("entry") or agent.current_price
+        pattern = result.get("pattern")
+        reason = f"TAAPI {pattern or 'signal'} ({result['action']})"
 
-    if bybit_api.mode == "PAPER_TRADING":
-        trade = agent.open_trade(
-            side,
-            reason=reason,
-            source="auto",
-            position_size_usd=position_size_usd,
-            qty=qty,
-            entry_price=entry_px,
-            exchange="paper",
-            bybit_symbol=bybit_symbol,
-        )
-        fired = trade is not None
-        order_error = None
-        log_mode = "PAPER_TRADING"
-    else:
-        if not is_bybit_testnet_configured():
-            return None, False, (
-                "BYBIT_TESTNET_API_KEY / BYBIT_TESTNET_API_SECRET not set — "
-                "add keys from https://testnet.bybit.com to backend/.env"
+        if candle_close_time is not None and timeframe_key:
+            fire_key = _signal_fire_key(
+                agent.active_pair, timeframe_key, result["action"], pattern, candle_close_time
             )
+            if fire_key in _recent_signal_fire_keys:
+                err = (
+                    f"Duplicate signal blocked — already fired {result['action']} "
+                    f"{pattern or 'signal'} for candle {candle_close_time}."
+                )
+                _log_trade_skip(result["action"], bybit_symbol, pattern, err)
+                return None, False, err
 
-        executor = get_bybit_executor_agent()
-        bybit_order = {**result, "action": taapi_action_to_bybit_order_action(result["action"])}
-        fired, order_error = await asyncio.to_thread(executor.execute_trade, bybit_order, qty)
-        trade = None
-        if fired:
+        if agent.has_duplicate_auto_entry(side, agent.active_pair, pattern, candle_close_time, float(entry_px)):
+            err = (
+                f"Duplicate open position blocked — {side} {pattern or 'signal'} "
+                f"already active on {agent.active_pair}."
+            )
+            _log_trade_skip(result["action"], bybit_symbol, pattern, err)
+            return None, False, err
+
+        if agent.has_opposite_position(side, agent.active_pair):
+            flipped = agent.close_opposite_auto_positions(
+                side,
+                agent.active_pair,
+                f"Flip: close opposite before {side} ({pattern or result['action']})",
+            )
+            if not flipped or agent.has_opposite_position(side, agent.active_pair):
+                err = f"Conflicting opposite position on {agent.active_pair} — could not close before new entry."
+                _log_trade_skip(result["action"], bybit_symbol, pattern, err)
+                return None, False, err
+
+        if bybit_api.mode == "PAPER_TRADING":
             trade = agent.open_trade(
                 side,
                 reason=reason,
                 source="auto",
                 position_size_usd=position_size_usd,
                 qty=qty,
-                skip_exchange_open=True,
                 entry_price=entry_px,
-                exchange="bybit_linear_testnet",
+                exchange="paper",
                 bybit_symbol=bybit_symbol,
+                pattern=pattern,
+                signal_candle_time=candle_close_time,
+                taapi_action=result["action"],
             )
-            if not trade:
-                fired = False
-                order_error = (
-                    order_error
-                    or "Bybit order filled but local trade register failed — check TESTNET positions."
+            fired = trade is not None
+            order_error = None
+            log_mode = "PAPER_TRADING"
+        else:
+            if not is_bybit_testnet_configured():
+                return None, False, (
+                    "BYBIT_TESTNET_API_KEY / BYBIT_TESTNET_API_SECRET not set — "
+                    "add keys from https://testnet.bybit.com to backend/.env"
                 )
-                notifications.push(
-                    f"CRITICAL: Bybit order filled for {bybit_symbol} but dashboard register failed. "
-                    "Position may be open on TESTNET untracked.",
-                    "error",
+
+            executor = get_bybit_executor_agent()
+            bybit_order = {**result, "action": taapi_action_to_bybit_order_action(result["action"])}
+            fired, order_error = await asyncio.to_thread(executor.execute_trade, bybit_order, qty)
+            if not fired and order_error:
+                system_log.push(
+                    "bybit",
+                    f"Order rejected: {order_error}",
+                    {"symbol": bybit_symbol, "qty": qty, "pattern": pattern, "action": result["action"]},
                 )
-        log_mode = "BYBIT_TESTNET"
+            trade = None
+            if fired:
+                trade = agent.open_trade(
+                    side,
+                    reason=reason,
+                    source="auto",
+                    position_size_usd=position_size_usd,
+                    qty=qty,
+                    skip_exchange_open=True,
+                    entry_price=entry_px,
+                    exchange="bybit_linear_testnet",
+                    bybit_symbol=bybit_symbol,
+                    pattern=pattern,
+                    signal_candle_time=candle_close_time,
+                    taapi_action=result["action"],
+                )
+                if not trade:
+                    fired = False
+                    order_error = (
+                        order_error
+                        or "Bybit order filled but local trade register failed — check TESTNET positions."
+                    )
+                    notifications.push(
+                        f"CRITICAL: Bybit order filled for {bybit_symbol} but dashboard register failed. "
+                        "Position may be open on TESTNET untracked.",
+                        "error",
+                    )
+            log_mode = "BYBIT_TESTNET"
 
-    skip_reason = _auto_entry_skip_reason(trade, fired, order_error)
-    _log_auto_trade_fire(
-        success=bool(fired and trade),
-        mode=log_mode,
-        action=result["action"],
-        bybit_symbol=bybit_symbol,
-        pattern=pattern,
-        qty=qty,
-        position_usd=position_size_usd,
-        plan=plan,
-        result=result,
-        trade_id=trade["id"] if trade else None,
-        error=skip_reason,
-    )
+        if fired and trade and candle_close_time is not None and timeframe_key:
+            _register_signal_fire(
+                _signal_fire_key(agent.active_pair, timeframe_key, result["action"], pattern, candle_close_time)
+            )
 
-    if fired and trade:
-        venue = "PAPER" if log_mode == "PAPER_TRADING" else "TESTNET"
-        notifications.push(
-            f"{venue} {side} opened (inverse TAAPI {result['action']}): {agent.active_pair} | {qty} @ ~${plan['price']:,.0f} | "
-            f"${position_size_usd} ({plan['capital_pct']:.0f}% of ${plan['total_capital']:,.0f}) | "
-            f"pattern={pattern} #{trade['id']}",
-            "success",
+        skip_reason = _auto_entry_skip_reason(trade, fired, order_error)
+        _log_auto_trade_fire(
+            success=bool(fired and trade),
+            mode=log_mode,
+            action=result["action"],
+            bybit_symbol=bybit_symbol,
+            pattern=pattern,
+            qty=qty,
+            position_usd=position_size_usd,
+            plan=plan,
+            result=result,
+            trade_id=trade["id"] if trade else None,
+            error=skip_reason,
         )
-    elif skip_reason:
-        notifications.push(f"Trade skipped: {skip_reason}", "warning")
 
-    return trade, bool(fired and trade), skip_reason
+        if fired and trade:
+            venue = "PAPER" if log_mode == "PAPER_TRADING" else "TESTNET"
+            notifications.push(
+                f"{venue} {side} opened (TAAPI {result['action']}): {agent.active_pair} | {qty} @ ~${plan['price']:,.0f} | "
+                f"${position_size_usd} ({plan['capital_pct']:.0f}% of ${plan['total_capital']:,.0f}) | "
+                f"pattern={pattern} #{trade['id']}",
+                "success",
+            )
+        elif skip_reason:
+            notifications.push(f"Trade skipped: {skip_reason}", "warning")
+
+        return trade, bool(fired and trade), skip_reason
 
 
 _bybit_executor_agent = None
@@ -1632,7 +1766,15 @@ async def auto_buy_loop():
             _log_trade_skip(result["action"], bybit_symbol, result.get("pattern"), err)
             continue
 
-        await fire_taapi_auto_trade(result, bybit_symbol, plan, position_size_usd, qty)
+        await fire_taapi_auto_trade(
+            result,
+            bybit_symbol,
+            plan,
+            position_size_usd,
+            qty,
+            candle_close_time=close_time,
+            timeframe_key=timeframe_key,
+        )
 
 async def market_simulator():
     """ Synthetic random-walk price - runs whenever the active pair has no
@@ -1948,6 +2090,7 @@ async def set_paper_capital(payload: PaperCapitalPayload):
 class AgentConfigPayload(BaseModel):
     stop_loss_pct: float = 3.0
     daily_profit_pct: float = 0.0
+    max_concurrent_trades: int | None = None
 
 
 def _half_up_round(value: float) -> int:
@@ -1961,20 +2104,33 @@ def _half_up_round(value: float) -> int:
 async def set_agent_config(payload: AgentConfigPayload):
     """ Applied from the "AI Agent Instructions" pre-start modal.
     - stop_loss_pct (risk level from the popup) -> max_concurrent_trades via
-      round(stop_loss_pct * 1.5) (half-up). Pre-start strategy only — not a stop-loss.
+      round(stop_loss_pct * 1.5) (half-up) unless max_concurrent_trades is sent
+      explicitly from the frontend (must match the modal display).
     - daily_profit_pct -> optional "Capital profit of the day" target; 0 disables.
     Both are validated and stored before /start-bot is called by the frontend. """
-    if payload.stop_loss_pct < 0.5 or payload.stop_loss_pct > 50:
-        return {"status": "error", "message": "Risk level must be between 0.5% and 50%."}
+    if payload.stop_loss_pct < 0.5 or payload.stop_loss_pct > 100:
+        return {"status": "error", "message": "Risk level must be between 0.5% and 100%."}
     if payload.daily_profit_pct < 0 or payload.daily_profit_pct > 1000:
         return {"status": "error", "message": "Daily profit target must be between 0% and 1000%."}
 
+    if payload.max_concurrent_trades is not None:
+        if payload.max_concurrent_trades < 1 or payload.max_concurrent_trades > 500:
+            return {"status": "error", "message": "Concurrent trades must be between 1 and 500."}
+        max_trades = payload.max_concurrent_trades
+    else:
+        max_trades = max(1, _half_up_round(payload.stop_loss_pct * 1.5))
+
     agent.risk_level_pct = payload.stop_loss_pct
-    agent.max_concurrent_trades = max(1, _half_up_round(payload.stop_loss_pct * 1.5))
+    agent.max_concurrent_trades = max_trades
     agent.daily_profit_target_pct = payload.daily_profit_pct
     agent.daily_target_reached = False
     print(f"[AGENT CONFIG] risk_level={payload.stop_loss_pct}% | max_concurrent_trades="
           f"{agent.max_concurrent_trades} | daily_profit_target={agent.daily_profit_target_pct}%")
+    system_log.push(
+        "ai",
+        f"Agent config applied: risk={payload.stop_loss_pct}% | max_concurrent_trades={agent.max_concurrent_trades} | daily_profit={payload.daily_profit_pct}%",
+        {"risk_level_pct": payload.stop_loss_pct, "max_concurrent_trades": agent.max_concurrent_trades},
+    )
     return {
         "status": "success",
         "message": "Agent config applied.",
@@ -2034,6 +2190,8 @@ async def get_system_logs():
             "timeframe_seconds": agent.timeframe_seconds,
             "current_price": round(agent.current_price, 4),
             "open_trades": len(agent.trades),
+            "max_concurrent_trades": agent.max_concurrent_trades,
+            "risk_level_pct": agent.risk_level_pct,
             "emergency_triggered": agent.emergency_triggered,
             "policy": agent_policy_summary(),
         },
