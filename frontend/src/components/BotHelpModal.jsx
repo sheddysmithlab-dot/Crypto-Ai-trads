@@ -1,12 +1,11 @@
 const HOW_IT_WORKS = [
   'Pick a coin pair and chart timeframe (1M, 5M, 15M, etc.).',
   'Press START AI AUTOMATION and set your risk level (max open trades).',
-  'On each closed candle the bot runs Blue Box traps, momentum, and Marubozu pullback logic.',
-  'Blue Box: liquidity sweep below L20 or above H20, then displacement in the next 1–2 bars.',
-  'Marubozu LONG: EMA50 > EMA200, price above EMA50, 2–4 red pullback bars, then a large green marubozu.',
-  'Marubozu SHORT: EMA50 < EMA200, price below EMA50, 2–4 green pullback bars, then a large red marubozu.',
-  'Marubozu = big body (>1.5× avg), tiny wicks (<5% of body).',
-  'Stop beyond the trigger candle; take profit at 1:2 risk-reward. Size = 1% balance risk to stop.',
+  'On each closed candle: Blue Box traps, VSA rules (L1–S4), Marubozu pullback, and momentum.',
+  'Blue Box: sweep below L20 or above H20, then displacement in the next 1–2 bars.',
+  'VSA long (200 EMA uptrend): L1 exhaustion, L2 hammer, L4 absorption. L3 spring + L5 momentum bypass EMA.',
+  'VSA short (200 EMA downtrend): S1 exhaustion, S3 absorption. S2 up-thrust + S4 momentum bypass EMA.',
+  'Marubozu: EMA50/200 trend + 2–4 bar pullback + large-body marubozu candle.',
   'BUY → LONG, SELL → SHORT. Opposite positions close before a flip.',
   'PAPER simulates fills; testnet sends real orders. STOP ends automation.',
 ];
