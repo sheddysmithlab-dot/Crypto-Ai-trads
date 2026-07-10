@@ -37,6 +37,7 @@ from chart_24h import chart_24h_refresh_loop, chart_24h_store
 from system_log import system_log
 from taapi_scanner import fetch_taapi_signals, evaluate_trade
 from bybit_executor import BybitAgent
+from trading_policy import evaluate_cost_aware_entry, get_effective_exit_floor_pct, policy_summary_suffix
 
 from pathlib import Path
 
@@ -964,7 +965,10 @@ class AITradingAgent:
         if not self.is_active or not self.trades:
             return
 
-        floor = self.get_profit_floor_pct()
+        floor = get_effective_exit_floor_pct(
+            self.get_profit_floor_pct(),
+            bybit_api.get_taker_fee_pct(),
+        )
         still_open = []
         for trade in self.trades:
             if trade.get("source") == "manual":
@@ -1377,15 +1381,17 @@ def taapi_action_to_bybit_order_action(taapi_action: str) -> str:
 
 def agent_policy_summary() -> str:
     """Single policy text for paper and live — same TAAPI / fixed-TP / sizing rules."""
-    floor = agent.get_profit_floor_pct()
+    chart_floor = agent.get_profit_floor_pct()
+    eff_floor = get_effective_exit_floor_pct(chart_floor, bybit_api.get_taker_fee_pct())
     exec_mode = (
         "paper ledger (simulated fills)"
         if bybit_api.mode == "PAPER_TRADING"
         else "Bybit TESTNET linear (real open/close)"
     )
     return (
-        f"TAAPI BUY->LONG / SELL->SHORT | no hedge (flip closes opposite) | fixed TP @ {floor}% gross "
-        f"(fees incl., instant close) | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital/trade | {exec_mode}"
+        f"TAAPI BUY->LONG / SELL->SHORT | no hedge (flip closes opposite) | fixed TP @ {eff_floor}% gross "
+        f"(fees incl., instant close) | {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% capital/trade | {exec_mode} | "
+        f"{policy_summary_suffix(bybit_api.get_taker_fee_pct(), chart_floor)}"
     )
 
 
@@ -1725,10 +1731,36 @@ async def auto_buy_loop():
             continue
 
         result = evaluate_trade(signals, timeframe_key, candle["high"], candle["low"])
-        system_log.set_last_taapi_scan(agent.active_pair, timeframe_key, signals, result, candle)
+        fee_pct = bybit_api.get_taker_fee_pct()
+        cost_aware = evaluate_cost_aware_entry(
+            result,
+            candle,
+            agent.current_price,
+            timeframe_key,
+            fee_pct,
+        )
+        system_log.set_last_taapi_scan(
+            agent.active_pair, timeframe_key, signals, result, candle, cost_aware=cost_aware
+        )
         if result["action"] not in ("BUY", "SELL"):
             print(f"[AUTO BUY LOOP] {result['action']}: {result['reason']}")
             continue
+
+        if cost_aware.get("would_block") and not cost_aware.get("dry_run"):
+            reason = cost_aware.get("block_reason") or "Cost-aware entry gate blocked weak signal."
+            _log_trade_skip(result["action"], bybit_symbol, result.get("pattern"), reason, cost_aware=cost_aware)
+            system_log.push(
+                "trade",
+                f"SKIPPED (cost-aware): {result['action']} {bybit_symbol} | {result.get('pattern')} — {reason}",
+                {"pattern": result.get("pattern"), "cost_aware": cost_aware},
+            )
+            continue
+
+        if cost_aware.get("would_block") and cost_aware.get("dry_run"):
+            print(
+                f"[AUTO BUY LOOP] Cost-aware DRY-RUN would block {result['action']} "
+                f"{result.get('pattern')}: {cost_aware.get('block_reason')}"
+            )
 
         capital_base = agent.get_trading_capital_base()
         if capital_base is None or capital_base <= 0:

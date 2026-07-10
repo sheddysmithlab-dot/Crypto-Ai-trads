@@ -252,6 +252,7 @@ export default function SystemLogModal({
   const decision = taapi?.decision || {};
   const bullish = taapi?.bullish || [];
   const bearish = taapi?.bearish || [];
+  const costAware = taapi?.cost_aware;
 
   return (
     <div className="fixed inset-0 z-[115] pointer-events-none">
@@ -436,6 +437,60 @@ export default function SystemLogModal({
                     <span className="px-2 py-1 rounded bg-gray-800 text-gray-400">{decision.reason}</span>
                   ) : null}
                 </div>
+                {costAware ? (
+                  <div className="rounded-lg border border-gray-700 bg-gray-900/50 p-3 text-xs space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-gray-400 uppercase tracking-wide text-[10px] font-bold">Cost-aware gate</span>
+                      <span
+                        className={`px-2 py-0.5 rounded font-bold ${
+                          costAware.would_block && !costAware.dry_run
+                            ? 'bg-red-900/40 text-red-400'
+                            : costAware.would_block && costAware.dry_run
+                              ? 'bg-amber-900/40 text-amber-300'
+                              : 'bg-green-900/40 text-green-400'
+                        }`}
+                      >
+                        {costAware.would_block
+                          ? costAware.dry_run
+                            ? 'WOULD BLOCK (dry-run)'
+                            : 'BLOCKED'
+                          : 'PASS'}
+                      </span>
+                      {costAware.enabled === false ? (
+                        <span className="text-gray-500">(disabled)</span>
+                      ) : null}
+                    </div>
+                    <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-1 font-mono text-[11px]">
+                      <div>
+                        <dt className="text-gray-500">Remaining edge</dt>
+                        <dd className="text-gray-200">{costAware.remaining_edge_pct != null ? `${costAware.remaining_edge_pct}%` : '—'}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-gray-500">Entry hurdle (λ={costAware.lambda})</dt>
+                        <dd className="text-gray-200">{costAware.entry_hurdle_pct != null ? `≥ ${costAware.entry_hurdle_pct}%` : '—'}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-gray-500">Candle range</dt>
+                        <dd className="text-gray-200">{costAware.candle_range_pct != null ? `${costAware.candle_range_pct}%` : '—'}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-gray-500">Min range</dt>
+                        <dd className="text-gray-200">{costAware.min_candle_range_pct != null ? `≥ ${costAware.min_candle_range_pct}%` : '—'}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-gray-500">Round-trip cost</dt>
+                        <dd className="text-gray-200">{costAware.round_trip_cost_pct != null ? `${costAware.round_trip_cost_pct}%` : '—'}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-gray-500">Planned TP</dt>
+                        <dd className="text-gray-200">{costAware.planned_gross_tp_pct != null ? `${costAware.planned_gross_tp_pct}%` : '—'}</dd>
+                      </div>
+                    </dl>
+                    {costAware.block_reason ? (
+                      <p className="text-[10px] text-amber-300/90">{costAware.block_reason}</p>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div>
                     <div className="text-green-500 font-bold mb-1">Bullish ({bullish.length})</div>

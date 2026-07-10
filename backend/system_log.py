@@ -24,7 +24,7 @@ class SystemLogStore:
             self.entries = self.entries[-self.max_entries :]
         print(f"[SYSTEM-LOG:{category.upper()}] {message}")
 
-    def set_last_taapi_scan(self, pair, timeframe, signals, decision, candle):
+    def set_last_taapi_scan(self, pair, timeframe, signals, decision, candle, cost_aware=None):
         active = [s for s in signals if s.get("value", 0) != 0]
         bullish = [s["pattern"] for s in active if s["value"] == 1]
         bearish = [s["pattern"] for s in active if s["value"] == -1]
@@ -42,6 +42,7 @@ class SystemLogStore:
                 "low": candle.get("low"),
                 "close_time": candle.get("close_time"),
             },
+            "cost_aware": cost_aware,
         }
         action = decision.get("action", "UNKNOWN")
         reason = decision.get("reason") or decision.get("pattern") or ""
