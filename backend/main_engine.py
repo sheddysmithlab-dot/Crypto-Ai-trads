@@ -34,7 +34,7 @@ BYBIT_KLINE_INTERVAL = {
 
 
 # Auto-order sizing: 2% of total wallet equity per TAAPI-fired trade.
-AUTO_TRADE_CAPITAL_PCT = 0.02
+AUTO_TRADE_CAPITAL_PCT = 0.10
 
 
 class TradingEngine:

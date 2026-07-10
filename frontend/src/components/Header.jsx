@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import NotificationsDropdown from './NotificationsDropdown';
+import BotHelpModal from './BotHelpModal';
 import { fmtNum } from '../data/pairs';
 import { useClickOutside } from '../hooks/useClickOutside';
 
@@ -37,6 +38,7 @@ export default function Header({
   username,
 }) {
   const [profileOpen, setProfileOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const profileRef = useRef(null);
   useClickOutside(profileRef, () => setProfileOpen(false), profileOpen);
 
@@ -61,6 +63,15 @@ export default function Header({
           Ai
         </div>
         <h1 className="text-sm lg:text-base font-bold tracking-wider">AI TRADING BOT</h1>
+        <button
+          type="button"
+          onClick={() => setHelpOpen(true)}
+          className="w-5 h-5 rounded-full border border-gray-400 dark:border-gray-500 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-blue-500 dark:hover:text-blue-400 text-[11px] font-bold leading-none flex items-center justify-center transition"
+          title="How does this bot work?"
+          aria-label="How does this bot work?"
+        >
+          ?
+        </button>
       </div>
 
       {/* Desktop Stats Strip */}
@@ -186,6 +197,8 @@ export default function Header({
           )}
         </div>
       </div>
+
+      <BotHelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
     </header>
   );
 }

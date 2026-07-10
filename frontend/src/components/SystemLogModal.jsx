@@ -522,8 +522,16 @@ export default function SystemLogModal({
               <dl className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
                 <div>
                   <dt className="text-gray-500">Status</dt>
-                  <dd className={tradeFire.success ? 'text-green-400 font-bold' : 'text-red-400 font-bold'}>
-                    {tradeFire.success ? 'FIRED' : 'FAILED'}
+                  <dd
+                    className={`font-bold ${
+                      tradeFire.success
+                        ? 'text-green-400'
+                        : tradeFire.skipped || tradeFire.status === 'SKIPPED' || tradeFire.status === 'BLOCKED'
+                          ? 'text-amber-400'
+                          : 'text-red-400'
+                    }`}
+                  >
+                    {tradeFire.status || (tradeFire.success ? 'FIRED' : 'FAILED')}
                   </dd>
                 </div>
                 <div>
@@ -546,7 +554,7 @@ export default function SystemLogModal({
                   <div>
                     <dt className="text-gray-500">Size</dt>
                     <dd className="text-gray-200">
-                      ${Number(tradeFire.position_usd).toLocaleString()} ({tradeFire.capital_pct || 2}% capital)
+                      ${Number(tradeFire.position_usd).toLocaleString()} ({tradeFire.capital_pct || 10}% capital)
                     </dd>
                   </div>
                 ) : null}
@@ -563,9 +571,33 @@ export default function SystemLogModal({
                   <dd className="text-gray-200">{formatTime(tradeFire.timestamp)}</dd>
                 </div>
                 {tradeFire.error ? (
-                  <div className="col-span-2 sm:col-span-4 mt-1 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2">
-                    <dt className="text-red-400 text-[10px] uppercase font-bold">Error</dt>
-                    <dd className="text-red-200 text-[11px] mt-1 break-words">{tradeFire.error}</dd>
+                  <div
+                    className={`col-span-2 sm:col-span-4 mt-1 rounded-lg border px-3 py-2 ${
+                      tradeFire.skipped || tradeFire.status === 'SKIPPED' || tradeFire.status === 'BLOCKED'
+                        ? 'border-amber-500/40 bg-amber-500/10'
+                        : 'border-red-500/40 bg-red-500/10'
+                    }`}
+                  >
+                    <dt
+                      className={`text-[10px] uppercase font-bold ${
+                        tradeFire.skipped || tradeFire.status === 'SKIPPED' || tradeFire.status === 'BLOCKED'
+                          ? 'text-amber-400'
+                          : 'text-red-400'
+                      }`}
+                    >
+                      {tradeFire.skipped || tradeFire.status === 'SKIPPED' || tradeFire.status === 'BLOCKED'
+                        ? 'Reason'
+                        : 'Error'}
+                    </dt>
+                    <dd
+                      className={`text-[11px] mt-1 break-words ${
+                        tradeFire.skipped || tradeFire.status === 'SKIPPED' || tradeFire.status === 'BLOCKED'
+                          ? 'text-amber-200'
+                          : 'text-red-200'
+                      }`}
+                    >
+                      {tradeFire.error}
+                    </dd>
                   </div>
                 ) : null}
               </dl>

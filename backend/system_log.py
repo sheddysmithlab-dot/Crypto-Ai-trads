@@ -52,17 +52,20 @@ class SystemLogStore:
             {"bullish": bullish, "bearish": bearish, "decision": decision},
         )
 
-    def set_last_trade_fire(self, payload: dict):
-        self.last_trade_fire = {**payload, "timestamp": time.time()}
-        status = "FIRED" if payload.get("success") else "FAILED"
+    def set_last_trade_fire(self, payload: dict, *, emit_log: bool = True):
+        if payload.get("success"):
+            status = "FIRED"
+        elif payload.get("skipped"):
+            status = "BLOCKED" if payload.get("cost_aware") else "SKIPPED"
+        else:
+            status = "FAILED"
+        self.last_trade_fire = {**payload, "status": status, "timestamp": time.time()}
+        if not emit_log:
+            return
         msg = f"{status}: {payload.get('action')} {payload.get('symbol')} | {payload.get('pattern', 'n/a')}"
         if not payload.get("success") and payload.get("error"):
             msg += f" — {payload.get('error')}"
-        self.push(
-            "trade",
-            msg,
-            payload,
-        )
+        self.push("trade", msg, self.last_trade_fire)
 
 
 system_log = SystemLogStore()

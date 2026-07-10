@@ -1290,9 +1290,9 @@ async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
     # startTime doubles as a unique, strictly-increasing per-candle id.
     return {"high": float(closed[2]), "low": float(closed[3]), "close_time": int(closed[0])}
 
-# TAAPI auto-order sizing: 2% of total portfolio value per fired trade.
-# Example: $1,000 capital -> $20 position -> ~0.00021 BTC @ $97,000.
-AUTO_TRADE_CAPITAL_PCT = 0.02
+# TAAPI auto-order sizing: 10% of total portfolio value per fired trade.
+# Example: $1,000 capital -> $100 position -> ~0.00103 BTC @ $97,000.
+AUTO_TRADE_CAPITAL_PCT = 0.10
 
 
 def qty_decimals_for_price(price: float) -> int:
@@ -1308,7 +1308,7 @@ def qty_decimals_for_price(price: float) -> int:
 
 def compute_auto_trade_plan(agent, price: float | None = None) -> dict | None:
     """ Single source of truth for TAAPI auto entries.
-    Returns USD notional (2% of total capital), base-asset qty, and margin. """
+    Returns USD notional (10% of total capital), base-asset qty, and margin. """
     entry_price = _sanitize_market_price(price if price is not None else agent.current_price)
     if entry_price is None:
         return None
@@ -1351,16 +1351,25 @@ def compute_order_qty(position_size_usd, current_price, qty_decimals=None):
 
 
 def _log_trade_skip(action: str, symbol: str, pattern: str | None, reason: str, **extra):
-    """ Surface silent auto-entry failures in the System Log modal. """
-    system_log.set_last_trade_fire({
-        "success": False,
-        "action": action,
-        "symbol": symbol,
-        "pattern": pattern,
-        "error": reason,
-        **extra,
-    })
-    system_log.push("trade", f"SKIPPED: {action} {symbol} — {reason}", {"pattern": pattern, **extra})
+    """Surface auto-entry skips in the System Log modal (one line per event)."""
+    cost_aware = extra.get("cost_aware")
+    system_log.set_last_trade_fire(
+        {
+            "success": False,
+            "skipped": True,
+            "action": action,
+            "symbol": symbol,
+            "pattern": pattern,
+            "error": reason,
+            **extra,
+        },
+        emit_log=False,
+    )
+    if cost_aware:
+        msg = f"SKIPPED (cost-aware): {action} {symbol} | {pattern or 'n/a'} — {reason}"
+    else:
+        msg = f"SKIPPED: {action} {symbol} — {reason}"
+    system_log.push("trade", msg, {"pattern": pattern, **extra})
     print(f"[AUTO BUY LOOP] Trade skipped: {reason}")
 
 def taapi_action_to_trade_side(taapi_action: str) -> str:
@@ -1749,11 +1758,6 @@ async def auto_buy_loop():
         if cost_aware.get("would_block") and not cost_aware.get("dry_run"):
             reason = cost_aware.get("block_reason") or "Cost-aware entry gate blocked weak signal."
             _log_trade_skip(result["action"], bybit_symbol, result.get("pattern"), reason, cost_aware=cost_aware)
-            system_log.push(
-                "trade",
-                f"SKIPPED (cost-aware): {result['action']} {bybit_symbol} | {result.get('pattern')} — {reason}",
-                {"pattern": result.get("pattern"), "cost_aware": cost_aware},
-            )
             continue
 
         if cost_aware.get("would_block") and cost_aware.get("dry_run"):

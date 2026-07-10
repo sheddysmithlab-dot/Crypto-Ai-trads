@@ -72,13 +72,6 @@ export default function ControlBar({ botIsActive, uptime, lastUpdated, onClick, 
           <span className="text-gray-800 dark:text-gray-200 font-bold">{lastUpdated}</span>
         </div>
       </div>
-
-      {botIsActive ? (
-        <p className="text-[10px] sm:text-xs text-center text-emerald-600 dark:text-emerald-400 max-w-lg leading-relaxed">
-          <i className="fas fa-cloud mr-1" />
-          Bot Render server par chal raha hai — browser ya PC band kar sakte hain. Dubara login karke wahi running state dikhegi.
-        </p>
-      ) : null}
     </div>
   );
 }

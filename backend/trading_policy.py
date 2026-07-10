@@ -10,7 +10,7 @@ import os
 from taapi_scanner import TIMEFRAME_RULES
 
 _DEFAULT_LAMBDA = 2.0
-_DEFAULT_MIN_CANDLE_RANGE = 1.0
+_DEFAULT_MIN_CANDLE_RANGE = 0.5
 
 
 def _env_bool(name: str, default: bool) -> bool:
