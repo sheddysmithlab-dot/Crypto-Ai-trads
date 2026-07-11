@@ -1,10 +1,8 @@
 // Only two states ever for the main button: green START AI AUTOMATION
 // (inactive) or red STOP AI AUTOMATION (active) - no transient
 // "starting/stopping/halted" states in between.
-// BUY/SELL flank buttons are the OPPOSITE of automation: enabled by default
-// (manual trading while automation is off), disabled once START is clicked
-// (automation is running, so manual entry/exit is locked out to avoid
-// conflicting with the bot). Their underlying working policy is unchanged.
+// BUY/SELL flank buttons open manual LONG / SHORT while automation is off.
+// Disabled once START is clicked so manual entries do not conflict with the bot.
 export default function ControlBar({ botIsActive, uptime, lastUpdated, onClick, onManualBuy, onManualSell }) {
   const colorClasses = botIsActive
     ? 'bg-red-600 hover:bg-red-700 active:bg-red-800 shadow-[0_0_20px_rgba(220,38,38,0.6)] hover:shadow-[0_0_25px_rgba(220,38,38,0.8)]'
@@ -21,7 +19,7 @@ export default function ControlBar({ botIsActive, uptime, lastUpdated, onClick, 
           className={`${sideButtonBase} ${botIsActive ? sideButtonDisabled : 'bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600'}`}
           onClick={onManualBuy}
           disabled={botIsActive}
-          title="Manual BUY - opens a new 1% margin position (100x leverage)"
+          title="Manual BUY — opens LONG (1% margin, 100x leverage)"
         >
           <i className="fas fa-arrow-up"></i>
           BUY
@@ -47,7 +45,7 @@ export default function ControlBar({ botIsActive, uptime, lastUpdated, onClick, 
           className={`${sideButtonBase} ${botIsActive ? sideButtonDisabled : 'bg-orange-500 hover:bg-orange-400 active:bg-orange-600'}`}
           onClick={onManualSell}
           disabled={botIsActive}
-          title="Manual SELL - closes your best-performing (or least-losing) manually-opened trade"
+          title="Manual SELL — opens SHORT (1% margin, 100x leverage)"
         >
           <i className="fas fa-arrow-down"></i>
           SELL

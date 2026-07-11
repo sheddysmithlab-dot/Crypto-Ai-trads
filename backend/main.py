@@ -1976,6 +1976,24 @@ async def auto_buy_loop():
 
         position_size_usd = plan["position_usd"]
         qty = plan["qty"]
+        max_notional = round(balance * agent.margin_pct * agent.leverage, 2)
+        if max_notional > 0 and position_size_usd > max_notional:
+            print(
+                f"[AUTO BUY LOOP] Capping notional ${position_size_usd:,.2f} -> "
+                f"${max_notional:,.2f} (1% margin × {agent.leverage}x on ${balance:,.2f} equity)."
+            )
+            position_size_usd = max_notional
+            qty = compute_order_qty(
+                position_size_usd,
+                float(entry_px),
+                qty_decimals=qty_decimals_for_price(float(entry_px)),
+            )
+            if not qty or qty <= 0:
+                _log_trade_skip(
+                    result["action"], bybit_symbol, result.get("pattern"),
+                    "Capped position size produced zero qty.",
+                )
+                continue
         tp_px = result.get("tp") or plan.get("tp")
         log_trade_execution(
             "LONG" if result["action"] == "BUY" else "SHORT",
@@ -2228,23 +2246,28 @@ class ManualSellPayload(BaseModel):
 
 @app.post("/open-trade")
 async def open_trade(payload: OpenTradePayload):
-    """ Manual BUY button: opens an additional 1%-margin/100x position on the currently
-    active pair while AI automation is OFF. Every click books one more trade tagged
-    "manual" so the SELL button only ever closes these, never auto trades. """
+    """Manual BUY/SELL buttons: open LONG or SHORT (1% margin / 100x) on the active
+    pair while AI automation is OFF. Each click adds one manual position."""
     side = payload.side.upper() if payload.side.upper() in ("LONG", "SHORT") else "LONG"
     if agent.emergency_triggered:
         return {"status": "error", "message": "Cannot open a position - emergency halt is active."}
     if agent.is_active:
-        return {"status": "error", "message": "Stop AI automation before using manual BUY."}
+        return {"status": "error", "message": "Stop AI automation before manual BUY/SELL."}
     if len(agent.trades) >= agent.max_concurrent_trades:
         return {"status": "error", "message": f"Max concurrent trades ({agent.max_concurrent_trades}) reached."}
 
-    trade = agent.open_trade(side, reason="Manual BUY button", source="manual")
+    label = "BUY (LONG)" if side == "LONG" else "SELL (SHORT)"
+    trade = agent.open_trade(side, reason=f"Manual {label} button", source="manual")
     if trade is None:
         if agent._live_insufficient_balance():
             return {"status": "error", "message": "Insufficient balance on your Bybit account."}
         return {"status": "error", "message": "Could not open a manual position."}
-    return {"status": "success", "message": f"Manual BUY filled on {agent.active_pair}.", "trade": trade, "pair": agent.active_pair}
+    return {
+        "status": "success",
+        "message": f"Manual {side} filled on {agent.active_pair}.",
+        "trade": trade,
+        "pair": agent.active_pair,
+    }
 
 @app.post("/manual-sell")
 async def manual_sell(payload: ManualSellPayload = ManualSellPayload()):
@@ -2566,6 +2589,9 @@ async def portfolio_feed(websocket: WebSocket):
             # RULE 6: current_capital now only changes via REALIZED trade P&L (execute_sell /
             # trigger_emergency_exit), never a random walk - this is the true capital ledger.
             total_value = agent.get_total_portfolio_value()
+            unrealized_net = agent.get_unrealized_net_usd()
+            margin_in_use = sum(float(t.get("margin") or 0) for t in agent.trades)
+            trade_notional = sum(float(t.get("position_size") or 0) for t in agent.trades)
             # Daily profit = vs paper-account starting capital (lifetime account P&L).
             daily_profit = total_value - agent.starting_capital
             daily_profit_pct = (daily_profit / agent.starting_capital) * 100 if agent.starting_capital else 0
@@ -2594,6 +2620,9 @@ async def portfolio_feed(websocket: WebSocket):
             payload = {
                 "capital": round(agent.current_capital, 2),
                 "total_portfolio_value": round(total_value, 2),
+                "unrealized_net_usd": round(unrealized_net, 2),
+                "margin_in_use": round(margin_in_use, 2),
+                "trade_notional": round(trade_notional, 2),
                 "trading_mode": bybit_api.mode,
                 "daily_profit": round(daily_profit, 2),
                 "daily_profit_pct": round(daily_profit_pct, 2),

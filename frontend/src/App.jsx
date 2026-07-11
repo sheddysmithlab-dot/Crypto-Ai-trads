@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAuth } from './hooks/useAuth.jsx';
 import { authFetch } from './config/api';
 import { debugLog } from './config/debug';
@@ -38,7 +38,6 @@ export default function App() {
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const [startConfirmOpen, setStartConfirmOpen] = useState(false);
   const [pendingConfig, setPendingConfig] = useState(null);
-  const [manualCapital, setManualCapital] = useState(null);
   const [logModalOpen, setLogModalOpen] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState(null);
   const [systemLogs, setSystemLogs] = useState(null);
@@ -189,28 +188,49 @@ export default function App() {
     }
   }
 
-  function requestManualSell() {
-    setExitConfirm({ open: true, type: 'manual-sell', tradeId: null });
-  }
-
-  async function handleManualSellConfirm() {
-    setExitConfirm({ open: false, type: null, tradeId: null });
-    pushActionLog('Manual SELL confirmed. Sending request to backend.');
-    debugLog('Manual SELL confirmed. Sending POST /manual-sell to Backend...');
+  async function handleManualBuy() {
+    pushActionLog('Manual BUY (LONG) clicked. Sending open-trade request.');
+    debugLog('Manual BUY (LONG) clicked. Sending POST /open-trade to Backend...');
     try {
-      const res = await authFetch('/manual-sell', {
+      const res = await authFetch('/open-trade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ confirmed: true }),
+        body: JSON.stringify({ side: 'LONG' }),
       });
       const data = await res.json();
       if (data.status === 'error') {
-        console.error('Manual SELL failed:', data.message);
+        console.error('Manual LONG failed:', data.message);
+        if (data.message?.toLowerCase().includes('insufficient')) {
+          window.alert(data.message);
+        }
       } else {
-        debugLog(data.message || 'Manual SELL executed.');
+        debugLog(data.message || 'Manual LONG executed.');
       }
     } catch (err) {
-      console.error('Manual sell failed:', err);
+      console.error('Manual LONG failed:', err);
+    }
+  }
+
+  async function handleManualSell() {
+    pushActionLog('Manual SELL (SHORT) clicked. Sending open-trade request.');
+    debugLog('Manual SELL (SHORT) clicked. Sending POST /open-trade to Backend...');
+    try {
+      const res = await authFetch('/open-trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ side: 'SHORT' }),
+      });
+      const data = await res.json();
+      if (data.status === 'error') {
+        console.error('Manual SHORT failed:', data.message);
+        if (data.message?.toLowerCase().includes('insufficient')) {
+          window.alert(data.message);
+        }
+      } else {
+        debugLog(data.message || 'Manual SHORT executed.');
+      }
+    } catch (err) {
+      console.error('Manual SHORT failed:', err);
     }
   }
 
@@ -219,21 +239,9 @@ export default function App() {
       pushActionLog(`Force close confirmed for trade #${exitConfirm.tradeId}.`);
       return handleForceCloseConfirm();
     }
-    if (exitConfirm.type === 'manual-sell') {
-      pushActionLog('Manual sell confirmed from exit confirmation popup.');
-      return handleManualSellConfirm();
-    }
   }
 
   const exitConfirmCopy = (() => {
-    if (exitConfirm.type === 'manual-sell') {
-      return {
-        title: 'Confirm Manual SELL?',
-        message: 'Yeh action aapki best manual position ko market par close karega. Profit ya loss lock ho jayega.',
-        detail: 'Sirf manually opened trades close hongi — AI trades touch nahi hongi.',
-        confirmLabel: 'Sell Position',
-      };
-    }
     if (exitConfirm.type === 'force-close') {
       const trade = trades.find((t) => t.id === exitConfirm.tradeId);
       return {
@@ -248,48 +256,19 @@ export default function App() {
     return { title: '', message: '', confirmLabel: 'Confirm' };
   })();
 
-  async function handleManualBuy() {
-    pushActionLog('Manual BUY button clicked. Sending open-trade request.');
-    debugLog('Manual BUY button clicked. Sending POST /open-trade to Backend...');
-    try {
-      const res = await authFetch('/open-trade', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ side: 'LONG' }),
-      });
-      const data = await res.json();
-      if (data.status === 'error') {
-        console.error('Manual BUY failed:', data.message);
-        if (data.message?.toLowerCase().includes('insufficient')) {
-          window.alert(data.message);
-        }
-      } else {
-        debugLog(data.message || 'Manual BUY executed.');
-      }
-    } catch (err) {
-      console.error('Manual buy failed:', err);
-    }
-  }
-
-  async function handleManualSell() {
-    requestManualSell();
-  }
-
-  const grossCapital = manualCapital ?? portfolio.totalCapital;
-  const tradeValue = useMemo(
-    () =>
-      trades.reduce((sum, t) => {
+  // Total equity from backend WS (cash ledger + open unrealized net). Never subtract notional.
+  const totalEquity = portfolio.totalCapital;
+  const tradeValue = portfolio.tradeNotional > 0
+    ? portfolio.tradeNotional
+    : trades.reduce((sum, t) => {
         if (t.status === 'sold') return sum;
         return sum + (Number(t.position_size) || 0);
-      }, 0),
-    [trades],
-  );
-  const displayCapital = grossCapital - tradeValue;
+      }, 0);
 
   return (
     <div className="min-h-screen flex flex-col">
       <Header
-        totalCapital={displayCapital}
+        totalCapital={totalEquity}
         tradeValue={tradeValue}
         dailyProfit={portfolio.dailyProfit}
         dailyProfitPct={portfolio.dailyProfitPct}
@@ -315,7 +294,7 @@ export default function App() {
       />
 
       <MobilePortfolioCard
-        totalCapital={displayCapital}
+        totalCapital={totalEquity}
         tradeValue={tradeValue}
         dailyProfit={portfolio.dailyProfit}
         seasonProfit={portfolio.seasonProfit}
@@ -356,8 +335,10 @@ export default function App() {
       <PaperTradingModal
         open={paperModalOpen}
         onClose={() => setPaperModalOpen(false)}
-        currentCapital={grossCapital}
-        onCapitalSet={(capital) => setManualCapital(capital)}
+        currentCapital={totalEquity}
+        onCapitalSet={() => {
+          /* Backend /ws/portfolio pushes the reset equity after save. */
+        }}
         isLive={portfolio.tradingMode === 'LIVE_TRADING'}
       />
 

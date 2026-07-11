@@ -78,11 +78,11 @@ export default function Header({
       <div className="hidden lg:flex space-x-6 text-sm">
         <div className="flex flex-col">
           <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Total Capital</span>
-          <span className="font-bold text-sm">${capStr}</span>
+          <span className="font-bold text-sm" title="Account equity (cash + open unrealized net)">${capStr}</span>
         </div>
         <div className="flex flex-col">
           <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Trade Value</span>
-          <span className="font-bold text-sm text-amber-500">${tradeValStr}</span>
+          <span className="font-bold text-sm text-amber-500" title="Total open notional exposure">${tradeValStr}</span>
         </div>
         <div className="flex flex-col">
           <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Daily Profit</span>

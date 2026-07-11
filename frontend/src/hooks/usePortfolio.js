@@ -5,6 +5,10 @@ import { backendWsUrl } from '../config/api';
 export function usePortfolio(setConnected) {
   const [portfolio, setPortfolio] = useState({
     totalCapital: 0,
+    cashLedger: 0,
+    unrealizedNetUsd: 0,
+    marginInUse: 0,
+    tradeNotional: 0,
     dailyProfit: 0,
     dailyProfitPct: 0,
     seasonProfit: 0,
@@ -28,6 +32,10 @@ export function usePortfolio(setConnected) {
 
         setPortfolio({
           totalCapital: data.total_portfolio_value,
+          cashLedger: data.capital,
+          unrealizedNetUsd: data.unrealized_net_usd ?? 0,
+          marginInUse: data.margin_in_use ?? 0,
+          tradeNotional: data.trade_notional ?? 0,
           dailyProfit: data.daily_profit,
           dailyProfitPct: data.daily_profit_pct,
           seasonProfit: data.ai_season_profit ?? 0,
