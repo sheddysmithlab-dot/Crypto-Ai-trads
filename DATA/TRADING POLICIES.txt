@@ -32,5 +32,11 @@ Signals fire **once per closed candle** only. Data: **Bybit LINEAR klines**.
 - **MOM-L / MOM-S** — body ≥ 2× expected (1:2 R:R)
 
 ## Execution
-- Entry at close; SL at candle extreme ± 0.1%; TP per rule R:R (1:1 or 1:2)
-- Size: 1% balance risked to SL
+- Entry at close; SL stored for sizing/logs only — **no automatic SL exit**
+- **Profit book (stepped lock):**
+  - Activate at **+0.15% gross**
+  - Lock steps every **+0.02%**: +0.17% → +0.19% → +0.21% … (continues as price rises)
+  - **Sell** when price retreats to the **previous lock step** (e.g. lock at +0.24% → sell at +0.22%)
+  - **Hard floor:** never sell below **+0.15%** under any condition
+- R:R TP levels stored for reference; exit is trailing-lock driven
+- Size: 1% balance risked to SL distance (reference only for qty)

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 UVSS_POLICIES_ENABLED = True
 UVSS_COST_AWARE_ENTRY = False
+UVSS_SL_EXIT_ENABLED = False  # SL is sizing/reference only — never auto-close on SL
 RATIO_PERIOD = 30
 SWEEP_LOOKBACK = 20
 EMA_FAST = 50

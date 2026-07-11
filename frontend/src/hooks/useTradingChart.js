@@ -395,12 +395,12 @@ export function useTradingChart({
       }
     }
     trailingLockLineRef.current = series.createPriceLine({
-      price: basePrice * 1.0008,
+      price: basePrice * 1.0015,
       color: '#3b82f6',
       lineWidth: 2,
       lineStyle: LineStyle.Dashed,
       axisLabelVisible: true,
-      title: 'Lock +0.08',
+      title: 'Lock +0.15%',
     });
   }, []);
 

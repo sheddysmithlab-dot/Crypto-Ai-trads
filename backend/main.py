@@ -49,7 +49,7 @@ from volume_spread_system import (
     RR_RATIO,
 )
 from bybit_executor import BybitAgent
-from trading_policy import evaluate_cost_aware_entry, get_effective_exit_floor_pct
+from trading_policy import evaluate_cost_aware_entry
 
 from pathlib import Path
 
@@ -558,16 +558,20 @@ bybit_api = BybitAPIWrapper()
 # PILLAR 3: CORE AI AGENT LOGIC (State & Rules)
 # ==========================================
 class AITradingAgent:
-    # Gross profit floor per chart TF (fees included). Instant fixed TP: close as soon as gross >= floor.
-    TRAILING_DROP_PCT = 0.30  # legacy; profit book is fixed-TP only (no trail wait)
+    # Stepped profit book: activate +0.15%, lock steps +0.02% (0.17→0.19→…),
+    # sell when price retreats to previous lock step; never sell below +0.15%.
+    PROFIT_LOCK_ACTIVATION_GROSS_PCT = 0.15
+    PROFIT_LOCK_STEP_GROSS_PCT = 0.02
+    PROFIT_LOCK_TRAIL_DROP_GROSS_PCT = 0.02  # alias: one step back to sell
+    TRAILING_DROP_PCT = 0.02
     PROFIT_FLOOR_BY_TIMEFRAME = {
-        "1m": 0.20,
-        "5m": 0.40,
-        "15m": 0.60,
-        "1h": 0.80,
-        "1D": 1.0,
+        "1m": 0.15,
+        "5m": 0.15,
+        "15m": 0.15,
+        "1h": 0.15,
+        "1D": 0.15,
     }
-    PROFIT_FLOOR_PCT = 0.20      # default fallback (1m chart)
+    PROFIT_FLOOR_PCT = 0.15
 
     def __init__(self):
         self.is_active = False
@@ -616,9 +620,82 @@ class AITradingAgent:
         self.timeframe_seconds = 60
 
     def get_profit_floor_pct(self):
-        """ Gross-profit floor for instant fixed TP (fees included in threshold). """
+        """Activation gross-% for the trailing profit lock (0.15% default)."""
         key = SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
         return self.PROFIT_FLOOR_BY_TIMEFRAME.get(key, self.PROFIT_FLOOR_PCT)
+
+    def _sync_agent_trailing_lock_state(self):
+        """Mirror per-trade lock/peak to agent-level fields for WS + UI."""
+        auto = [t for t in self.trades if t.get("source") != "manual"]
+        if not auto:
+            self.is_lock_active = False
+            self.peak_net_pct = 0.0
+            return
+        self.is_lock_active = any(t.get("is_lock_active") for t in auto)
+        locked_peaks = [
+            float(t.get("peak_gross_pct") or 0)
+            for t in auto
+            if t.get("is_lock_active")
+        ]
+        if locked_peaks:
+            self.peak_net_pct = max(locked_peaks)
+        else:
+            self.peak_net_pct = max(float(t.get("peak_gross_pct") or 0) for t in auto)
+
+    def _evaluate_stepped_profit_lock(self, trade: dict, gross: float, net: float) -> str | None:
+        """Stepped lock from peak: activate +0.15%, each peak+k*0.02% is a lock step,
+        sell when price retreats to prior step (never below +0.15%)."""
+        act = self.PROFIT_LOCK_ACTIVATION_GROSS_PCT
+        step = self.PROFIT_LOCK_STEP_GROSS_PCT
+        min_sell = act
+
+        prev_peak = float(trade.get("peak_gross_pct") or 0.0)
+        if gross > prev_peak:
+            trade["peak_gross_pct"] = gross
+            trade["peak_net_pct"] = max(float(trade.get("peak_net_pct") or 0.0), net)
+        peak = float(trade.get("peak_gross_pct") or 0.0)
+
+        if gross < act:
+            return None
+
+        if not trade.get("is_lock_active"):
+            trade["is_lock_active"] = True
+            trade["lock_level_pct"] = act
+            notifications.push(
+                f"Profit lock ON #{trade['id']} @ +{gross:.3f}% "
+                f"(peak+0.02% steps, sell prior step, floor +{min_sell:.2f}%).",
+                "success",
+            )
+            system_log.push(
+                "agent",
+                f"Profit lock #{trade['id']} +{gross:.3f}%",
+                {"trade_id": trade["id"], "peak_gross_pct": gross},
+            )
+
+        lock_level = float(trade.get("lock_level_pct") or act)
+        prev_lock = lock_level
+        base = prev_peak if prev_peak >= act else act
+        milestone = base + step
+        while gross + 1e-9 >= milestone:
+            lock_level = milestone
+            milestone += step
+        trade["lock_level_pct"] = lock_level
+
+        if lock_level > prev_lock:
+            notifications.push(
+                f"Lock step #{trade['id']} → +{lock_level:.2f}% (sell if back to +{max(min_sell, lock_level - step):.2f}%).",
+                "info",
+            )
+
+        sell_trigger = max(min_sell, lock_level - step)
+        if gross < min_sell:
+            return None
+        if gross < peak and gross <= sell_trigger + 1e-9:
+            return (
+                f"Profit Book #{trade['id']}: peak +{peak:.3f}% lock +{lock_level:.2f}% "
+                f"-> +{gross:.3f}% (sell step +{sell_trigger:.2f}%). Market close."
+            )
+        return None
 
     def _trade_metrics(self, t):
         """ RULE 6: True Net Profit = Gross Profit - (Entry Fee + Estimated Exit Fee).
@@ -900,6 +977,7 @@ class AITradingAgent:
             "opened_at": time.time(),
             "peak_gross_pct": 0.0,
             "peak_net_pct": 0.0,
+            "lock_level_pct": None,
             "is_lock_active": False,
             "exchange": exchange,
             "bybit_symbol": bybit_symbol,
@@ -996,8 +1074,7 @@ class AITradingAgent:
         return snapshot
 
     async def process_tick(self, new_price, volume_increment):
-        """ Updates live price and books profit on auto trades when price hits
-        per-trade R:R TP (or SL), or legacy fixed floor when no TP is stored. """
+        """Updates live price; stepped profit lock (+0.15% on, +0.02% steps, sell prior step)."""
         clean_price = _sanitize_market_price(new_price)
         if clean_price is None:
             print(f"[PILLAR 3: AI AGENT] Ignoring invalid market tick: {new_price!r}")
@@ -1018,10 +1095,6 @@ class AITradingAgent:
         if not UVSS_POLICIES_ENABLED:
             return
 
-        floor = get_effective_exit_floor_pct(
-            self.get_profit_floor_pct(),
-            bybit_api.get_taker_fee_pct(),
-        )
         still_open = []
         for trade in self.trades:
             if trade.get("source") == "manual":
@@ -1029,51 +1102,14 @@ class AITradingAgent:
                 continue
 
             m = self._trade_metrics(trade)
-            gross = m["gross_pct"]
-            net = m["net_pct"]
-            tp_price = trade.get("tp_price")
-            sl_price = trade.get("sl_price")
-            side = trade.get("side", "LONG")
-
-            if tp_price is not None:
-                hit_tp = (side == "LONG" and clean_price >= tp_price) or (
-                    side == "SHORT" and clean_price <= tp_price
-                )
-                hit_sl = sl_price is not None and (
-                    (side == "LONG" and clean_price <= sl_price)
-                    or (side == "SHORT" and clean_price >= sl_price)
-                )
-                if hit_tp:
-                    mult = trade.get("target_mult") or "?"
-                    reason = (
-                        f"R:R TP #{trade['id']} ({mult}x): price {clean_price:,.4f} "
-                        f"hit TP {tp_price:,.4f} (gross {gross:.3f}%, net {net:.3f}%)"
-                    )
-                    if self._close_single_trade(trade, m, reason):
-                        continue
-                elif hit_sl:
-                    reason = (
-                        f"SL #{trade['id']}: price {clean_price:,.4f} hit SL {sl_price:,.4f} "
-                        f"(gross {gross:.3f}%, net {net:.3f}%)"
-                    )
-                    if self._close_single_trade(trade, m, reason):
-                        continue
-                still_open.append(trade)
+            reason = self._evaluate_stepped_profit_lock(trade, m["gross_pct"], m["net_pct"])
+            if reason and self._close_single_trade(trade, m, reason):
                 continue
-
-            if gross >= floor:
-                reason = (
-                    f"Fixed TP #{trade['id']}: +{gross:.3f}% gross fired "
-                    f"(floor {floor:.2f}% incl. fees, net {net:.3f}%)"
-                )
-                if self._close_single_trade(trade, m, reason):
-                    continue
 
             still_open.append(trade)
 
         self.trades = still_open
-        self.is_lock_active = False
-        self.peak_net_pct = 0.0
+        self._sync_agent_trailing_lock_state()
 
     def _close_single_trade(self, trade, metrics, reason) -> bool:
         """Close one position. Returns True if closed locally (and on Bybit when applicable)."""
@@ -1500,7 +1536,8 @@ def agent_policy_summary() -> str:
             else "Bybit TESTNET linear (real open/close)"
         )
         return (
-            f"Blue Box + VSA + Marubozu | EMA 50/200 + 200 VSA trend | 1:1/1:2 R:R | "
+            f"Blue Box + VSA + Marubozu | stepped profit lock +0.15% (+0.02% steps, "
+            f"sell prior step, floor +0.15%, no SL exit) | "
             f"risk {RISK_PCT_PER_TRADE * 100:.0f}% of balance per trade | {exec_mode}"
         )
     return "Auto trade policies not active."
@@ -2003,8 +2040,8 @@ async def market_simulator():
 
 async def binance_price_feed():
     """ Keeps agent.current_price tracking REAL Bybit spot lastPrice every ~1.5s.
-    ALWAYS calls process_tick on each successful poll so fixed-TP profit
-    booking never freeze when recent-trade has no new prints between polls.
+    ALWAYS calls process_tick on each successful poll so trailing profit
+    booking never freezes when recent-trade has no new prints between polls.
     (Volume is unused for entries; TAAPI candle scans drive entries.) """
     global _last_real_feed_update
     print("[MARKET FEED] Background task starting (Bybit spot ticker poll, ~1.5s).")
@@ -2116,7 +2153,7 @@ async def start_bot():
         notifications.push(f"AI Agent STARTED - now monitoring {agent.active_pair} live.", "success")
     return {
         "status": "success",
-        "message": "Bot active & fixed-TP profit book initialized.",
+        "message": "Bot active & stepped profit-lock (+0.15% / +0.02% steps) initialized.",
         "open_positions": open_count,
         "trade_history_count": len(agent.trade_history),
     }
