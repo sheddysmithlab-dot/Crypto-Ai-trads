@@ -33,6 +33,7 @@ Signals fire **once per closed candle** only. Data: **Bybit LINEAR klines**.
 
 ## Execution
 - Entry at close; SL stored for sizing/logs only — **no automatic SL exit**
+- BUY button = manual LONG | SELL button = manual SHORT (automation OFF only)
 - **Profit book (stepped lock):**
   - Activate at **+0.15% gross**
   - Lock steps every **+0.02%**: +0.17% → +0.19% → +0.21% … (continues as price rises)

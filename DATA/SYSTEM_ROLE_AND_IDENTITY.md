@@ -105,4 +105,4 @@ You are an **autonomous AI Trading Agent**. Your primary objective is to scan ma
 | Discount / Premium filter | 200 EMA trend + zone rules in VSA |
 | Profit book | Stepped lock +0.15% / +0.02% trail |
 
-See also: `DATA/TRADING POLICIES.txt`, `DATA/SMC_ICT_MARKET_STRUCTURE.md`, `STRATEGY.md`.
+See also: `DATA/TRADING POLICIES.txt`, `DATA/SMC_ICT_MARKET_STRUCTURE.md`, `DATA/FIB_LIQUIDITY_CONFIRMATION.md`, `STRATEGY.md`.

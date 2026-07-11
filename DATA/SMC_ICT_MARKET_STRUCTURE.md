@@ -97,4 +97,4 @@ You are an **Advanced Autonomous AI Trading Agent** specializing in **Smart Mone
 | Pullback continuation | Marubozu MBZ-L / MBZ-S |
 | Wick vs body trap filter | Blue Box sweep + close validation |
 
-See also: `DATA/SYSTEM_ROLE_AND_IDENTITY.md` (Note 1 framework).
+See also: `DATA/SYSTEM_ROLE_AND_IDENTITY.md` (Note 1), `DATA/FIB_LIQUIDITY_CONFIRMATION.md` (Note 3).

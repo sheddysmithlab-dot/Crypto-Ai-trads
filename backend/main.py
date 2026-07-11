@@ -1538,7 +1538,12 @@ def taapi_action_to_bybit_order_action(taapi_action: str) -> str:
 def load_system_role_text() -> str:
     """AI agent training corpus — loaded as system prompt (not exposed in UI)."""
     parts: list[str] = []
-    for name in ("SYSTEM_ROLE_AND_IDENTITY.md", "SMC_ICT_MARKET_STRUCTURE.md"):
+    for name in (
+        "SYSTEM_ROLE_AND_IDENTITY.md",
+        "SMC_ICT_MARKET_STRUCTURE.md",
+        "FIB_LIQUIDITY_CONFIRMATION.md",
+        "TREND_REVERSAL_PREMIUM.md",
+    ):
         path = _DATA_DIR / name
         if not path.is_file():
             continue
@@ -2619,6 +2624,20 @@ async def portfolio_feed(websocket: WebSocket):
             # Daily profit = vs paper-account starting capital (lifetime account P&L).
             daily_profit = total_value - agent.starting_capital
             daily_profit_pct = (daily_profit / agent.starting_capital) * 100 if agent.starting_capital else 0
+
+            if (
+                agent.is_active
+                and agent.daily_profit_target_pct > 0
+                and not agent.daily_target_reached
+                and not agent.emergency_triggered
+                and daily_profit_pct >= agent.daily_profit_target_pct
+            ):
+                agent.daily_target_reached = True
+                notifications.push(
+                    f"Daily profit target {agent.daily_profit_target_pct}% reached "
+                    f"({daily_profit_pct:.2f}%) — new auto entries halted.",
+                    "success",
+                )
 
             # AI Season profit = vs capital at the moment START AI AUTOMATION was clicked.
             if agent.ai_season_start_capital is not None and agent.is_active:

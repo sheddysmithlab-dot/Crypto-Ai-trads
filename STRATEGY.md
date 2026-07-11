@@ -1,8 +1,11 @@
 # AI Trading Bot — Full Strategy Reference
 
-> **System Role & Identity:** See [`DATA/SYSTEM_ROLE_AND_IDENTITY.md`](DATA/SYSTEM_ROLE_AND_IDENTITY.md) and [`DATA/SMC_ICT_MARKET_STRUCTURE.md`](DATA/SMC_ICT_MARKET_STRUCTURE.md) for AI agent training (SMC / ICT / market structure — not shown in UI).
+> **Authoritative live policy (code-verified):** **[TRADE_POLICY.md](TRADE_POLICY.md)** — start-to-end entry, exit, sizing, portfolio, safety.  
+> **AI training only (not UI):** Notes 1–4 in `DATA/*.md` (see `DATA/AI_AGENT.txt`).
 
-This document describes the **complete trading strategy** implemented in this repository as of the current codebase (`backend/main.py`, `volume_spread_system.py`, `trading_policy.py`, `bybit_executor.py`).
+> **Note:** Sections below are **legacy TAAPI-era** notes. The **active engine** is Blue Box + VSA + Marubozu — see `TRADE_POLICY.md`.
+
+This document retains historical reference. For the running bot see `TRADE_POLICY.md` and `volume_spread_system.py`.
 
 ---
 
