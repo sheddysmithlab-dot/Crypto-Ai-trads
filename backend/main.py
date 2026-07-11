@@ -53,6 +53,8 @@ from trading_policy import evaluate_cost_aware_entry
 
 from pathlib import Path
 
+_DATA_DIR = Path(__file__).resolve().parent.parent / "DATA"
+
 # Load backend/.env before any credential reads (cwd-safe path).
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -1527,6 +1529,17 @@ def taapi_action_to_bybit_order_action(taapi_action: str) -> str:
     return "BUY"
 
 
+def load_system_role_text() -> str:
+    """Full System Role & Identity doc for System Log / AI context."""
+    path = _DATA_DIR / "SYSTEM_ROLE_AND_IDENTITY.md"
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     if UVSS_POLICIES_ENABLED:
@@ -2471,6 +2484,7 @@ async def get_system_logs():
         "entries": system_log.entries[-60:],
         "notifications": notifications.notifications[-20:],
         "agent_chat": system_log.agent_chat[-20:],
+        "system_role": load_system_role_text(),
     }
 
 @app.get("/chart/24h")

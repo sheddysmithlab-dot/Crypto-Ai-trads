@@ -393,6 +393,17 @@ export default function SystemLogModal({
                 </div>
               </dl>
               <p className="text-[10px] text-gray-600 mt-3 leading-relaxed">{agent.policy}</p>
+              {systemLogs?.system_role ? (
+                <details className="mt-3 group">
+                  <summary className="text-[10px] font-bold text-blue-400 uppercase tracking-wider cursor-pointer list-none flex items-center gap-1">
+                    <i className="fas fa-chevron-right text-[8px] group-open:rotate-90 transition-transform" />
+                    System Role &amp; Identity (full)
+                  </summary>
+                  <pre className="mt-2 text-[10px] text-gray-400 leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto border border-gray-800 rounded-lg p-2 bg-black/20">
+                    {systemLogs.system_role}
+                  </pre>
+                </details>
+              ) : null}
             </div>
 
             <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">

@@ -1,30 +1,47 @@
-1. Intuitive Dashboard & Control Panel (UI)
-One-Click Start: Ek clear 'START' button hona chahiye. Is button par click karte hi Agent background me apni monitoring aur execution shuru kar de.
+# AI Trading Agent — System Role & Operations
 
-Live Visuals: Bybit API se directly connected live chart, jahan aapko current price ke sath-sath aapke active locks aur stop-loss lines real-time me dikhai dein.
+## System Role & Identity
 
-2. Advanced Dynamic Trailing Lock (Precision Execution)
-Yeh Agent ka sabse powerful feature hona chahiye, jo aapke profit ko secure kare aur market reverse hone par action le:
+You are an autonomous AI Trading Agent. Scan charts, analyze price action, execute Buy/Sell trades.
+Do NOT predict — strictly react to structural confirmations.
+Full framework: DATA/SYSTEM_ROLE_AND_IDENTITY.md
 
-Activation Point: Jaise hi price 0.07+ ko touch kare, system ka profit lock automatically activate ho jana chahiye.
+### Phase 1 — Area & Setup
+- HTF range: Discount 0–50% = LONG only | Premium 50–100% = SHORT only
+- London trap: Asian breakout → liquidity grab → reversal → retest entry
+- Measured move: strong trend → wait 30–70% pullback
 
-Step-by-Step Trailing: Jab price aur upar jaye (jaise 0.08, 0.09, 0.10), Agent apne lock ko us peak ke hisaab se upar shift karta rahe.
+### Phase 2 — Confirmation (mandatory before entry)
+- BUY: Sweep low → CHoCH → BOS → mitigate to demand/OB
+- SELL: Sweep high → CHoCH → BOS → mitigate to supply
+- Reject mitigation without BOS
+- Candle triggers: Hammer/Engulfing/Morning Star (buy) | Shooting star/rejection (sell)
+- Hold on Doji / Spinning Top
 
-Reversal Execution: Agar price peak touch karne ke baad niche aata hai, toh Agent peak se exactly 0.02 ke difference par sell order execute kar de. (Udaharan ke liye: Agar 0.10 touch kiya aur wapas 0.08 par aaya, toh sell lag jaye. Agar 0.09 touch kiya aur 0.07 par aaya, toh sell lag jaye).
+### Phase 3 — Execution
+- Retest + pin bar at broken level → execute
+- Monitor expansion (volume + candle speed)
+- SL behind structure (reference/sizing; no auto SL exit in bot)
+- TP: liquidity levels / measured move; active book = +0.15% lock, +0.02% steps
+- Log every trade to System Log
 
-Absolute Floor: Ek strict hardcoded rule hona chahiye ki kisi bhi condition me sell 0.05 se kam par nahi hoga. 0.05 minimum limit (last support) honi chahiye is strategy ki.
+### AI Instruction
+No FOMO. Missing any confirmation step → cancel setup, wait.
 
-3. Emergency Kill Switch (Global Portfolio Protection)
-Capital ko safe rakhne ke liye ek overriding safety feature:
+---
 
-2.5% Portfolio Stop-Loss: START button par click hone ke baad, Agent continuous total portfolio value ko monitor karega.
+## UI & Control Panel
+1. One-Click START — agent monitors and executes in background
+2. Live chart + locks from Bybit feed
+3. BUY button = manual LONG | SELL button = manual SHORT (automation OFF only)
 
-Unconditional Sell-All: Agar portfolio ki total value me kisi bhi waqt 2.5% ka loss (drop) dikhta hai, toh Agent bina kisi condition ke automatically "Sell All" trigger kar dega.
+## Profit Book (Active)
+- Activate lock at +0.15% gross per trade
+- Lock steps every +0.02% from peak
+- Sell when price retreats to previous lock step
+- Never sell below +0.15% gross
 
-Complete Halt: Sell execute hone ke baad system turant Emergency Exit le lega aur aage ki trading puri tarah stop kar dega, jab tak aap dobara command na dein.
-
-4. Real-Time Data Pipeline (Low Latency)
-WebSockets ka integration hona chahiye taki Bybit se har millisecond ka data fetch ho. Trailing logic me fractions (0.07, 0.08) par kaam karne ke liye API me delay nahi hona chahiye.
-
-5. Error Handling & Recovery
-Agar kisi wajah se internet disconnect hota hai ya Bybit ke server se timeout milta hai, toh Agent crash nahi hona chahiye. Woh automatically reconnect karke wahi se apna lock aur stop-loss track karna shuru kare jahan usne chhoda tha.
+## Emergency / Safety
+- Portfolio auto kill-switch: disabled (manual STOP only)
+- WebSocket reconnect — agent resumes lock state
+- Paper vs Live: PAPER simulates | LIVE reads Bybit equity

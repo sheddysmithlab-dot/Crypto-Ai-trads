@@ -1,6 +1,8 @@
 # AI Trading Bot — Full Strategy Reference
 
-This document describes the **complete trading strategy** implemented in this repository as of the current codebase (`backend/main.py`, `taapi_scanner.py`, `trading_policy.py`, `bybit_executor.py`).
+> **System Role & Identity:** See [`DATA/SYSTEM_ROLE_AND_IDENTITY.md`](DATA/SYSTEM_ROLE_AND_IDENTITY.md) for the full Phase 1–3 SMC framework (HTF zones, CHoCH/BOS, mitigation, execution rules).
+
+This document describes the **complete trading strategy** implemented in this repository as of the current codebase (`backend/main.py`, `volume_spread_system.py`, `trading_policy.py`, `bybit_executor.py`).
 
 ---
 
