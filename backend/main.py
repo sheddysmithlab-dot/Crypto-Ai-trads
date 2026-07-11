@@ -308,7 +308,7 @@ async def consult_ai_provider(context):
     messages = []
     system_role = load_system_role_text()
     if system_role:
-        messages.append({"role": "system", "content": system_role[:12000]})
+        messages.append({"role": "system", "content": system_role[:20000]})
     messages.append({"role": "user", "content": prompt})
 
     try:
@@ -1536,14 +1536,19 @@ def taapi_action_to_bybit_order_action(taapi_action: str) -> str:
 
 
 def load_system_role_text() -> str:
-    """Full System Role & Identity doc for System Log / AI context."""
-    path = _DATA_DIR / "SYSTEM_ROLE_AND_IDENTITY.md"
-    if not path.is_file():
-        return ""
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError:
-        return ""
+    """AI agent training corpus — loaded as system prompt (not exposed in UI)."""
+    parts: list[str] = []
+    for name in ("SYSTEM_ROLE_AND_IDENTITY.md", "SMC_ICT_MARKET_STRUCTURE.md"):
+        path = _DATA_DIR / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+            if text:
+                parts.append(text)
+        except OSError:
+            continue
+    return "\n\n---\n\n".join(parts)
 
 
 def agent_policy_summary() -> str:

@@ -1,6 +1,6 @@
 # AI Trading Bot — Full Strategy Reference
 
-> **System Role & Identity:** See [`DATA/SYSTEM_ROLE_AND_IDENTITY.md`](DATA/SYSTEM_ROLE_AND_IDENTITY.md) for the full Phase 1–3 SMC framework (HTF zones, CHoCH/BOS, mitigation, execution rules).
+> **System Role & Identity:** See [`DATA/SYSTEM_ROLE_AND_IDENTITY.md`](DATA/SYSTEM_ROLE_AND_IDENTITY.md) and [`DATA/SMC_ICT_MARKET_STRUCTURE.md`](DATA/SMC_ICT_MARKET_STRUCTURE.md) for AI agent training (SMC / ICT / market structure — not shown in UI).
 
 This document describes the **complete trading strategy** implemented in this repository as of the current codebase (`backend/main.py`, `volume_spread_system.py`, `trading_policy.py`, `bybit_executor.py`).
 
