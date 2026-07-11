@@ -305,6 +305,12 @@ async def consult_ai_provider(context):
         "Reply with ONLY the single word YES to confirm this BUY signal, or NO to reject it."
     )
 
+    messages = []
+    system_role = load_system_role_text()
+    if system_role:
+        messages.append({"role": "system", "content": system_role[:12000]})
+    messages.append({"role": "user", "content": prompt})
+
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
             resp = await client.post(
@@ -312,7 +318,7 @@ async def consult_ai_provider(context):
                 headers=headers,
                 json={
                     "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": messages,
                     "max_tokens": 5,
                     "temperature": 0,
                 },
@@ -2484,7 +2490,6 @@ async def get_system_logs():
         "entries": system_log.entries[-60:],
         "notifications": notifications.notifications[-20:],
         "agent_chat": system_log.agent_chat[-20:],
-        "system_role": load_system_role_text(),
     }
 
 @app.get("/chart/24h")
