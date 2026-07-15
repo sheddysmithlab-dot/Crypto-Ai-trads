@@ -1,0 +1,13 @@
+# Use when you upload ONLY built files (no source code).
+# 1) npm run build in frontend/
+# 2) copy frontend/dist/* → deploy/frontend/dist/
+# 3) docker compose -f docker-compose.dist.yml up -d --build
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dist
+    restart: unless-stopped
+    ports:
+      - "80:80"
