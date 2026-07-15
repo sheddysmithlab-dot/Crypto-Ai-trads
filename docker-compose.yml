@@ -1,0 +1,58 @@
+# Hostinger VPS Docker Manager — paste this file's raw GitHub URL in the Compose deploy form.
+# Repo: https://github.com/Sheddy-Smith/Ai_agent_bybit
+#
+# Before deploy: copy backend/.env.example → backend/.env and fill API keys on the VPS
+# (Hostinger panel → Terminal, or SSH). Optional root .env sets VPS_HOST (default below).
+
+services:
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: https://${VPS_HOST:-srv1831231.hstgr.cloud}
+    restart: unless-stopped
+    expose:
+      - "80"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      VPS_HOST: ${VPS_HOST:-srv1831231.hstgr.cloud}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+
+volumes:
+  caddy_data:
+  caddy_config:

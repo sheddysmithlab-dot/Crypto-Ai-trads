@@ -1,3 +1,5 @@
+# Legacy single-service compose (backend/docker-compose.yml).
+# For full-stack VPS deploy use the root Caddyfile instead.
 api.yourdomain.com {
 	reverse_proxy backend:8000
 }

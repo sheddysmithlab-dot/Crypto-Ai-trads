@@ -1,0 +1,26 @@
+# Single-host deploy: dashboard at /, FastAPI + WebSockets on API paths.
+# VPS_HOST is injected by docker-compose (default srv1831231.hstgr.cloud).
+
+{$VPS_HOST} {
+	@api {
+		path /health
+		path /auth/*
+		path /start-bot /emergency-exit /continue-trading /connect-bybit
+		path /trading-mode /open-trade /manual-sell /close-trade
+		path /set-pair /set-timeframe
+		path /paper-trading/*
+		path /agent/*
+		path /settings/*
+		path /system/*
+		path /chart/*
+		path /ws/*
+	}
+
+	handle @api {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		reverse_proxy frontend:80
+	}
+}
