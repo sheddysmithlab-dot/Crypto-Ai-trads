@@ -48,8 +48,8 @@ services:
   caddy:
     image: crypto-ai-trads-caddy:latest
     build:
-      context: .
-      dockerfile: caddy/Dockerfile
+      context: ./caddy
+      dockerfile: Dockerfile
     restart: unless-stopped
     ports:
       - "80:80"
