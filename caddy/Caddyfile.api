@@ -1,4 +1,4 @@
-# API-only Caddy — frontend File Manager par alag host par hai.
-{$VPS_HOST:srv1831231.hstgr.cloud} {
+# API subdomain only — frontend runs on aitrads.in (File Manager, no Docker).
+{$API_HOST:api.aitrads.in} {
 	reverse_proxy backend:8000
 }

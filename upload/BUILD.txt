@@ -1,22 +1,36 @@
-SIMPLE FRONTEND UPLOAD (File Manager)
-=====================================
+SPLIT DEPLOY — Frontend (aitrads.in) + Backend API (api.aitrads.in)
+====================================================================
 
-Backend API (HTTPS — port 8000 mat use karo browser se):
-   https://srv1831231.hstgr.cloud
+Frontend  → Hostinger File Manager → aitrads.in/public_html  (NO Docker)
+Backend   → VPS Docker → https://api.aitrads.in  (NOT srv1831231.hstgr.cloud)
 
-VPS par backend chalao:
-   docker compose -f docker-compose.backend.yml up -d --build
+--- DNS (Hostinger) ---
+  aitrads.in        → shared hosting (frontend files)
+  api.aitrads.in    → A record → VPS public IP
 
-1) PC par rebuild (API URL change ho to):
-   cd frontend
-   copy ..\\upload\\frontend\\.env.production .env.production
-   npm run build
+--- VPS: purana Docker hatao (ek baar) ---
+  cd /docker/crypto-ai-trads/crypto-ai-trads
+  docker compose down -v --remove-orphans
+  docker system prune -af --volumes
 
-2) frontend\\dist\\ ki files → upload\\frontend\\public_html\\
-   (ya seedha dist se File Manager public_html me upload)
+--- VPS: sirf backend deploy ---
+  git pull
+  cp .env.example .env
+  cp backend/.env.example backend/.env    # keys edit karo
+  docker compose up -d --build
 
-3) Hostinger File Manager → aitrads.in → public_html → files upload
+  Test: curl https://api.aitrads.in/health
 
-4) Browser: https://aitrads.in
+--- PC: frontend build (API = api.aitrads.in) ---
+  cd frontend
+  copy ..\\upload\\frontend\\.env.production .env.production
+  npm run build
 
-Firewall: ports 80 + 443 open (8000 ki zaroorat nahi).
+  dist\\*  →  upload\\frontend\\public_html\\
+  phir File Manager se aitrads.in/public_html me upload
+
+--- Browser ---
+  App:  https://aitrads.in
+  API:  https://api.aitrads.in/health
+
+Firewall: ports 80 + 443 open. Port 8000 browser se mat kholo.
