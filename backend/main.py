@@ -786,6 +786,13 @@ class AITradingAgent:
     def get_unrealized_net_usd(self):
         return sum(self._trade_metrics(t)["net_usd"] for t in self.trades)
 
+    def get_available_capital(self):
+        """Free cash for the next 10% auto slot (paper ledger after open reserves)."""
+        if bybit_api.mode == "LIVE_TRADING":
+            base = self.get_trading_capital_base()
+            return max(0.0, float(base)) if base is not None else 0.0
+        return max(0.0, float(self.current_capital))
+
     def get_trading_capital_base(self):
         """ Capital used for position sizing. LIVE -> Bybit equity; paper -> simulated ledger. """
         if bybit_api.mode == "LIVE_TRADING":
@@ -810,14 +817,14 @@ class AITradingAgent:
         notifications.push(f"Live account synced from Bybit: ${equity:,.2f} equity. Paper simulation paused.", "success")
 
     def get_total_portfolio_value(self):
-        """ RULE 5: Total Portfolio Value.
-        PAPER_TRADING (default) -> simulated capital + unrealized P&L of open (simulated) positions.
-        LIVE_TRADING -> the REAL Bybit account equity, refreshed in the background by
-        bybit_api.fetch_real_balance(). Falls back to the simulated value until the first
-        successful read comes back, so the UI never shows a blank/zero balance mid-switch. """
+        """Equity = available cash + reserved in open trades + unrealized net P&L."""
+        reserved = sum(
+            float(t.get("capital_reserved") or t.get("margin") or 0) for t in self.trades
+        )
+        unrealized = self.get_unrealized_net_usd()
         if bybit_api.mode == "LIVE_TRADING" and bybit_api.last_known_balance is not None:
             return bybit_api.last_known_balance
-        return self.current_capital + self.get_unrealized_net_usd()
+        return self.current_capital + reserved + unrealized
 
     def _live_insufficient_balance(self) -> bool:
         if bybit_api.mode != "LIVE_TRADING":
@@ -894,7 +901,7 @@ class AITradingAgent:
     ):
         """ RULE 1: Opens a position as a Market Order (RULE 7) with simulated minor slippage.
         Manual entries default to 1% margin x 100x leverage. Auto entries pass
-        `position_size_usd` + `qty` from compute_risk_trade_plan() (1% risk to SL).
+        `position_size_usd` + `qty` from compute_auto_trade_plan() (10% of available capital).
         `skip_exchange_open=True` when Bybit TESTNET already filled the order (FIX 4). """
         if self.emergency_triggered:
             return None
@@ -951,6 +958,16 @@ class AITradingAgent:
             notifications.push("Insufficient balance to open a position.", "error")
             return None
 
+        # Paper ledger: reserve capital on open (auto = 10% notional slot; manual = margin).
+        capital_reserved = round(position_size, 2) if source == "auto" and position_size_usd is not None else round(margin, 2)
+        if bybit_api.mode != "LIVE_TRADING":
+            if self.current_capital < capital_reserved:
+                notifications.push(
+                    f"Insufficient balance — need ${capital_reserved:,.2f}, have ${self.current_capital:,.2f}.",
+                    "error",
+                )
+                return None
+
         # RULE 7: Market orders fill with minor slippage vs the requested price
         if entry_price is not None:
             filled_price = round(float(entry_price), 4)
@@ -995,8 +1012,15 @@ class AITradingAgent:
             "sl_price": round(float(sl_price), 4) if sl_price is not None else None,
             "tp_price": round(float(tp_price), 4) if tp_price is not None else None,
             "target_mult": target_mult,
+            "capital_reserved": capital_reserved,
         }
         self.trades.append(trade)
+        if bybit_api.mode != "LIVE_TRADING":
+            self.current_capital = round(self.current_capital - capital_reserved, 2)
+            print(
+                f"[CAPITAL] Reserved ${capital_reserved:,.2f} for #{trade['id']} "
+                f"(available ${self.current_capital:,.2f}, notional ${position_size:,.2f})."
+            )
         self._append_trade_history(trade)
         qty_label = f" | qty={qty}" if qty is not None else ""
         if not skip_exchange_open:
@@ -1009,12 +1033,7 @@ class AITradingAgent:
               f"(margin=${margin}, position=${position_size}, qty={qty}, entry_fee=${entry_fee_usd}, source={source})")
         qty_note = f" | {qty} coins" if qty is not None else ""
         if source == "auto" and position_size_usd is not None:
-            if sl_price is not None and tp_price is not None:
-                risk_note = (
-                    f"1% risk to SL | TP={float(tp_price):,.4f} SL={float(sl_price):,.4f}{qty_note}"
-                )
-            else:
-                risk_note = f"1% risk to SL{qty_note}"
+            risk_note = f"{AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of available capital{qty_note}"
             fill_msg = (
                 f"Order Filled: {self.active_pair} {side} @ {filled_price:,.4f} "
                 f"(${position_size:,.2f} notional, {risk_note})"
@@ -1148,7 +1167,12 @@ class AITradingAgent:
             )
 
         if bybit_api.mode != "LIVE_TRADING":
-            self.current_capital += metrics["net_usd"]
+            reserved = float(trade.get("capital_reserved") or trade.get("margin") or 0)
+            self.current_capital = round(self.current_capital + reserved + metrics["net_usd"], 2)
+            print(
+                f"[CAPITAL] Released ${reserved:,.2f} + net ${metrics['net_usd']:,.2f} "
+                f"from #{trade['id']} → available ${self.current_capital:,.2f}."
+            )
 
         self._finalize_trade_history(trade, metrics, reason)
         print(
@@ -1453,15 +1477,15 @@ def qty_decimals_for_price(price: float) -> int:
 
 
 def compute_auto_trade_plan(agent, price: float | None = None, size_mult: float = 1.0) -> dict | None:
-    """Single source for auto entries. Base = AUTO_TRADE_CAPITAL_PCT × size_mult (1x or 2x)."""
+    """Auto sizing: 10% of available capital per fire; next fire uses what remains."""
     entry_price = _sanitize_market_price(price if price is not None else agent.current_price)
     if entry_price is None:
         return None
-    total = agent.get_total_portfolio_value()
-    if total is None or total <= 0:
+    available = agent.get_available_capital()
+    if available is None or available <= 0:
         return None
     mult = max(1.0, float(size_mult))
-    position_usd = round(total * AUTO_TRADE_CAPITAL_PCT * mult, 2)
+    position_usd = round(available * AUTO_TRADE_CAPITAL_PCT * mult, 2)
     if position_usd <= 0:
         return None
     decimals = qty_decimals_for_price(entry_price)
@@ -1470,7 +1494,8 @@ def compute_auto_trade_plan(agent, price: float | None = None, size_mult: float 
         return None
     margin = round(position_usd / agent.leverage, 4)
     return {
-        "total_capital": round(total, 2),
+        "total_capital": round(available, 2),
+        "available_capital": round(available, 2),
         "position_usd": position_usd,
         "capital_pct": AUTO_TRADE_CAPITAL_PCT * 100 * mult,
         "size_mult": mult,
@@ -1567,7 +1592,7 @@ def agent_policy_summary() -> str:
         return (
             f"Blue Box + VSA + Marubozu | stepped profit lock +0.15% (+0.02% steps, "
             f"sell prior step, floor +0.15%, no SL exit) | "
-            f"risk {RISK_PCT_PER_TRADE * 100:.0f}% of balance per trade | {exec_mode}"
+            f"risk {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of available capital per auto fire | {exec_mode}"
         )
     return "Auto trade policies not active."
 
@@ -1771,7 +1796,7 @@ async def fire_taapi_auto_trade(
             venue = "PAPER" if log_mode == "PAPER_TRADING" else "TESTNET"
             notifications.push(
                 f"{venue} {side} opened (Blue Box {result['action']}): {agent.active_pair} | {qty} @ ~${plan['price']:,.0f} | "
-                f"${position_size_usd} ({RISK_PCT_PER_TRADE * 100:.0f}% risk on ${plan['total_capital']:,.0f}) | "
+                f"${position_size_usd} ({AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of ${plan['total_capital']:,.0f} available) | "
                 f"TP={result.get('tp')} SL={result.get('sl')} | pattern={pattern} #{trade['id']}",
                 "success",
             )
@@ -1972,16 +1997,27 @@ async def auto_buy_loop():
                 f"{result.get('pattern')}: {cost_aware.get('block_reason')}"
             )
 
-        balance = agent.get_total_portfolio_value()
+        balance = agent.get_available_capital()
         if balance is None or balance <= 0:
             _log_trade_skip(
                 result["action"], bybit_symbol, result.get("pattern"),
-                f"Insufficient balance (total={balance}).",
+                f"Insufficient available capital (balance=${balance}).",
             )
             continue
 
         entry_px = result.get("entry") or agent.current_price
+        plan = compute_auto_trade_plan(agent, float(entry_px))
+        if plan is None:
+            _log_trade_skip(
+                result["action"], bybit_symbol, result.get("pattern"),
+                f"Could not size 10% trade (available=${balance}, entry=${entry_px}).",
+            )
+            continue
+
+        position_size_usd = plan["position_usd"]
+        qty = plan["qty"]
         sl_px = result.get("sl")
+        tp_px = result.get("tp")
         if sl_px is None:
             _log_trade_skip(
                 result["action"], bybit_symbol, result.get("pattern"),
@@ -1989,41 +2025,6 @@ async def auto_buy_loop():
             )
             continue
 
-        plan = compute_risk_trade_plan(
-            balance,
-            float(entry_px),
-            float(sl_px),
-            qty_decimals=qty_decimals_for_price(float(entry_px)),
-            leverage=agent.leverage,
-        )
-        if plan is None:
-            _log_trade_skip(
-                result["action"], bybit_symbol, result.get("pattern"),
-                f"Could not size trade (balance=${balance}, entry=${entry_px}, sl=${sl_px}).",
-            )
-            continue
-
-        position_size_usd = plan["position_usd"]
-        qty = plan["qty"]
-        max_notional = round(balance * agent.margin_pct * agent.leverage, 2)
-        if max_notional > 0 and position_size_usd > max_notional:
-            print(
-                f"[AUTO BUY LOOP] Capping notional ${position_size_usd:,.2f} -> "
-                f"${max_notional:,.2f} (1% margin × {agent.leverage}x on ${balance:,.2f} equity)."
-            )
-            position_size_usd = max_notional
-            qty = compute_order_qty(
-                position_size_usd,
-                float(entry_px),
-                qty_decimals=qty_decimals_for_price(float(entry_px)),
-            )
-            if not qty or qty <= 0:
-                _log_trade_skip(
-                    result["action"], bybit_symbol, result.get("pattern"),
-                    "Capped position size produced zero qty.",
-                )
-                continue
-        tp_px = result.get("tp") or plan.get("tp")
         log_trade_execution(
             "LONG" if result["action"] == "BUY" else "SHORT",
             float(entry_px),
@@ -2662,6 +2663,7 @@ async def portfolio_feed(websocket: WebSocket):
 
             payload = {
                 "capital": round(agent.current_capital, 2),
+                "available_capital": round(agent.get_available_capital(), 2),
                 "total_portfolio_value": round(total_value, 2),
                 "unrealized_net_usd": round(unrealized_net, 2),
                 "margin_in_use": round(margin_in_use, 2),

@@ -256,8 +256,8 @@ export default function App() {
     return { title: '', message: '', confirmLabel: 'Confirm' };
   })();
 
-  // Total equity from backend WS (cash ledger + open unrealized net). Never subtract notional.
-  const totalEquity = portfolio.totalCapital;
+  // Total Capital = available cash (drops 10% per open trade). Trade Value = open notional.
+  const totalEquity = portfolio.cashLedger ?? portfolio.totalCapital;
   const tradeValue = portfolio.tradeNotional > 0
     ? portfolio.tradeNotional
     : trades.reduce((sum, t) => {
