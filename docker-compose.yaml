@@ -1,5 +1,5 @@
-# Hostinger VPS Docker Manager — repo must be PUBLIC for Compose from URL (or use VPS Terminal deploy).
-# Raw URL: https://raw.githubusercontent.com/Sheddy-Smith/Ai_agent_bybit/refs/heads/main/docker-compose.yml
+# Hostinger VPS Docker Manager — public repo required for Compose from URL.
+# Raw URL: https://raw.githubusercontent.com/sheddysmithlab-dot/Crypto-Ai-trads/refs/heads/main/docker-compose.yml
 # Set API keys in Docker Manager → backend container → Environment after deploy.
 
 services:
@@ -43,7 +43,9 @@ services:
       - "80"
 
   caddy:
-    image: caddy:2-alpine
+    build:
+      context: .
+      dockerfile: caddy/Dockerfile
     restart: unless-stopped
     ports:
       - "80:80"
@@ -51,7 +53,6 @@ services:
     environment:
       VPS_HOST: ${VPS_HOST:-srv1831231.hstgr.cloud}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
