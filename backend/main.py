@@ -1134,9 +1134,10 @@ class AITradingAgent:
                 continue
 
             m = self._trade_metrics(trade)
-            reason = self._evaluate_stepped_profit_lock(trade, m["gross_pct"], m["net_pct"])
-            if reason and self._close_single_trade(trade, m, reason):
-                continue
+            if AUTO_TRADE_AUTO_EXIT_ENABLED:
+                reason = self._evaluate_stepped_profit_lock(trade, m["gross_pct"], m["net_pct"])
+                if reason and self._close_single_trade(trade, m, reason):
+                    continue
 
             still_open.append(trade)
 
@@ -1191,31 +1192,6 @@ class AITradingAgent:
             f"Position #{trade['id']} CLOSED{exchange_note} ({trade['side']}) {trade['pair']} | "
             f"Net P&L: ${metrics['net_usd']:.2f} ({metrics['net_pct']:.3f}%)",
             "success" if metrics["net_usd"] >= 0 else "error",
-        )
-        return True
-
-    def close_opposite_auto_positions(self, new_side: str, pair: str, reason: str) -> bool:
-        """Close auto-managed positions on the opposite side before a flip entry."""
-        opposite = "SHORT" if new_side == "LONG" else "LONG"
-        to_close = [
-            t for t in self.trades
-            if t["pair"] == pair and t["side"] == opposite and t.get("source") == "auto"
-        ]
-        if not to_close:
-            return True
-
-        closed_ids: set[int] = set()
-        for trade in to_close:
-            metrics = self._trade_metrics(trade)
-            if not self._close_single_trade(trade, metrics, reason):
-                return False
-            closed_ids.add(trade["id"])
-
-        self.trades = [t for t in self.trades if t["id"] not in closed_ids]
-        system_log.push(
-            "trade",
-            f"Closed {len(closed_ids)} opposite {opposite} position(s) on {pair} before {new_side} entry.",
-            {"pair": pair, "new_side": new_side, "closed_ids": list(closed_ids)},
         )
         return True
 
@@ -1457,6 +1433,10 @@ async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
 # Example: $1,000 capital -> $100 position -> ~0.00103 BTC @ $97,000.
 AUTO_TRADE_CAPITAL_PCT = 0.10
 
+# Fired auto trades stay open until user force-close or STOP/emergency — no flip close,
+# no stepped profit-lock market exit.
+AUTO_TRADE_AUTO_EXIT_ENABLED = False
+
 
 def qty_decimals_for_price(price: float) -> int:
     """ Precision for base-asset qty — BTC-sized prices need extra decimals. """
@@ -1582,9 +1562,13 @@ def agent_policy_summary() -> str:
             if bybit_api.mode == "PAPER_TRADING"
             else "Bybit TESTNET linear (real open/close)"
         )
+        exit_note = (
+            "stepped profit lock +0.15% (+0.02% steps)"
+            if AUTO_TRADE_AUTO_EXIT_ENABLED
+            else "no auto-exit (manual close / STOP only; opposite flip skips new entry)"
+        )
         return (
-            f"Blue Box + VSA + Marubozu | stepped profit lock +0.15% (+0.02% steps, "
-            f"sell prior step, floor +0.15%, no SL exit) | "
+            f"Blue Box + VSA + Marubozu | {exit_note}, no SL exit | "
             f"risk {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of available capital per auto fire | {exec_mode}"
         )
     return "Auto trade policies not active."
@@ -1687,15 +1671,13 @@ async def fire_taapi_auto_trade(
             return None, False, err
 
         if agent.has_opposite_position(side, agent.active_pair):
-            flipped = agent.close_opposite_auto_positions(
-                side,
-                agent.active_pair,
-                f"Flip: close opposite before {side} ({pattern or result['action']})",
+            opposite = "SHORT" if side == "LONG" else "LONG"
+            err = (
+                f"Opposite {opposite} already open on {agent.active_pair} — "
+                f"new {side} entry skipped (existing trades are never auto-closed on flip)."
             )
-            if not flipped or agent.has_opposite_position(side, agent.active_pair):
-                err = f"Conflicting opposite position on {agent.active_pair} — could not close before new entry."
-                _log_trade_skip(result["action"], bybit_symbol, pattern, err)
-                return None, False, err
+            _log_trade_skip(result["action"], bybit_symbol, pattern, err)
+            return None, False, err
 
         if bybit_api.mode == "PAPER_TRADING":
             trade = agent.open_trade(

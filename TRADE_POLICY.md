@@ -87,10 +87,10 @@ flowchart TD
 
 | Trigger | Applies to | Action |
 |---------|------------|--------|
-| Stepped profit lock | Auto only | Market close when retreat to prior lock step |
+| Stepped profit lock | Auto only (if `AUTO_TRADE_AUTO_EXIT_ENABLED`) | Market close when retreat to prior lock step |
 | Force close (UI) | Any open trade | `POST /close-trade` |
 | STOP automation | All | `POST /emergency-exit` → `_close_all_positions()` + halt |
-| Opposite signal flip | Auto only | Close opposite side before new entry |
+| Opposite signal on same pair | Auto only | **Skip** new entry — existing trades are **never** auto-closed on flip |
 
 ### 2.6 Stop automation
 
@@ -173,7 +173,15 @@ position_size = margin × 100x leverage
 
 ---
 
-## 5. Exit policy — stepped profit lock
+## 5. Exit policy — no auto-exit on fired trades (default)
+
+**`AUTO_TRADE_AUTO_EXIT_ENABLED = False`** — once an auto trade fires, it stays open until:
+- User **force-close** (trash icon), or
+- **STOP AI AUTOMATION** / emergency exit (closes all)
+
+Stepped profit lock and opposite-flip auto-close are **disabled**. Opposite signal → new entry **skipped**, old position untouched.
+
+### Legacy stepped profit lock (only if `AUTO_TRADE_AUTO_EXIT_ENABLED = True`)
 
 **Auto trades only.** Manual trades not auto-closed by lock.
 
