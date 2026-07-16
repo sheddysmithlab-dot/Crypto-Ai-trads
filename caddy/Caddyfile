@@ -1,5 +1,5 @@
-# Behind Hostinger Traefik (TLS terminates at Traefik). Internal HTTP only.
-:80 {
+# Standalone Caddy on VPS (no Traefik). Auto-HTTPS via Let's Encrypt.
+{$VPS_HOST:srv1831231.hstgr.cloud} {
 	@api {
 		path /health
 		path /auth/*

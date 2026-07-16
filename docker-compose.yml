@@ -1,7 +1,5 @@
-# Hostinger VPS — use with Hostinger Traefik project (ports 80/443).
+# Hostinger VPS standalone deploy (Caddy owns ports 80/443 — no Traefik needed).
 # Raw URL: https://raw.githubusercontent.com/sheddysmithlab-dot/Crypto-Ai-trads/refs/heads/main/docker-compose.yml
-#
-# Prerequisite: deploy Hostinger "Traefik" template first (creates traefik-proxy network).
 
 services:
   backend:
@@ -44,6 +42,12 @@ services:
     restart: unless-stopped
     expose:
       - "80"
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /usr/share/nginx/html/index.html"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   caddy:
     image: crypto-ai-trads-caddy:latest
@@ -51,24 +55,20 @@ services:
       context: ./caddy
       dockerfile: Dockerfile
     restart: unless-stopped
-    expose:
-      - "80"
-    networks:
-      - default
-      - traefik-proxy
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=traefik-proxy
-      - traefik.http.routers.crypto-ai-trads.rule=Host(`${VPS_HOST:-srv1831231.hstgr.cloud}`)
-      - traefik.http.routers.crypto-ai-trads.entrypoints=websecure
-      - traefik.http.routers.crypto-ai-trads.tls.certresolver=letsencrypt
-      - traefik.http.services.crypto-ai-trads.loadbalancer.server.port=80
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      VPS_HOST: ${VPS_HOST:-srv1831231.hstgr.cloud}
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
     depends_on:
       backend:
         condition: service_healthy
       frontend:
-        condition: service_started
+        condition: service_healthy
 
-networks:
-  traefik-proxy:
-    external: true
+volumes:
+  caddy_data:
+  caddy_config:
