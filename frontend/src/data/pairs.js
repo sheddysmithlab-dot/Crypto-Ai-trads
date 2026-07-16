@@ -11,7 +11,7 @@ export const TRADING_PAIRS = [
   { symbol: 'XMR', icon: 'ɱ', color: '#f26822', starred: false, price: 165.0 },
 ];
 
-// Primary chart feed — this bot trades on Bybit spot. XMR intentionally absent (delisted).
+// Bybit USDT perpetual (linear) — matches backend signal engine.
 export const BYBIT_SYMBOL_MAP = {
   BTC: 'BTCUSDT',
   ETH: 'ETHUSDT',
@@ -19,17 +19,9 @@ export const BYBIT_SYMBOL_MAP = {
   LTC: 'LTCUSDT',
 };
 
-// Binance fallback feed. XMR intentionally absent (delisted Feb 2024).
-export const BINANCE_SYMBOL_MAP = { BTC: 'btcusdt', ETH: 'ethusdt', XRP: 'xrpusdt', LTC: 'ltcusdt' };
-
 export function getBybitSymbol(pairLabel) {
   const symbol = (pairLabel || '').split('/')[0];
   return BYBIT_SYMBOL_MAP[symbol] || null;
-}
-
-export function getBinanceSymbol(pairLabel) {
-  const symbol = (pairLabel || '').split('/')[0];
-  return BINANCE_SYMBOL_MAP[symbol] || null;
 }
 
 export function getPairMeta(pair) {

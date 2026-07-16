@@ -1836,10 +1836,10 @@ def get_bybit_executor_agent():
         _bybit_executor_agent = BybitAgent(key, secret, testnet=True)
     return _bybit_executor_agent
 
-async def _fetch_bybit_spot_ticker_price(client: httpx.AsyncClient, bybit_symbol: str) -> float | None:
-    """Bybit spot lastPrice — works even when no new prints hit recent-trade."""
+async def _fetch_bybit_linear_ticker_price(client: httpx.AsyncClient, bybit_symbol: str) -> float | None:
+    """Bybit USDT perpetual (linear) lastPrice."""
     resp = await client.get(
-        f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={bybit_symbol}"
+        f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={bybit_symbol}"
     )
     if resp.status_code != 200:
         return None
@@ -1848,16 +1848,16 @@ async def _fetch_bybit_spot_ticker_price(client: httpx.AsyncClient, bybit_symbol
     return _sanitize_market_price(item.get("lastPrice"))
 
 
-async def fetch_bybit_spot_price(pair_label):
-    """ Latest spot last price for pair switching / seeding current_price. """
+async def fetch_bybit_linear_price(pair_label):
+    """Latest linear perpetual last price for pair switching / seeding current_price."""
     symbol = get_bybit_symbol(pair_label)
     if not symbol:
         return None
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
-            return await _fetch_bybit_spot_ticker_price(client, symbol)
+            return await _fetch_bybit_linear_ticker_price(client, symbol)
     except Exception as exc:
-        print(f"[MARKET FEED] Could not fetch spot price for {pair_label}: {exc}")
+        print(f"[MARKET FEED] Could not fetch linear price for {pair_label}: {exc}")
         return None
 
 def _sanitize_market_price(price):
@@ -1870,7 +1870,7 @@ def _sanitize_market_price(price):
         return None
     return value
 
-# Tracks the last time binance_price_feed successfully processed a REAL tick,
+# Tracks the last time bybit_price_feed successfully processed a REAL tick,
 # so market_simulator can tell "actively receiving real data" apart from
 # "silently stuck" (network hiccup, DNS issue, host blocking outbound, etc.)
 # and self-heal by taking over with synthetic movement instead of leaving
@@ -2086,13 +2086,13 @@ async def market_simulator():
             await agent.process_tick(new_price, volume_increment)
         await asyncio.sleep(0.5)
 
-async def binance_price_feed():
-    """ Keeps agent.current_price tracking REAL Bybit spot lastPrice every ~1.5s.
+async def bybit_price_feed():
+    """ Keeps agent.current_price tracking REAL Bybit linear lastPrice every ~1.5s.
     ALWAYS calls process_tick on each successful poll so trailing profit
     booking never freezes when recent-trade has no new prints between polls.
     (Volume is unused for entries; TAAPI candle scans drive entries.) """
     global _last_real_feed_update
-    print("[MARKET FEED] Background task starting (Bybit spot ticker poll, ~1.5s).")
+    print("[MARKET FEED] Background task starting (Bybit linear ticker poll, ~1.5s).")
     current_symbol = None
 
     async with httpx.AsyncClient(timeout=6.0) as client:
@@ -2104,10 +2104,10 @@ async def binance_price_feed():
 
             if target_symbol != current_symbol:
                 current_symbol = target_symbol
-                print(f"[MARKET FEED] Polling spot ticker for {target_symbol} ({agent.active_pair}).")
+                print(f"[MARKET FEED] Polling linear ticker for {target_symbol} ({agent.active_pair}).")
 
             try:
-                price = await _fetch_bybit_spot_ticker_price(client, target_symbol)
+                price = await _fetch_bybit_linear_ticker_price(client, target_symbol)
                 if price is not None:
                     await agent.process_tick(price, 0.0)
                     _last_real_feed_update = time.time()
@@ -2164,7 +2164,7 @@ async def self_ping_keepalive():
 @app.on_event("startup")
 async def start_background_tasks():
     asyncio.create_task(market_simulator())
-    asyncio.create_task(binance_price_feed())
+    asyncio.create_task(bybit_price_feed())
     asyncio.create_task(bybit_balance_refresher())
     asyncio.create_task(self_ping_keepalive())
     asyncio.create_task(auto_buy_loop())
@@ -2341,7 +2341,7 @@ async def set_pair(payload: SetPairPayload):
             "pair": agent.active_pair,
             "price": agent.current_price,
         }
-    live_price = await fetch_bybit_spot_price(payload.pair)
+    live_price = await fetch_bybit_linear_price(payload.pair)
     seed_price = live_price if live_price is not None else _sanitize_market_price(payload.price)
     if seed_price is None:
         return {"status": "error", "message": f"Could not resolve a valid market price for {payload.pair}."}

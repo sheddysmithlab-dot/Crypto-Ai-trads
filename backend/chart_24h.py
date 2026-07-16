@@ -75,9 +75,9 @@ class Chart24hStore:
         return entry
 
     async def _fetch_pair(self, client: httpx.AsyncClient, pair_label: str, bybit_symbol: str):
-        ticker_url = f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={bybit_symbol}"
+        ticker_url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={bybit_symbol}"
         kline_url = (
-            f"https://api.bybit.com/v5/market/kline?category=spot&symbol={bybit_symbol}"
+            f"https://api.bybit.com/v5/market/kline?category=linear&symbol={bybit_symbol}"
             f"&interval={KLINE_INTERVAL}&limit={KLINE_LIMIT}"
         )
 

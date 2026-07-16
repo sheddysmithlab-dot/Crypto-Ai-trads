@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createChart, CrosshairMode, LineStyle } from 'lightweight-charts';
 import { authFetch, backendWsUrl } from '../config/api';
 import { debugLog } from '../config/debug';
-import { fmtNum, getBinanceSymbol, getBybitSymbol } from '../data/pairs';
+import { fmtNum, getBybitSymbol } from '../data/pairs';
 import { formatChartAxisTime, formatLiveClock } from '../utils/time';
 import { decorateCandlestickSeries, computeTradeFireMarkers } from '../utils/chartCandles';
 import {
@@ -18,7 +18,6 @@ const TIMEFRAME_SECONDS = { '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 8
 
 // Standard kline granularities on each exchange (1M and above).
 const BYBIT_KLINE_INTERVAL = { '1M': '1', '5M': '5', '15M': '15', '1H': '60', '1D': 'D' };
-const BINANCE_KLINE_INTERVAL = { '1M': '1m', '5M': '5m', '15M': '15m', '1H': '1h', '1D': '1d' };
 
 const MA_PERIODS = [5, 10, 20, 30];
 const MA_COLORS = { 5: '#facc15', 10: '#ec4899', 20: '#38bdf8', 30: '#a855f7' };
@@ -49,7 +48,7 @@ function generateMockData(basePrice, intervalSeconds) {
 }
 
 async function fetchBybitHistory(bybitSymbol, klineInterval, limit = 200) {
-  const url = `https://api.bybit.com/v5/market/kline?category=spot&symbol=${bybitSymbol}&interval=${klineInterval}&limit=${limit}`;
+  const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${bybitSymbol}&interval=${klineInterval}&limit=${limit}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
@@ -68,7 +67,7 @@ async function fetchBybitHistory(bybitSymbol, klineInterval, limit = 200) {
 }
 
 async function fetchBybitRecentTradesAsCandles(bybitSymbol, intervalSeconds, limit = 1000) {
-  const url = `https://api.bybit.com/v5/market/recent-trade?category=spot&symbol=${bybitSymbol}&limit=${limit}`;
+  const url = `https://api.bybit.com/v5/market/recent-trade?category=linear&symbol=${bybitSymbol}&limit=${limit}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
@@ -80,54 +79,6 @@ async function fetchBybitRecentTradesAsCandles(bybitSymbol, intervalSeconds, lim
     const price = parseFloat(t.price);
     const qty = parseFloat(t.size);
     const bucketTime = Math.floor(parseInt(t.time, 10) / 1000 / intervalSeconds) * intervalSeconds;
-    let bucket = buckets.get(bucketTime);
-    if (!bucket) {
-      bucket = { time: bucketTime, open: price, high: price, low: price, close: price, volume: 0 };
-      buckets.set(bucketTime, bucket);
-    }
-    bucket.high = Math.max(bucket.high, price);
-    bucket.low = Math.min(bucket.low, price);
-    bucket.close = price;
-    bucket.volume += qty;
-  }
-  const candles = Array.from(buckets.values()).sort((a, b) => a.time - b.time);
-  if (candles.length === 0) throw new Error('No candles bucketed from trades');
-  return candles;
-}
-
-// Binance fallback when Bybit is unreachable.
-async function fetchRealHistory(binanceSymbol, klineInterval, limit = 150) {
-  const url = `https://api.binance.com/api/v3/klines?symbol=${binanceSymbol.toUpperCase()}&interval=${klineInterval}&limit=${limit}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const raw = await res.json();
-  if (!Array.isArray(raw) || raw.length === 0) throw new Error('Empty klines response');
-  return raw.map((k) => ({
-    time: Math.floor(k[0] / 1000),
-    open: parseFloat(k[1]),
-    high: parseFloat(k[2]),
-    low: parseFloat(k[3]),
-    close: parseFloat(k[4]),
-    volume: parseFloat(k[5]),
-  }));
-}
-
-// Binance has no kline granularity below 1 minute, so for the custom 30S
-// timeframe we bucket the most recent REAL trades ourselves instead of
-// falling back to fully synthetic data. Covers a few real minutes of actual
-// price action (exact span depends on how actively that pair is trading).
-async function fetchRealTradesAsCandles(binanceSymbol, intervalSeconds, limit = 1000) {
-  const url = `https://api.binance.com/api/v3/aggTrades?symbol=${binanceSymbol.toUpperCase()}&limit=${limit}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const trades = await res.json();
-  if (!Array.isArray(trades) || trades.length === 0) throw new Error('Empty trades response');
-
-  const buckets = new Map();
-  for (const t of trades) {
-    const price = parseFloat(t.p);
-    const qty = parseFloat(t.q);
-    const bucketTime = Math.floor(t.T / 1000 / intervalSeconds) * intervalSeconds;
     let bucket = buckets.get(bucketTime);
     if (!bucket) {
       bucket = { time: bucketTime, open: price, high: price, low: price, close: price, volume: 0 };
@@ -155,51 +106,31 @@ async function fetchBackend24hCandles(pairLabelArg) {
 
 async function loadHistoricalData(pairLabelArg, tfKey, basePrice) {
   const bybitSymbol = getBybitSymbol(pairLabelArg);
-  const binanceSymbol = getBinanceSymbol(pairLabelArg);
   const intervalSecs = TIMEFRAME_SECONDS[tfKey] || 3600;
   const bybitKline = BYBIT_KLINE_INTERVAL[tfKey];
-  const binanceKline = BINANCE_KLINE_INTERVAL[tfKey];
 
-  if (!bybitSymbol && !binanceSymbol) {
-    return { data: generateMockData(basePrice, intervalSecs), source: 'mock (no exchange mapping)' };
+  if (!bybitSymbol) {
+    return { data: generateMockData(basePrice, intervalSecs), source: 'mock (no Bybit mapping)' };
   }
-
-  const tryBackend = async () => {
-    if (tfKey !== '5M') throw new Error('Backend snapshot is 5m / 24h only');
-    return fetchBackend24hCandles(pairLabelArg);
-  };
-
-  const tryBybit = async () => {
-    if (!bybitSymbol) throw new Error('No Bybit symbol');
-    if (bybitKline) return fetchBybitHistory(bybitSymbol, bybitKline);
-    return fetchBybitRecentTradesAsCandles(bybitSymbol, intervalSecs);
-  };
-
-  const tryBinance = async () => {
-    if (!binanceSymbol) throw new Error('No Binance symbol');
-    if (binanceKline) return fetchRealHistory(binanceSymbol, binanceKline);
-    return fetchRealTradesAsCandles(binanceSymbol, intervalSecs);
-  };
 
   try {
     if (tfKey === '5M') {
       try {
-        const data = await tryBackend();
+        const data = await fetchBackend24hCandles(pairLabelArg);
         return { data, source: 'backend /chart/24h (Bybit 5m persisted)' };
       } catch (backendErr) {
         console.warn(`[CHART] Backend 24h snapshot unavailable for ${pairLabelArg}:`, backendErr);
       }
     }
-    const data = await tryBybit();
-    return { data, source: bybitKline ? `Bybit spot klines (${bybitKline})` : 'Bybit recent trades (bucketed)' };
+    const data = bybitKline
+      ? await fetchBybitHistory(bybitSymbol, bybitKline)
+      : await fetchBybitRecentTradesAsCandles(bybitSymbol, intervalSecs);
+    return {
+      data,
+      source: bybitKline ? `Bybit linear klines (${bybitKline})` : 'Bybit linear trades (bucketed)',
+    };
   } catch (bybitErr) {
     console.warn(`[CHART] Bybit history failed for ${pairLabelArg} (${tfKey}):`, bybitErr);
-    try {
-      const data = await tryBinance();
-      return { data, source: binanceKline ? `Binance klines (${binanceKline})` : 'Binance recent trades (bucketed)' };
-    } catch (binanceErr) {
-      console.warn(`[CHART] Binance fallback failed for ${pairLabelArg} (${tfKey}):`, binanceErr);
-    }
   }
   return { data: generateMockData(basePrice, intervalSecs), source: 'mock fallback' };
 }
@@ -544,7 +475,6 @@ export function useTradingChart({
     (pairLabelArg) => {
       disconnectFreeSource();
       const bybitSymbol = getBybitSymbol(pairLabelArg);
-      const binanceSymbol = getBinanceSymbol(pairLabelArg);
 
       const scheduleRetry = () => {
         if (tradingModeRef.current === 'PAPER_TRADING') {
@@ -552,71 +482,40 @@ export function useTradingChart({
         }
       };
 
-      if (bybitSymbol) {
-        setChartLiveSource(`Bybit public WebSocket (spot trades: ${bybitSymbol})`);
-        const ws = new WebSocket('wss://stream.bybit.com/v5/public/spot');
-        freeSourceWsRef.current = ws;
-
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ op: 'subscribe', args: [`publicTrade.${bybitSymbol}`] }));
-          debugLog(`[FREE SOURCE] Connected to Bybit public feed for ${pairLabelArg}.`);
-        };
-
-        ws.onmessage = (event) => {
-          if (tradingModeRef.current !== 'PAPER_TRADING') return;
-          try {
-            const msg = JSON.parse(event.data);
-            if (!msg.topic?.startsWith('publicTrade.')) return;
-            const trades = msg.data;
-            if (!Array.isArray(trades) || trades.length === 0) return;
-            const price = parseFloat(trades[trades.length - 1].p);
-            if (!isNaN(price)) applyLivePriceTick(price);
-          } catch (err) {
-            console.error('[FREE SOURCE] Error parsing Bybit price data:', err);
-          }
-        };
-
-        ws.onerror = (error) => {
-          console.error(`[FREE SOURCE] Bybit WebSocket error for ${pairLabelArg}:`, error);
-        };
-
-        ws.onclose = () => {
-          console.warn(`[FREE SOURCE] Bybit WebSocket closed for ${pairLabelArg}. Will retry in 2s...`);
-          scheduleRetry();
-        };
+      if (!bybitSymbol) {
+        console.warn(`[FREE SOURCE] No Bybit linear feed mapped for ${pairLabelArg}.`);
         return;
       }
 
-      if (!binanceSymbol) {
-        console.warn(`[FREE SOURCE] No public feed mapped for ${pairLabelArg}.`);
-        return;
-      }
-
-      const ws = new WebSocket(`wss://stream.binance.com:443/ws/${binanceSymbol}@trade`);
-      setChartLiveSource(`Binance public WebSocket (trades: ${binanceSymbol})`);
+      setChartLiveSource(`Bybit public WebSocket (linear trades: ${bybitSymbol})`);
+      const ws = new WebSocket('wss://stream.bybit.com/v5/public/linear');
       freeSourceWsRef.current = ws;
 
       ws.onopen = () => {
-        debugLog(`[FREE SOURCE] Connected to Binance public feed for ${pairLabelArg}.`);
+        ws.send(JSON.stringify({ op: 'subscribe', args: [`publicTrade.${bybitSymbol}`] }));
+        debugLog(`[FREE SOURCE] Connected to Bybit linear feed for ${pairLabelArg}.`);
       };
 
       ws.onmessage = (event) => {
         if (tradingModeRef.current !== 'PAPER_TRADING') return;
         try {
-          const data = JSON.parse(event.data);
-          const price = parseFloat(data.p);
+          const msg = JSON.parse(event.data);
+          if (!msg.topic?.startsWith('publicTrade.')) return;
+          const trades = msg.data;
+          if (!Array.isArray(trades) || trades.length === 0) return;
+          const price = parseFloat(trades[trades.length - 1].p);
           if (!isNaN(price)) applyLivePriceTick(price);
         } catch (err) {
-          console.error('[FREE SOURCE] Error parsing Binance price data:', err);
+          console.error('[FREE SOURCE] Error parsing Bybit price data:', err);
         }
       };
 
       ws.onerror = (error) => {
-        console.error(`[FREE SOURCE] Binance WebSocket error for ${pairLabelArg}:`, error);
+        console.error(`[FREE SOURCE] Bybit WebSocket error for ${pairLabelArg}:`, error);
       };
 
       ws.onclose = () => {
-        console.warn(`[FREE SOURCE] Binance WebSocket closed for ${pairLabelArg}. Will retry in 2s...`);
+        console.warn(`[FREE SOURCE] Bybit WebSocket closed for ${pairLabelArg}. Will retry in 2s...`);
         scheduleRetry();
       };
     },

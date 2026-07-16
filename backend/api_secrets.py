@@ -22,7 +22,7 @@ DEFAULT_ZAI_API_KEY = "50ab627b668d48998f9b3ce7fb189864.6sAWRMtICO6mjSRT"
 DEFAULT_TAAPI_SECRET = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjbHVlIjoiNmE0Y2RkOTQ5MzEwZjViOGU2YzdiNzEwIiwiaWF0IjoxNzgzNDIyMzU2LCJleHAiOjMzMjg3ODg2MzU2fQ.ojS0IaZ6Nt7CKGPsernKFxFbnqpDUDEoxyeNMkt3Cno"
 )
-DEFAULT_TAAPI_EXCHANGE = "binance"
+DEFAULT_TAAPI_EXCHANGE = "bybit"
 
 # TAAPI pattern scans replaced by SMC+VSA (Bybit klines). Keep credentials dormant.
 TAAPI_PAUSED = True
@@ -51,9 +51,9 @@ def get_taapi_exchange() -> str:
     raw = (
         os.environ.get("TAAPI_EXCHANGE")
         or DEFAULT_TAAPI_EXCHANGE
-        or "binance"
+        or "bybit"
     ).strip()
-    return raw or "binance"
+    return raw or "bybit"
 
 
 def is_zai_configured() -> bool:
