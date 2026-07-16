@@ -4,6 +4,7 @@
 
 services:
   backend:
+    image: crypto-ai-trads-backend:latest
     build:
       context: ./backend
     restart: unless-stopped
@@ -34,6 +35,7 @@ services:
       start_period: 40s
 
   frontend:
+    image: crypto-ai-trads-frontend:latest
     build:
       context: ./frontend
       args:
@@ -41,8 +43,10 @@ services:
     restart: unless-stopped
     expose:
       - "80"
+    # No public ports — Caddy routes traffic to this container internally.
 
   caddy:
+    image: crypto-ai-trads-caddy:latest
     build:
       context: .
       dockerfile: caddy/Dockerfile
