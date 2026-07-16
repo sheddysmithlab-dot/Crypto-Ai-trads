@@ -12,6 +12,8 @@ from pathlib import Path
 
 import httpx
 
+from bybit_public import kline_url, ticker_url
+
 DATA_DIR = Path(__file__).parent / "data"
 DATA_FILE = DATA_DIR / "chart_24h.json"
 REFRESH_INTERVAL_SECONDS = 24 * 3600
@@ -75,17 +77,13 @@ class Chart24hStore:
         return entry
 
     async def _fetch_pair(self, client: httpx.AsyncClient, pair_label: str, bybit_symbol: str):
-        ticker_url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={bybit_symbol}"
-        kline_url = (
-            f"https://api.bybit.com/v5/market/kline?category=linear&symbol={bybit_symbol}"
-            f"&interval={KLINE_INTERVAL}&limit={KLINE_LIMIT}"
-        )
-
-        ticker_resp = await client.get(ticker_url)
+        ticker_resp = await client.get(ticker_url(bybit_symbol))
         ticker_resp.raise_for_status()
         ticker_item = ticker_resp.json().get("result", {}).get("list", [{}])[0]
 
-        kline_resp = await client.get(kline_url)
+        kline_resp = await client.get(
+            kline_url(bybit_symbol, KLINE_INTERVAL, KLINE_LIMIT)
+        )
         kline_resp.raise_for_status()
         raw_candles = kline_resp.json().get("result", {}).get("list", [])
 

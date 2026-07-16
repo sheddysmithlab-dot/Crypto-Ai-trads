@@ -11,6 +11,7 @@ import threading
 
 import requests
 
+from bybit_public import kline_url
 from bybit_executor import BybitAgent
 from taapi_scanner import fetch_taapi_signals, evaluate_trade, PATTERN_TRADE_POLICIES_ENABLED
 
@@ -69,10 +70,7 @@ class TradingEngine:
         the PREVIOUS one - index 0 is the still-forming current candle, index 1
         is the last fully closed candle. """
         bybit_interval = BYBIT_KLINE_INTERVAL.get(self.current_interval, "1")
-        url = (
-            f"https://api.bybit.com/v5/market/kline?category=linear"
-            f"&symbol={self.current_symbol}&interval={bybit_interval}&limit=2"
-        )
+        url = kline_url(self.current_symbol, bybit_interval, 2)
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
         candles = resp.json()["result"]["list"]  # newest-first: [0]=forming, [1]=last closed

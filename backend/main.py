@@ -23,6 +23,11 @@ from auth import (
     verify_credentials,
     verify_token,
 )
+from bybit_public import (
+    fetch_kline_rows,
+    fetch_ticker_last_price,
+    sanitize_price as _sanitize_market_price,
+)
 from api_secrets import (
     get_taapi_exchange,
     get_taapi_secret,
@@ -1426,14 +1431,8 @@ async def fetch_kline_history(bybit_symbol, timeframe_key, limit=None):
 
     need = limit or max(_min + 5, 230)
     bybit_interval = TIMEFRAME_KEY_TO_BYBIT_KLINE.get(timeframe_key, "1")
-    url = (
-        f"https://api.bybit.com/v5/market/kline?category=linear"
-        f"&symbol={bybit_symbol}&interval={bybit_interval}&limit={need}"
-    )
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(url)
-    resp.raise_for_status()
-    rows = resp.json()["result"]["list"]
+        rows = await fetch_kline_rows(client, bybit_symbol, bybit_interval, need)
     candles = [parse_bybit_kline(row) for row in reversed(rows)]
     if len(candles) >= 2:
         candles = candles[:-1]
@@ -1447,14 +1446,8 @@ async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
     fully closed candle (index 0 is still forming). Native httpx/async so it
     never blocks the event loop (unlike pybit's sync client). """
     bybit_interval = TIMEFRAME_KEY_TO_BYBIT_KLINE.get(timeframe_key, "1")
-    url = (
-        f"https://api.bybit.com/v5/market/kline?category=linear"
-        f"&symbol={bybit_symbol}&interval={bybit_interval}&limit=2"
-    )
     async with httpx.AsyncClient(timeout=6.0) as client:
-        resp = await client.get(url)
-    resp.raise_for_status()
-    candles = resp.json()["result"]["list"]  # newest-first
+        candles = await fetch_kline_rows(client, bybit_symbol, bybit_interval, 2)
     closed = candles[1]
     # Bybit's kline row is [startTime, open, high, low, close, volume, turnover] -
     # startTime doubles as a unique, strictly-increasing per-candle id.
@@ -1837,15 +1830,8 @@ def get_bybit_executor_agent():
     return _bybit_executor_agent
 
 async def _fetch_bybit_linear_ticker_price(client: httpx.AsyncClient, bybit_symbol: str) -> float | None:
-    """Bybit USDT perpetual (linear) lastPrice."""
-    resp = await client.get(
-        f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={bybit_symbol}"
-    )
-    if resp.status_code != 200:
-        return None
-    body = resp.json()
-    item = body.get("result", {}).get("list", [{}])[0]
-    return _sanitize_market_price(item.get("lastPrice"))
+    """Bybit USDT perpetual (linear) lastPrice — public REST, no API key."""
+    return await fetch_ticker_last_price(client, bybit_symbol)
 
 
 async def fetch_bybit_linear_price(pair_label):
@@ -1859,16 +1845,6 @@ async def fetch_bybit_linear_price(pair_label):
     except Exception as exc:
         print(f"[MARKET FEED] Could not fetch linear price for {pair_label}: {exc}")
         return None
-
-def _sanitize_market_price(price):
-    """ Reject corrupt ticks so entries/PnL never use zero or negative prices. """
-    try:
-        value = float(price)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(value) or value <= 0:
-        return None
-    return value
 
 # Tracks the last time bybit_price_feed successfully processed a REAL tick,
 # so market_simulator can tell "actively receiving real data" apart from
@@ -2253,9 +2229,8 @@ async def connect_bybit():
 
 @app.get("/trading-mode")
 async def get_trading_mode():
-    """ Tells the frontend which chart data source to use:
-    PAPER_TRADING -> free public crypto feed (e.g. Binance), LIVE_TRADING -> backend/Bybit feed. """
-    return {"mode": bybit_api.mode}
+    """ Trading mode for order execution. Chart + signals always use public Bybit linear data. """
+    return {"mode": bybit_api.mode, "market_data": "bybit_public_linear"}
 
 # ==========================================
 # SINGLE-COIN, MULTI-TRADE WIRING
@@ -2493,8 +2468,10 @@ async def get_system_logs():
             "policy": agent_policy_summary(),
         },
         "chart": {
-            "history_hint": "5M: backend /chart/24h snapshot, else Bybit spot klines, fallback Binance, then mock",
-            "live_hint": "Paper & Live: backend Bybit spot ticker (~1.5s) drives automation + /ws/market chart price",
+            "history_hint": "5M: backend /chart/24h snapshot, else Bybit public linear klines, then mock",
+            "live_hint": "Bybit public linear WebSocket (chart) + backend ticker poll (~1.5s) for bot PnL",
+            "market_data": "bybit_public_linear",
+            "api_key_required": False,
         },
         "last_taapi_scan": system_log.last_taapi_scan,
         "last_trade_fire": system_log.last_trade_fire,

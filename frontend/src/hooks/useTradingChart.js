@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createChart, CrosshairMode, LineStyle } from 'lightweight-charts';
 import { authFetch, backendWsUrl } from '../config/api';
+import {
+  BYBIT_PUBLIC_WS_LINEAR,
+  bybitKlineUrl,
+  bybitPublicTradeTopic,
+  bybitRecentTradeUrl,
+} from '../config/bybitPublic';
 import { debugLog } from '../config/debug';
 import { fmtNum, getBybitSymbol } from '../data/pairs';
 import { formatChartAxisTime, formatLiveClock } from '../utils/time';
@@ -48,7 +54,7 @@ function generateMockData(basePrice, intervalSeconds) {
 }
 
 async function fetchBybitHistory(bybitSymbol, klineInterval, limit = 200) {
-  const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${bybitSymbol}&interval=${klineInterval}&limit=${limit}`;
+  const url = bybitKlineUrl(bybitSymbol, klineInterval, limit);
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
@@ -67,7 +73,7 @@ async function fetchBybitHistory(bybitSymbol, klineInterval, limit = 200) {
 }
 
 async function fetchBybitRecentTradesAsCandles(bybitSymbol, intervalSeconds, limit = 1000) {
-  const url = `https://api.bybit.com/v5/market/recent-trade?category=linear&symbol=${bybitSymbol}&limit=${limit}`;
+  const url = bybitRecentTradeUrl(bybitSymbol, limit);
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
@@ -199,10 +205,8 @@ function buildTimeScaleOptions(intervalSeconds) {
   };
 }
 
-// Candlestick + MA(5,10,20,30) overlay chart with a Volume histogram
-// sub-panel, real Binance historical candles + live public feed (paper
-// trading), and the backend/Bybit feed (live trading). Defaults to showing
-// only the last 40 candles, zoomed out 4× vs prior default, instead of the whole history at once.
+// Candlestick + MA overlay + volume panel. History and live ticks use Bybit
+// public linear API/WebSocket (no API key). Backend WS syncs bot lock state.
 export function useTradingChart({
   chartContainerRef,
   volumeContainerRef,
@@ -477,27 +481,25 @@ export function useTradingChart({
       const bybitSymbol = getBybitSymbol(pairLabelArg);
 
       const scheduleRetry = () => {
-        if (tradingModeRef.current === 'PAPER_TRADING') {
-          setTimeout(() => connectFreeSource(pairLabelArg), 2000);
-        }
+        setTimeout(() => connectFreeSource(pairLabelArg), 2000);
       };
 
       if (!bybitSymbol) {
-        console.warn(`[FREE SOURCE] No Bybit linear feed mapped for ${pairLabelArg}.`);
+        console.warn(`[BYBIT PUBLIC] No linear symbol mapped for ${pairLabelArg}.`);
+        setChartLiveSource('mock / synthetic (pair not on Bybit linear)');
         return;
       }
 
-      setChartLiveSource(`Bybit public WebSocket (linear trades: ${bybitSymbol})`);
-      const ws = new WebSocket('wss://stream.bybit.com/v5/public/linear');
+      setChartLiveSource(`Bybit public WebSocket (linear: ${bybitSymbol})`);
+      const ws = new WebSocket(BYBIT_PUBLIC_WS_LINEAR);
       freeSourceWsRef.current = ws;
 
       ws.onopen = () => {
-        ws.send(JSON.stringify({ op: 'subscribe', args: [`publicTrade.${bybitSymbol}`] }));
-        debugLog(`[FREE SOURCE] Connected to Bybit linear feed for ${pairLabelArg}.`);
+        ws.send(JSON.stringify({ op: 'subscribe', args: [bybitPublicTradeTopic(bybitSymbol)] }));
+        debugLog(`[BYBIT PUBLIC] Subscribed to ${bybitSymbol} trades.`);
       };
 
       ws.onmessage = (event) => {
-        if (tradingModeRef.current !== 'PAPER_TRADING') return;
         try {
           const msg = JSON.parse(event.data);
           if (!msg.topic?.startsWith('publicTrade.')) return;
@@ -506,33 +508,27 @@ export function useTradingChart({
           const price = parseFloat(trades[trades.length - 1].p);
           if (!isNaN(price)) applyLivePriceTick(price);
         } catch (err) {
-          console.error('[FREE SOURCE] Error parsing Bybit price data:', err);
+          console.error('[BYBIT PUBLIC] Error parsing trade stream:', err);
         }
       };
 
       ws.onerror = (error) => {
-        console.error(`[FREE SOURCE] Bybit WebSocket error for ${pairLabelArg}:`, error);
+        console.error(`[BYBIT PUBLIC] WebSocket error for ${pairLabelArg}:`, error);
       };
 
       ws.onclose = () => {
-        console.warn(`[FREE SOURCE] Bybit WebSocket closed for ${pairLabelArg}. Will retry in 2s...`);
+        console.warn(`[BYBIT PUBLIC] WebSocket closed for ${pairLabelArg}. Retrying in 2s...`);
         scheduleRetry();
       };
     },
     [applyLivePriceTick, disconnectFreeSource]
   );
 
-  const setChartDataSourceMode = useCallback(
-    (mode) => {
-      if (mode === tradingModeRef.current) return;
-      tradingModeRef.current = mode;
-      setChartSourceModeState(mode);
-      setChartLiveSource('Backend /ws/market (Bybit spot ticker — same as profit logic)');
-      debugLog(`[CHART SOURCE] ${mode}: chart live price follows backend ticker feed.`);
-      disconnectFreeSource();
-    },
-    [disconnectFreeSource]
-  );
+  const setChartDataSourceMode = useCallback((mode) => {
+    tradingModeRef.current = mode;
+    setChartSourceModeState(mode);
+    // Chart live price always from public Bybit — mode only affects order execution.
+  }, []);
 
   const switchSymbol = useCallback(
     (basePrice) => {
@@ -701,7 +697,8 @@ export function useTradingChart({
 
           if (data.trading_mode) setChartDataSourceMode(data.trading_mode);
 
-          if (data.price != null && !Number.isNaN(Number(data.price))) {
+          const publicWsLive = freeSourceWsRef.current?.readyState === WebSocket.OPEN;
+          if (!publicWsLive && data.price != null && !Number.isNaN(Number(data.price))) {
             applyLivePriceTick(Number(data.price));
           }
 
@@ -733,8 +730,8 @@ export function useTradingChart({
       };
     }
     connectMarketWS();
+    connectFreeSource(pairLabelRef.current);
 
-    // Determine the initial chart data source (Paper -> free feed, Live -> backend/Bybit)
     authFetch('/trading-mode')
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -788,7 +785,7 @@ export function useTradingChart({
     if (!candleSeriesRef.current) return;
     debugLog(`[CHART] Regenerating candlestick data for ${pairLabel}`);
     switchSymbolRef.current?.(pairPrice);
-    // Live chart ticks come from backend /ws/market for both paper and live modes.
+    connectFreeSourceRef.current?.(pairLabel);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pairLabel, pairPrice]);
 
