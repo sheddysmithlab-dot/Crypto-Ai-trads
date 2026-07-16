@@ -38,7 +38,7 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_BASE_URL: https://${VPS_HOST:-srv1831231.hstgr.cloud}
+        VITE_API_BASE_URL: https://${VPS_HOST:-aitrads.in}
     restart: unless-stopped
     expose:
       - "80"
@@ -59,7 +59,7 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      VPS_HOST: ${VPS_HOST:-srv1831231.hstgr.cloud}
+      VPS_HOST: ${VPS_HOST:-aitrads.in}
     volumes:
       - caddy_data:/data
       - caddy_config:/config

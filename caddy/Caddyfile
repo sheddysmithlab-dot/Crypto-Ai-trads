@@ -1,5 +1,5 @@
-# Standalone Caddy on VPS (no Traefik). Auto-HTTPS via Let's Encrypt.
-{$VPS_HOST:srv1831231.hstgr.cloud} {
+# Auto-HTTPS for apex + www (set VPS_HOST=aitrads.in in .env on the VPS).
+{$VPS_HOST:aitrads.in}, www.{$VPS_HOST:aitrads.in} {
 	@api {
 		path /health
 		path /auth/*
