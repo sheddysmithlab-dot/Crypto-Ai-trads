@@ -1,0 +1,28 @@
+SIMPLE FRONTEND UPLOAD (File Manager)
+=====================================
+
+1) Apne PC par build banao:
+   cd frontend
+   copy ..\\upload\\frontend\\.env.production .env.production
+   npm install
+   npm run build
+
+2) frontend\\dist\\ ke ANDAR ki saari files copy karo
+   → upload\\frontend\\public_html\\
+
+3) Hostinger File Manager:
+   - Domain aitrads.in → public_html folder kholo
+   - public_html ki saari purani files delete (backup le lo agar chaho)
+   - upload\\frontend\\public_html\\ ki files yahan upload karo
+     (index.html + assets folder zaroor)
+
+4) Browser: https://aitrads.in  (ya http://aitrads.in)
+
+Backend URL (build me bake hai):
+   http://srv1831231.hstgr.cloud:8000
+
+Agar backend alag URL par ho to pehle .env.production me change karo, phir dubara npm run build.
+
+NOTE: Backend Docker chalta rehna chahiye (port 8000).
+      Caddy agar port 80 le raha ho to band karo:
+      cd /docker/crypto-ai-trads && docker compose stop caddy
