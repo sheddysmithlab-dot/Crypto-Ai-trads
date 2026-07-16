@@ -53,6 +53,7 @@ services:
       - "443:443"
     environment:
       API_HOST: ${API_HOST:-api.aitrads.in}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@aitrads.in}
     volumes:
       - caddy_data:/data
       - caddy_config:/config

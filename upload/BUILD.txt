@@ -19,7 +19,18 @@ Backend   → VPS Docker → https://api.aitrads.in  (NOT srv1831231.hstgr.cloud
   cp backend/.env.example backend/.env    # keys edit karo
   docker compose up -d --build
 
-  Test: curl https://api.aitrads.in/health
+  Test: curl http://api.aitrads.in/health
+  Then:  curl https://api.aitrads.in/health
+
+  SSL error (tlsv1 alert internal error)?
+  - DNS must be live first (api -> VPS IP)
+  - Ensure .env has API_HOST=api.aitrads.in
+  - Reset Caddy certs and restart:
+      docker compose down
+      docker volume rm crypto-ai-trads_caddy_data crypto-ai-trads_caddy_config
+      docker compose up -d --build
+      docker compose logs -f caddy
+  - Wait 1-2 min for Let's Encrypt, then retry curl https://...
 
 --- PC: frontend build (API = api.aitrads.in) ---
   cd frontend

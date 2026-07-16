@@ -1,4 +1,10 @@
 # API subdomain only — frontend runs on aitrads.in (File Manager, no Docker).
+# After DNS A record is live, restart caddy (or wipe caddy_data volume) so
+# Let's Encrypt can issue a cert for API_HOST.
+{
+	email {$ACME_EMAIL:admin@aitrads.in}
+}
+
 {$API_HOST:api.aitrads.in} {
 	reverse_proxy backend:8000
 }
