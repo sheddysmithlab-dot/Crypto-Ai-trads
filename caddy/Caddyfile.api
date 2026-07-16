@@ -1,0 +1,4 @@
+# API-only Caddy — frontend File Manager par alag host par hai.
+{$VPS_HOST:srv1831231.hstgr.cloud} {
+	reverse_proxy backend:8000
+}
