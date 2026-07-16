@@ -1437,6 +1437,9 @@ AUTO_TRADE_CAPITAL_PCT = 0.10
 # no stepped profit-lock market exit.
 AUTO_TRADE_AUTO_EXIT_ENABLED = False
 
+# Pattern engine unchanged: bullish/BUY signals fire SELL (SHORT), bearish/SELL fire BUY (LONG).
+INVERT_AUTO_TRADE_FIRE = True
+
 
 def qty_decimals_for_price(price: float) -> int:
     """ Precision for base-asset qty — BTC-sized prices need extra decimals. """
@@ -1526,6 +1529,22 @@ def taapi_action_to_trade_side(taapi_action: str) -> str:
     return "LONG"
 
 
+def invert_signal_action(action: str) -> str:
+    """Flip execution only — long/BUY pattern fires SELL, short/SELL pattern fires BUY."""
+    if action == "BUY":
+        return "SELL"
+    if action == "SELL":
+        return "BUY"
+    return action
+
+
+def execution_action_for_fire(signal_action: str) -> str:
+    """Map UVSS signal action to the order the agent actually places."""
+    if INVERT_AUTO_TRADE_FIRE:
+        return invert_signal_action(signal_action)
+    return signal_action
+
+
 def taapi_action_to_bybit_order_action(taapi_action: str) -> str:
     """Bybit market open: BUY signal -> Buy (long), SELL signal -> Sell (short)."""
     if taapi_action in ("BUY", "SELL"):
@@ -1551,6 +1570,13 @@ def load_system_role_text() -> str:
                 parts.append(text)
         except OSError:
             continue
+    if INVERT_AUTO_TRADE_FIRE:
+        parts.append(
+            "EXECUTION OVERRIDE (pattern engine unchanged): "
+            "When the scanner flags a long/BUY-class pattern (BB-L, L1–L5, MBZ-L, MOM-L), "
+            "place SELL (SHORT). When it flags a short/SELL-class pattern (BB-S, S1–S4, MBZ-S, MOM-S), "
+            "place BUY (LONG). Do not change how patterns are detected — only invert the order side at fire."
+        )
     return "\n\n---\n\n".join(parts)
 
 
@@ -1569,6 +1595,7 @@ def agent_policy_summary() -> str:
         )
         return (
             f"Blue Box + VSA + Marubozu | {exit_note}, no SL exit | "
+            f"INVERTED fire (long-pattern→SELL, short-pattern→BUY) | "
             f"risk {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of available capital per auto fire | {exec_mode}"
         )
     return "Auto trade policies not active."
@@ -1642,24 +1669,32 @@ async def fire_taapi_auto_trade(
     *,
     candle_close_time: int | None = None,
     timeframe_key: str | None = None,
+    signal_action: str | None = None,
 ) -> tuple[dict | None, bool, str | None]:
-    """Unified TAAPI auto-entry for paper and live — BUY opens LONG, SELL opens SHORT."""
+    """Unified auto-entry — execution action may be inverted vs UVSS signal (see INVERT_AUTO_TRADE_FIRE)."""
+    exec_action = result["action"]
+    orig_signal = signal_action or exec_action
     async with _trade_fire_lock:
-        side = taapi_action_to_trade_side(result["action"])
+        side = taapi_action_to_trade_side(exec_action)
         entry_px = result.get("entry") or agent.current_price
         pattern = result.get("pattern")
-        reason = f"Blue Box {pattern or 'signal'} ({result['action']}) 1:{RR_RATIO:.0f} R:R"
+        invert_note = (
+            f" (pattern signal {orig_signal} → fire {exec_action})"
+            if INVERT_AUTO_TRADE_FIRE and orig_signal != exec_action
+            else ""
+        )
+        reason = f"Blue Box {pattern or 'signal'} ({orig_signal}→{exec_action}) 1:{RR_RATIO:.0f} R:R{invert_note}"
 
         if candle_close_time is not None and timeframe_key:
             fire_key = _signal_fire_key(
-                agent.active_pair, timeframe_key, result["action"], pattern, candle_close_time
+                agent.active_pair, timeframe_key, exec_action, pattern, candle_close_time
             )
             if fire_key in _recent_signal_fire_keys:
                 err = (
-                    f"Duplicate signal blocked — already fired {result['action']} "
+                    f"Duplicate signal blocked — already fired {exec_action} "
                     f"{pattern or 'signal'} for candle {candle_close_time}."
                 )
-                _log_trade_skip(result["action"], bybit_symbol, pattern, err)
+                _log_trade_skip(exec_action, bybit_symbol, pattern, err)
                 return None, False, err
 
         if agent.has_duplicate_auto_entry(side, agent.active_pair, pattern, candle_close_time, float(entry_px)):
@@ -1667,7 +1702,7 @@ async def fire_taapi_auto_trade(
                 f"Duplicate open position blocked — {side} {pattern or 'signal'} "
                 f"already active on {agent.active_pair}."
             )
-            _log_trade_skip(result["action"], bybit_symbol, pattern, err)
+            _log_trade_skip(exec_action, bybit_symbol, pattern, err)
             return None, False, err
 
         if agent.has_opposite_position(side, agent.active_pair):
@@ -1676,7 +1711,7 @@ async def fire_taapi_auto_trade(
                 f"Opposite {opposite} already open on {agent.active_pair} — "
                 f"new {side} entry skipped (existing trades are never auto-closed on flip)."
             )
-            _log_trade_skip(result["action"], bybit_symbol, pattern, err)
+            _log_trade_skip(exec_action, bybit_symbol, pattern, err)
             return None, False, err
 
         if bybit_api.mode == "PAPER_TRADING":
@@ -1769,8 +1804,13 @@ async def fire_taapi_auto_trade(
 
         if fired and trade:
             venue = "PAPER" if log_mode == "PAPER_TRADING" else "TESTNET"
+            signal_note = (
+                f"{orig_signal}→{exec_action}"
+                if INVERT_AUTO_TRADE_FIRE and orig_signal != exec_action
+                else exec_action
+            )
             notifications.push(
-                f"{venue} {side} opened (Blue Box {result['action']}): {agent.active_pair} | {qty} @ ~${plan['price']:,.0f} | "
+                f"{venue} {side} opened ({pattern or 'signal'} {signal_note}): {agent.active_pair} | {qty} @ ~${plan['price']:,.0f} | "
                 f"${position_size_usd} ({AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of ${plan['total_capital']:,.0f} available) | "
                 f"TP={result.get('tp')} SL={result.get('sl')} | pattern={pattern} #{trade['id']}",
                 "success",
@@ -1918,9 +1958,15 @@ async def auto_buy_loop():
         )
 
         if result["action"] in ("BUY", "SELL"):
+            exec_action = execution_action_for_fire(result["action"])
+            fire_hint = (
+                f"signal {result['action']} → fire {exec_action} (inverted)"
+                if INVERT_AUTO_TRADE_FIRE and exec_action != result["action"]
+                else str(result["action"])
+            )
             system_log.push_agent_chat(
                 f"Pattern detected on {agent.active_pair}: {result.get('pattern', 'signal')} "
-                f"→ {result['action']} (1:{RR_RATIO:.0f} R:R) — evaluating entry…",
+                f"→ {fire_hint} (1:{RR_RATIO:.0f} R:R) — evaluating entry…",
                 status="match",
                 details={"decision": result, "pair": agent.active_pair, "timeframe": timeframe_key},
             )
@@ -1984,7 +2030,7 @@ async def auto_buy_loop():
             continue
 
         log_trade_execution(
-            "LONG" if result["action"] == "BUY" else "SHORT",
+            taapi_action_to_trade_side(execution_action_for_fire(result["action"])),
             float(entry_px),
             float(sl_px),
             float(tp_px) if tp_px else float(entry_px),
@@ -1992,8 +2038,10 @@ async def auto_buy_loop():
             float(balance),
             result.get("pattern", "signal"),
         )
-        result["symbol"] = bybit_symbol
-        result["signal_candle_time"] = close_time
+        signal_action = result["action"]
+        fire_payload = {**result, "action": execution_action_for_fire(signal_action)}
+        fire_payload["symbol"] = bybit_symbol
+        fire_payload["signal_candle_time"] = close_time
         if not is_bybit_testnet_configured() and bybit_api.mode != "PAPER_TRADING":
             global _bybit_testnet_keys_warned
             err = (
@@ -2011,13 +2059,14 @@ async def auto_buy_loop():
             continue
 
         await fire_taapi_auto_trade(
-            result,
+            fire_payload,
             bybit_symbol,
             plan,
             position_size_usd,
             qty,
             candle_close_time=close_time,
             timeframe_key=timeframe_key,
+            signal_action=signal_action,
         )
 
 async def market_simulator():
