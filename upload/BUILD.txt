@@ -22,15 +22,20 @@ Backend   → VPS Docker → https://api.aitrads.in  (NOT srv1831231.hstgr.cloud
   Test: curl http://api.aitrads.in/health
   Then:  curl https://api.aitrads.in/health
 
-  SSL error (tlsv1 alert internal error)?
-  - DNS must be live first (api -> VPS IP)
-  - Ensure .env has API_HOST=api.aitrads.in
-  - Reset Caddy certs and restart:
-      docker compose down
-      docker volume rm crypto-ai-trads_caddy_data crypto-ai-trads_caddy_config
-      docker compose up -d --build
-      docker compose logs -f caddy
-  - Wait 1-2 min for Let's Encrypt, then retry curl https://...
+  SSL / ERR_SSL_PROTOCOL_ERROR fix (HTTP 308 but HTTPS fails):
+  cd /docker/crypto-ai-trads/crypto-ai-trads
+  git pull
+  echo -e "API_HOST=api.aitrads.in\nACME_EMAIL=admin@aitrads.in" > .env
+  docker compose down
+  docker volume rm crypto-ai-trads_caddy_data crypto-ai-trads_caddy_config 2>/dev/null || true
+  docker compose up -d --build
+  sleep 20
+  docker compose logs caddy --tail 40
+  curl -sS http://api.aitrads.in/health
+  curl -sS https://api.aitrads.in/health
+
+  Logs mein "certificate obtained successfully" dikhna chahiye.
+  Agar ACME fail ho: firewall me 80+443 open rakho, phir dubara volume wipe.
 
 --- PC: frontend build (API = api.aitrads.in) ---
   cd frontend
