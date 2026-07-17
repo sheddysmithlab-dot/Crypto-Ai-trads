@@ -78,12 +78,20 @@ function TradeRowDesktop({ trade, onRequestClose }) {
           {netPnl.toFixed(2)}%
           <span className="text-[9px] font-normal text-gray-500 ml-0.5">net</span>
         </span>
-        {grossPnl != null ? (
-          <div className="text-[9px] font-normal text-gray-500">
-            {grossPnl >= 0 ? '+' : ''}
-            {grossPnl.toFixed(2)}% gross
-          </div>
-        ) : null}
+                    {grossPnl != null ? (
+                      <div className="text-[9px] font-normal text-gray-500">
+                        {grossPnl >= 0 ? '+' : ''}
+                        {grossPnl.toFixed(2)}% gross
+                      </div>
+                    ) : null}
+                    {!isSold && trade.peak_gross_pct > 0 && trade.status === 'locked' ? (
+                      <div className="text-[9px] font-normal text-blue-400">
+                        peak +{Number(trade.peak_gross_pct).toFixed(2)}%
+                        {trade.sell_trigger_pct != null
+                          ? ` · exit ≤ +${Number(trade.sell_trigger_pct).toFixed(2)}%`
+                          : ''}
+                      </div>
+                    ) : null}
         {isSold && trade.closed_reason ? (
           <div className="text-[9px] font-normal text-cyan-400/90 truncate max-w-[180px]" title={trade.closed_reason}>
             {trade.closed_reason}

@@ -656,8 +656,13 @@ class AITradingAgent:
             self.peak_net_pct = max(float(t.get("peak_gross_pct") or 0) for t in auto)
 
     def _evaluate_stepped_profit_lock(self, trade: dict, gross: float, net: float) -> str | None:
-        """Stepped lock from peak: activate +0.15%, each peak+k*0.02% is a lock step,
-        sell when price retreats to prior step (never below +0.15%)."""
+        """Book profit when gross retreats ~0.02% from peak (floor +0.15%).
+
+        Peak is tracked on every tick. Lock activates at +0.15% gross.
+        Sell trigger = max(+0.15%, peak − 0.02%). This uses absolute peak so
+        slow climbs still raise the trail (old tick-to-tick milestone logic
+        left lock stuck at +0.15% even after peak hit +0.30%).
+        """
         act = self.PROFIT_LOCK_ACTIVATION_GROSS_PCT
         step = self.PROFIT_LOCK_STEP_GROSS_PCT
         min_sell = act
@@ -668,15 +673,17 @@ class AITradingAgent:
             trade["peak_net_pct"] = max(float(trade.get("peak_net_pct") or 0.0), net)
         peak = float(trade.get("peak_gross_pct") or 0.0)
 
-        if gross < act:
+        if peak < act and gross < act:
             return None
 
         if not trade.get("is_lock_active"):
+            if gross < act:
+                return None
             trade["is_lock_active"] = True
             trade["lock_level_pct"] = act
             notifications.push(
                 f"Profit lock ON #{trade['id']} @ +{gross:.3f}% "
-                f"(peak+0.02% steps, sell prior step, floor +{min_sell:.2f}%).",
+                f"(trail peak−{step:.2f}%, floor +{min_sell:.2f}%).",
                 "success",
             )
             system_log.push(
@@ -685,24 +692,22 @@ class AITradingAgent:
                 {"trade_id": trade["id"], "peak_gross_pct": gross},
             )
 
-        lock_level = float(trade.get("lock_level_pct") or act)
-        prev_lock = lock_level
-        base = prev_peak if prev_peak >= act else act
-        milestone = base + step
-        while gross + 1e-9 >= milestone:
-            lock_level = milestone
-            milestone += step
+        # Absolute lock from peak (not prev_peak+step per tick — that never advanced).
+        steps_above = int((peak - act + 1e-12) / step)
+        lock_level = act + max(0, steps_above) * step
+        prev_lock = float(trade.get("lock_level_pct") or act)
         trade["lock_level_pct"] = lock_level
 
-        if lock_level > prev_lock:
+        # Trail: book when price gives back one step from peak (never below floor).
+        sell_trigger = max(min_sell, peak - step)
+        trade["sell_trigger_pct"] = sell_trigger
+
+        if lock_level > prev_lock + 1e-12:
             notifications.push(
-                f"Lock step #{trade['id']} → +{lock_level:.2f}% (sell if back to +{max(min_sell, lock_level - step):.2f}%).",
+                f"Lock step #{trade['id']} peak +{peak:.2f}% → sell if back to +{sell_trigger:.2f}%.",
                 "info",
             )
 
-        sell_trigger = max(min_sell, lock_level - step)
-        if gross < min_sell:
-            return None
         if gross < peak and gross <= sell_trigger + 1e-9:
             return (
                 f"Profit Book #{trade['id']}: peak +{peak:.3f}% lock +{lock_level:.2f}% "
@@ -1100,6 +1105,12 @@ class AITradingAgent:
                 "exit_fee_usd": round(m["exit_fee_usd"], 4),
                 "status": "locked" if trade.get("is_lock_active") else "active",
                 "protected": trade.get("source") == "manual",
+                "peak_gross_pct": round(float(trade.get("peak_gross_pct") or 0), 4),
+                "sell_trigger_pct": (
+                    round(float(trade["sell_trigger_pct"]), 4)
+                    if trade.get("sell_trigger_pct") is not None
+                    else None
+                ),
             })
             snapshot.append(out)
 
