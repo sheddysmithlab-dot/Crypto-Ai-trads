@@ -1,0 +1,38 @@
+# Backend ONLY — use when another Docker/Caddy already owns ports 80+443 on this VPS.
+# Add api.aitrads.in to that main reverse proxy → host port 8000 (see upload/BUILD.txt).
+#
+#   docker compose -f docker-compose.backend-only.yml up -d --build
+
+services:
+  backend:
+    image: crypto-ai-trads-backend:latest
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      AI_PROVIDER: ${AI_PROVIDER:-z-ai}
+      ZAI_MODEL: ${ZAI_MODEL:-glm-4.5-flash}
+      ZAI_BASE_URL: ${ZAI_BASE_URL:-https://api.z.ai/api/paas/v4}
+      ZAI_API_KEY: ${ZAI_API_KEY:-}
+      TAAPI_SECRET: ${TAAPI_SECRET:-}
+      TAAPI_EXCHANGE: ${TAAPI_EXCHANGE:-bybit}
+      BYBIT_TESTNET_API_KEY: ${BYBIT_TESTNET_API_KEY:-}
+      BYBIT_TESTNET_API_SECRET: ${BYBIT_TESTNET_API_SECRET:-}
+      AUTH_USERNAME: ${AUTH_USERNAME:-}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

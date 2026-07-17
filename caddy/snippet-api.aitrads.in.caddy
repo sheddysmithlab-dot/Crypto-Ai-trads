@@ -1,0 +1,7 @@
+# Paste into your MAIN VPS Caddyfile (the one project that owns ports 80+443).
+# crypto-ai-trads backend must run with docker-compose.backend-only.yml on 127.0.0.1:8000
+
+api.aitrads.in {
+	encode gzip
+	reverse_proxy 127.0.0.1:8000
+}

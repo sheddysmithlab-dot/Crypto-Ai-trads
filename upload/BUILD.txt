@@ -50,3 +50,31 @@ Backend   → VPS Docker → https://api.aitrads.in  (NOT srv1831231.hstgr.cloud
   API:  https://api.aitrads.in/health
 
 Firewall: ports 80 + 443 open. Port 8000 browser se mat kholo.
+
+--- SAME VPS: 2+ Docker projects (IMPORTANT) ---
+  Ek VPS par sirf EK container ports 80 + 443 bind kar sakta hai.
+  Doosra project deploy karne ke baad SSL error = port fight / galat Caddy ne 443 pakda.
+
+  Check kaun 80/443 use kar raha hai:
+    docker ps --format "table {{.Names}}\t{{.Ports}}"
+    ss -tlnp | grep -E ':80|:443'
+
+  Caddy log "admin.json: no such file" = ERROR NAHI — naya ACME account ban raha hai (normal).
+  Asli problem: "certificate obtained" ke baad bhi browser fail = doosra Caddy 443 par hai.
+
+  FIX A — is project ka Caddy band, doosre project ke Caddy me api route add karo:
+    cd /docker/crypto-ai-trads/crypto-ai-trads
+    git pull
+    docker compose down
+    docker compose -f docker-compose.backend-only.yml up -d --build
+    curl http://127.0.0.1:8000/health
+
+    Doosre project ke Caddyfile me add (see caddy/snippet-api.aitrads.in.caddy):
+      api.aitrads.in { reverse_proxy 127.0.0.1:8000 }
+    phir doosre project ka caddy restart
+
+  FIX B — sirf ye project 80+443 use kare (doosre project ka caddy ports hatao):
+    docker compose down   # doosre project folder me
+    cd /docker/crypto-ai-trads/crypto-ai-trads
+    docker volume rm crypto-ai-trads_caddy_data crypto-ai-trads_caddy_config
+    docker compose up -d --build
