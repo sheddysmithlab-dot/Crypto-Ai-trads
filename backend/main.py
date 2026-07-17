@@ -1443,8 +1443,8 @@ async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
 # Example: $1,000 capital -> $100 position -> ~0.00103 BTC @ $97,000.
 AUTO_TRADE_CAPITAL_PCT = 0.10
 
-# Stepped profit lock books winners (+0.15% activate, +0.02% steps). Opposite flip still
-# does not auto-close existing trades (new opposite entry is skipped).
+# Stepped profit lock books winners (+0.15% activate, +0.02% steps).
+# Opposite LONG+SHORT on the same pair are both allowed (no skip / no flip-close).
 AUTO_TRADE_AUTO_EXIT_ENABLED = True
 
 # False = normal fire: BUY pattern → LONG, SELL pattern → SHORT.
@@ -1714,14 +1714,7 @@ async def fire_taapi_auto_trade(
             _log_trade_skip(exec_action, bybit_symbol, pattern, err)
             return None, False, err
 
-        if agent.has_opposite_position(side, agent.active_pair):
-            opposite = "SHORT" if side == "LONG" else "LONG"
-            err = (
-                f"Opposite {opposite} already open on {agent.active_pair} — "
-                f"new {side} entry skipped (existing trades are never auto-closed on flip)."
-            )
-            _log_trade_skip(exec_action, bybit_symbol, pattern, err)
-            return None, False, err
+        # Opposite LONG/SHORT may both stay open — no skip, no flip-close.
 
         if bybit_api.mode == "PAPER_TRADING":
             trade = agent.open_trade(

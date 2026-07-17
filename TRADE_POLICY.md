@@ -74,7 +74,7 @@ flowchart TD
 5. Run `evaluate_uvss()` → `BUY` / `SELL` / `NO_TRADE`
 6. Size via `compute_risk_trade_plan()` (1% balance risk to SL distance)
 7. Cap notional at `balance × 1% margin × 100x leverage` (= 100% of equity max)
-8. Close opposite auto positions on same pair (no hedge)
+8. Opposite LONG+SHORT on same pair allowed (no skip, no flip-close)
 9. `fire_taapi_auto_trade()` → paper or Bybit TESTNET fill
 
 ### 2.4 Open position management
@@ -90,7 +90,7 @@ flowchart TD
 | Stepped profit lock | Auto only | Market close when retreat to prior lock step (+0.15% / +0.02%) |
 | Force close (UI) | Any open trade | `POST /close-trade` |
 | STOP automation | All | `POST /emergency-exit` → `_close_all_positions()` + halt |
-| Opposite signal on same pair | Auto only | **Skip** new entry — existing trades are **never** auto-closed on flip |
+| Opposite signal on same pair | Auto only | **Allow** — both LONG and SHORT may stay open; each books via profit lock |
 
 ### 2.6 Stop automation
 
@@ -186,7 +186,7 @@ position_size = margin × 100x leverage
 
 UI: open trades stay on top; booked exits appear under **Exited (booked)** in Live Trades.
 
-Opposite signal still **skips** new entry (does not close existing).
+Opposite signal **does not skip** and **does not close** existing trades — both sides may be open.
 
 ### Legacy: disable auto lock
 
