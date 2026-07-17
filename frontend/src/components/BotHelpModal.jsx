@@ -6,7 +6,7 @@ const HOW_IT_WORKS = [
   'VSA long (200 EMA uptrend): L1 exhaustion, L2 hammer, L4 absorption. L3 spring + L5 momentum bypass EMA.',
   'VSA short (200 EMA downtrend): S1 exhaustion, S3 absorption. S2 up-thrust + S4 momentum bypass EMA.',
   'Marubozu: EMA50/200 trend + 2–4 bar pullback + large-body marubozu candle.',
-  'Long/BUY patterns → agent fires SELL (SHORT). Short/SELL patterns → agent fires BUY (LONG). Pattern scan unchanged.',
+  'BUY → LONG, SELL → SHORT. Stepped profit lock books winners (+0.15% on, +0.02% steps); exits drop below in Live Trades.',
   'PAPER simulates fills; testnet sends real orders. STOP ends automation.',
 ];
 

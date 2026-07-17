@@ -753,6 +753,8 @@ class AITradingAgent:
             "protected": trade.get("source") == "manual",
             "signal_candle_time": trade.get("signal_candle_time"),
             "pattern": trade.get("pattern"),
+            "opened_at": trade.get("opened_at"),
+            "exchange": trade.get("exchange"),
         })
 
     def get_entry_candle_highlights(self) -> list[dict]:
@@ -1084,12 +1086,8 @@ class AITradingAgent:
             print(f"[PILLAR 3: AI AGENT] Active pair refreshed to {pair} @ {price}.")
 
     def get_trades_snapshot(self):
-        """Live trade list for the active panel. Completed trades are hidden here.
-
-        This ensures that once the bot closes all active positions on STOP,
-        the frontend trade window clears immediately instead of still showing
-        sold positions from the session history.
-        """
+        """Active trades on top, then session exits (sold) listed below for the UI."""
+        open_ids = {t["id"] for t in self.trades}
         snapshot = []
         for trade in self.trades:
             m = self._trade_metrics(trade)
@@ -1101,7 +1099,19 @@ class AITradingAgent:
                 "net_pnl_usd": round(m["net_usd"], 2),
                 "exit_fee_usd": round(m["exit_fee_usd"], 4),
                 "status": "locked" if trade.get("is_lock_active") else "active",
+                "protected": trade.get("source") == "manual",
             })
+            snapshot.append(out)
+
+        # Newest exits first under the open list (profit-lock / force-close / STOP).
+        sold_rows = [
+            row for row in self.trade_history
+            if row.get("status") == "sold" and row.get("id") not in open_ids
+        ]
+        sold_rows.sort(key=lambda r: r.get("id") or 0, reverse=True)
+        for row in sold_rows:
+            out = dict(row)
+            out.setdefault("protected", out.get("source") == "manual")
             snapshot.append(out)
         return snapshot
 
@@ -1433,12 +1443,12 @@ async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
 # Example: $1,000 capital -> $100 position -> ~0.00103 BTC @ $97,000.
 AUTO_TRADE_CAPITAL_PCT = 0.10
 
-# Fired auto trades stay open until user force-close or STOP/emergency — no flip close,
-# no stepped profit-lock market exit.
-AUTO_TRADE_AUTO_EXIT_ENABLED = False
+# Stepped profit lock books winners (+0.15% activate, +0.02% steps). Opposite flip still
+# does not auto-close existing trades (new opposite entry is skipped).
+AUTO_TRADE_AUTO_EXIT_ENABLED = True
 
-# Pattern engine unchanged: bullish/BUY signals fire SELL (SHORT), bearish/SELL fire BUY (LONG).
-INVERT_AUTO_TRADE_FIRE = True
+# False = normal fire: BUY pattern → LONG, SELL pattern → SHORT.
+INVERT_AUTO_TRADE_FIRE = False
 
 
 def qty_decimals_for_price(price: float) -> int:
@@ -1589,13 +1599,12 @@ def agent_policy_summary() -> str:
             else "Bybit TESTNET linear (real open/close)"
         )
         exit_note = (
-            "stepped profit lock +0.15% (+0.02% steps)"
+            "stepped profit lock +0.15% (+0.02% steps, book prior step)"
             if AUTO_TRADE_AUTO_EXIT_ENABLED
-            else "no auto-exit (manual close / STOP only; opposite flip skips new entry)"
+            else "no auto-exit (manual close / STOP only)"
         )
         return (
-            f"Blue Box + VSA + Marubozu | {exit_note}, no SL exit | "
-            f"INVERTED fire (long-pattern→SELL, short-pattern→BUY) | "
+            f"Blue Box + VSA + Marubozu | BUY→LONG SELL→SHORT | {exit_note}, no SL exit | "
             f"risk {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of available capital per auto fire | {exec_mode}"
         )
     return "Auto trade policies not active."

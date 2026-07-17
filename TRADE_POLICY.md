@@ -87,7 +87,7 @@ flowchart TD
 
 | Trigger | Applies to | Action |
 |---------|------------|--------|
-| Stepped profit lock | Auto only (if `AUTO_TRADE_AUTO_EXIT_ENABLED`) | Market close when retreat to prior lock step |
+| Stepped profit lock | Auto only | Market close when retreat to prior lock step (+0.15% / +0.02%) |
 | Force close (UI) | Any open trade | `POST /close-trade` |
 | STOP automation | All | `POST /emergency-exit` → `_close_all_positions()` + halt |
 | Opposite signal on same pair | Auto only | **Skip** new entry — existing trades are **never** auto-closed on flip |
@@ -173,17 +173,24 @@ position_size = margin × 100x leverage
 
 ---
 
-## 5. Exit policy — no auto-exit on fired trades (default)
+## 5. Exit policy — stepped profit lock
 
-**`AUTO_TRADE_AUTO_EXIT_ENABLED = False`** — once an auto trade fires, it stays open until:
-- User **force-close** (trash icon), or
-- **STOP AI AUTOMATION** / emergency exit (closes all)
+**`AUTO_TRADE_AUTO_EXIT_ENABLED = True`** — auto trades book via stepped profit lock. Manual trades are not auto-closed by lock.
 
-Stepped profit lock and opposite-flip auto-close are **disabled**. Opposite signal → new entry **skipped**, old position untouched.
+| Constant | Value |
+|----------|-------|
+| Activation | **+0.15%** gross |
+| Lock step | **+0.02%** from peak milestones |
+| Sell trigger | Price retreats to **previous lock step** |
+| Floor | **Never sell below +0.15%** gross |
 
-### Legacy stepped profit lock (only if `AUTO_TRADE_AUTO_EXIT_ENABLED = True`)
+UI: open trades stay on top; booked exits appear under **Exited (booked)** in Live Trades.
 
-**Auto trades only.** Manual trades not auto-closed by lock.
+Opposite signal still **skips** new entry (does not close existing).
+
+### Legacy: disable auto lock
+
+Set `AUTO_TRADE_AUTO_EXIT_ENABLED = False` to keep positions open until force-close / STOP.
 
 | Constant | Value |
 |----------|-------|
