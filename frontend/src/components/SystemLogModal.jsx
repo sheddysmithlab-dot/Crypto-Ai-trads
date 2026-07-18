@@ -183,6 +183,8 @@ const CATEGORY_COLOR = {
   taapi: 'text-purple-300',
   uvss: 'text-cyan-300',
   smc_vsa: 'text-cyan-300',
+  pattern: 'text-cyan-300',
+  whale: 'text-sky-300',
   ai: 'text-blue-300',
   bybit: 'text-amber-300',
   trade: 'text-green-300',

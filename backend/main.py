@@ -70,6 +70,20 @@ from ml_trading_memory import (
     search_ml,
 )
 from agent_brain import brain_chat_summary, enrich_signal, strategy_system_blurb
+from whale_alerts import (
+    WHALE_PAIR_LABEL,
+    WHALE_POLL_SECONDS,
+    WHALE_SOURCE_URL,
+    MIN_BTC_AMOUNT,
+    build_trade_plan_from_signal,
+    fetch_whale_alerts,
+    is_signal_seen,
+    is_seeded,
+    is_whale_pair,
+    last_fetch_snapshot,
+    mark_signal_seen,
+    seed_seen_from_snapshot,
+)
 
 from pathlib import Path
 
@@ -1380,6 +1394,8 @@ BYBIT_SYMBOL_MAP = {
     "ETH": "ETHUSDT",
     "XRP": "XRPUSDT",
     "LTC": "LTCUSDT",
+    # Whale-flow pair — executes on BTCUSDT; signals from Telegram WhaleBotAlerts.
+    "WHALE": "BTCUSDT",
     # XMR: no Bybit linear market — UI selectable; synthetic feed only; auto loop skips.
 }
 
@@ -1729,6 +1745,17 @@ def fetch_bible_context_for_signal(pattern_or_query: str | None, *, max_chars: i
 
 def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
+    if is_whale_pair(agent.active_pair):
+        exec_mode = (
+            "paper ledger (simulated fills)"
+            if bybit_api.mode == "PAPER_TRADING"
+            else "Bybit TESTNET linear (real open/close)"
+        )
+        return (
+            f"WHALE/BTC · Telegram WhaleBotAlerts ≥{MIN_BTC_AMOUNT:.0f} BTC | "
+            f"Unknown→Exchange=SHORT · Exchange→Unknown=LONG | "
+            f"exec on BTCUSDT | risk {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% | {exec_mode}"
+        )
     if UVSS_POLICIES_ENABLED:
         exec_mode = (
             "paper ledger (simulated fills)"
@@ -2039,6 +2066,11 @@ async def auto_buy_loop():
                 await asyncio.sleep(poll)
                 continue
 
+            # Whale pair uses whale_alert_loop — skip candle pattern engine.
+            if is_whale_pair(agent.active_pair):
+                await asyncio.sleep(poll)
+                continue
+
             bybit_symbol = get_bybit_symbol(agent.active_pair)
             if bybit_symbol is None:
                 await asyncio.sleep(poll)
@@ -2226,6 +2258,125 @@ async def auto_buy_loop():
 
             await asyncio.sleep(_AUTO_BUY_BURST_POLL if fired_trade else poll)
 
+
+async def whale_alert_loop():
+    """Dedicated WHALE/BTC pair: fetch Telegram WhaleBotAlerts → fire LONG/SHORT."""
+    print(
+        f"[WHALE LOOP] {WHALE_PAIR_LABEL} — poll {WHALE_SOURCE_URL} every {WHALE_POLL_SECONDS}s "
+        f"(≥{MIN_BTC_AMOUNT:.0f} BTC Unknown↔Exchange)."
+    )
+    async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
+        while True:
+            if not agent.is_active or agent.emergency_triggered or not is_whale_pair(agent.active_pair):
+                await asyncio.sleep(min(WHALE_POLL_SECONDS, 5.0))
+                continue
+
+            bybit_symbol = get_bybit_symbol(agent.active_pair) or "BTCUSDT"
+            try:
+                snap = await fetch_whale_alerts(client)
+            except Exception as exc:
+                print(f"[WHALE LOOP] fetch failed: {exc}")
+                await asyncio.sleep(WHALE_POLL_SECONDS)
+                continue
+
+            if not snap.get("ok"):
+                system_log.push(
+                    "whale",
+                    f"WhaleBotAlerts fetch failed: {snap.get('error')}",
+                    {"source": WHALE_SOURCE_URL},
+                )
+                await asyncio.sleep(WHALE_POLL_SECONDS)
+                continue
+
+            signals = snap.get("signals") or []
+            if not is_seeded():
+                n = seed_seen_from_snapshot(signals)
+                system_log.push(
+                    "whale",
+                    f"WhaleBotAlerts seeded — {n} existing alert(s) marked seen "
+                    f"(will only fire on NEW ≥{MIN_BTC_AMOUNT:.0f} BTC flows).",
+                    {"source": WHALE_SOURCE_URL},
+                )
+                await asyncio.sleep(WHALE_POLL_SECONDS)
+                continue
+
+            system_log.push(
+                "whale",
+                f"WhaleBotAlerts scanned — {len(signals)} qualifying signal(s) "
+                f"(≥{MIN_BTC_AMOUNT:.0f} BTC) from {snap.get('raw_count', 0)} BTC posts.",
+                {"min_btc": MIN_BTC_AMOUNT, "source": WHALE_SOURCE_URL},
+            )
+
+            for sig in signals:
+                sid = sig.get("id")
+                if not sid or is_signal_seen(sid):
+                    continue
+
+                entry_px = agent.current_price
+                result = build_trade_plan_from_signal(sig, float(entry_px) if entry_px else 0.0)
+                if not result:
+                    mark_signal_seen(sid)
+                    continue
+
+                system_log.push_agent_chat(
+                    f"Whale signal: {sig['reason']}",
+                    status="match",
+                    details={"decision": result, "pair": agent.active_pair},
+                )
+
+                balance = agent.get_available_capital()
+                if balance is None or balance <= 0:
+                    _log_trade_skip(
+                        result["action"], bybit_symbol, result.get("pattern"),
+                        f"Insufficient available capital (balance=${balance}).",
+                    )
+                    mark_signal_seen(sid)
+                    continue
+
+                plan = compute_auto_trade_plan(agent, float(result["entry"]))
+                if plan is None:
+                    _log_trade_skip(
+                        result["action"], bybit_symbol, result.get("pattern"),
+                        "Could not size whale trade.",
+                    )
+                    mark_signal_seen(sid)
+                    continue
+
+                candle_key = int(time.time())
+                if is_bybit_testnet_configured() or bybit_api.mode == "PAPER_TRADING":
+                    log_trade_execution(
+                        signal_action_to_trade_side(result["action"]),
+                        float(result["entry"]),
+                        float(result["sl"]),
+                        float(result["tp"]),
+                        float(plan["qty"]),
+                        float(balance),
+                        result.get("pattern", "WHALE"),
+                    )
+                    await fire_taapi_auto_trade(
+                        {**result, "action": execution_action_for_fire(result["action"]), "symbol": bybit_symbol},
+                        bybit_symbol,
+                        plan,
+                        plan["position_usd"],
+                        plan["qty"],
+                        candle_close_time=candle_key,
+                        timeframe_key="whale",
+                        signal_action=result["action"],
+                    )
+                    mark_signal_seen(sid)
+                    # One fire per poll cycle — avoid stacking every historical alert at once
+                    break
+                else:
+                    _log_trade_skip(
+                        result["action"], bybit_symbol, result.get("pattern"),
+                        "BYBIT_TESTNET keys missing — whale signal logged only.",
+                    )
+                    mark_signal_seen(sid)
+                    break
+
+            await asyncio.sleep(WHALE_POLL_SECONDS)
+
+
 async def market_simulator():
     """ Synthetic random-walk price - runs whenever the active pair has no
     real market-data mapping, AND as a self-healing fallback if the real
@@ -2360,6 +2511,7 @@ async def start_background_tasks():
     asyncio.create_task(bybit_balance_refresher())
     asyncio.create_task(self_ping_keepalive())
     asyncio.create_task(auto_buy_loop())
+    asyncio.create_task(whale_alert_loop())
     asyncio.create_task(chart_24h_refresh_loop(BYBIT_SYMBOL_MAP))
 
 # ==========================================
@@ -2684,6 +2836,24 @@ async def agent_bible_search(
     return {"results": search_bible(q, limit=limit)}
 
 
+@app.get("/agent/whale/status")
+async def agent_whale_status():
+    """Latest WhaleBotAlerts fetch snapshot + rules."""
+    snap = last_fetch_snapshot()
+    return {
+        "pair": WHALE_PAIR_LABEL,
+        "active_pair_is_whale": is_whale_pair(agent.active_pair),
+        "source": WHALE_SOURCE_URL,
+        "min_btc": MIN_BTC_AMOUNT,
+        "rules": {
+            "short": "Unknown → Exchange (≥150 BTC) → SELL/SHORT",
+            "long": "Exchange → Unknown (≥150 BTC) → BUY/LONG",
+        },
+        "seeded": is_seeded(),
+        "last_fetch": snap,
+    }
+
+
 @app.get("/agent/ml/stats")
 async def agent_ml_stats():
     """ML Bitcoin trading paper in-RAM memory stats."""
@@ -2764,11 +2934,12 @@ async def get_chart_24h(pair: str | None = Query(None, description="e.g. BTC/USD
     fetches live from Bybit on demand when a mapped pair is missing from cache. """
     if pair:
         bybit_symbol = get_bybit_symbol(pair)
+        cache_pair = "BTC/USDT" if is_whale_pair(pair) else pair
         try:
             if bybit_symbol:
-                entry = await chart_24h_store.ensure_pair(pair, bybit_symbol)
+                entry = await chart_24h_store.ensure_pair(cache_pair, bybit_symbol)
             else:
-                entry = chart_24h_store.get_pair(pair)
+                entry = chart_24h_store.get_pair(cache_pair)
         except Exception as exc:
             print(f"[CHART 24H] Live fetch failed for {pair}: {exc}")
             entry = None
@@ -2781,7 +2952,7 @@ async def get_chart_24h(pair: str | None = Query(None, description="e.g. BTC/USD
                 "candles": [],
                 "updated_at": chart_24h_store.updated_at,
             }
-        return {"updated_at": chart_24h_store.updated_at, **entry}
+        return {"updated_at": chart_24h_store.updated_at, "pair": pair, **{k: v for k, v in entry.items() if k != "pair"}}
     return chart_24h_store.get_snapshot()
 
 @app.post("/settings/save")

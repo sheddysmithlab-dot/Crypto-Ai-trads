@@ -57,7 +57,11 @@ class Chart24hStore:
         symbol map - e.g. right after the app's trading-pair list is changed.
         Without this check, a fresh (<24h) snapshot of the OLD pairs would
         leave every NEW pair without chart data until the next daily refresh. """
-        expected = {f"{base}/USDT" for base in bybit_symbol_map}
+        expected = {
+            f"{base}/USDT"
+            for base in bybit_symbol_map
+            if base != "WHALE"  # whale pair reuses BTCUSDT chart
+        }
         return expected != set(self._data.get("pairs", {}).keys())
 
     def get_pair(self, pair_label: str):
@@ -125,6 +129,8 @@ class Chart24hStore:
 
         async with httpx.AsyncClient(timeout=12.0) as client:
             for base, bybit_symbol in bybit_symbol_map.items():
+                if base == "WHALE":
+                    continue  # chart for WHALE/BTC = BTC/USDT snapshot
                 pair_label = f"{base}/USDT"
                 try:
                     new_pairs[pair_label] = await self._fetch_pair(client, pair_label, bybit_symbol)

@@ -1,10 +1,8 @@
 const HOW_IT_WORKS = [
   'Pick a coin pair and chart timeframe (1M, 5M, 15M, etc.).',
   'Press START AI AUTOMATION and set your risk level (max open trades).',
-  'On each closed candle the AI brain runs: Detect pattern → read Candlestick Bible → ML cost-aware gate → fire.',
-  'Patterns: engulfing, pin/hammer/shooting star, morning/evening star, inside-bar break, harami, tweezers, doji, soldiers/crows, belt, marubozu.',
-  'Bible (RAM): tactics for pin bar, engulfing, and inside bar with confluence.',
-  'ML gate: only fire when remaining edge and candle range clear λ×fee hurdle — weak signals are blocked.',
+  'Normal pairs: Detect candle pattern → Bible → ML cost-aware gate → fire.',
+  'WHALE/BTC pair: polls Telegram WhaleBotAlerts — Unknown→Exchange (≥150 BTC)=SHORT, Exchange→Unknown (≥150 BTC)=LONG on BTCUSDT.',
   'BUY → LONG, SELL → SHORT. Profit lock: +0.15% activate, +0.02% steps from peak.',
   'PAPER simulates fills; testnet sends real orders. STOP ends automation.',
 ];

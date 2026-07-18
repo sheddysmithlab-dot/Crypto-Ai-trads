@@ -1,13 +1,16 @@
 import { useCallback, useState } from 'react';
 import { authFetch } from '../config/api';
 import { debugLog } from '../config/debug';
-import { TRADING_PAIRS, getBybitSymbol } from '../data/pairs';
+import { TRADING_PAIRS, getBybitSymbol, pairLabelForSymbol } from '../data/pairs';
 
 async function fetchLivePairPrice(symbol) {
-  const bybitSymbol = getBybitSymbol(`${symbol}/USDT`);
+  const bybitSymbol = getBybitSymbol(pairLabelForSymbol(symbol));
   if (!bybitSymbol) return null;
   try {
-    const res = await fetch(`https://api.bybit.com/v5/market/tickers?category=spot&symbol=${bybitSymbol}`);
+    // Linear ticker (same as backend whale/BTC execution market).
+    const res = await fetch(
+      `https://api.bybit.com/v5/market/tickers?category=linear&symbol=${bybitSymbol}`
+    );
     if (!res.ok) return null;
     const json = await res.json();
     const last = parseFloat(json?.result?.list?.[0]?.lastPrice);
@@ -24,13 +27,14 @@ export function usePairSelector() {
   const [activeSymbol, setActiveSymbol] = useState('BTC');
 
   const activePair = pairs.find((p) => p.symbol === activeSymbol) || pairs[0];
+  const activePairLabel = pairLabelForSymbol(activePair.symbol);
 
   const selectPair = useCallback(
     async (symbol) => {
       const pair = pairs.find((p) => p.symbol === symbol);
       if (!pair) return;
 
-      const fullLabel = `${pair.symbol}/USDT`;
+      const fullLabel = pairLabelForSymbol(pair.symbol);
       const livePrice = await fetchLivePairPrice(symbol);
       const seedPrice = livePrice ?? pair.price;
       debugLog(`[PAIR SELECTOR] Switching to ${fullLabel} @ $${seedPrice.toFixed(2)}`);
@@ -56,5 +60,5 @@ export function usePairSelector() {
     setPairs((prev) => prev.map((p) => (p.symbol === symbol ? { ...p, starred: !p.starred } : p)));
   }, []);
 
-  return { pairs, activeSymbol, activePair, activePairLabel: `${activePair.symbol}/USDT`, selectPair, toggleStar };
+  return { pairs, activeSymbol, activePair, activePairLabel, selectPair, toggleStar };
 }

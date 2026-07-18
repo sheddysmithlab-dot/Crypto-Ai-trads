@@ -37,6 +37,9 @@ fetches that section in microseconds and logs it in System Log / AI confirm.
 Profit lock: activate +0.15% gross, step +0.02% from peak, sell on retreat.
 No SL auto-exit (SL used for sizing / reference).
 
-## Retired (deleted from repo)
-Legacy Blue Box / VSA / TAAPI docs and stubs (`STRATEGY.md`, old DATA notes,
-`main_engine.py`, `taapi_scanner.py`) — do not restore.
+## Whale pair (separate)
+- UI pair: `WHALE/BTC` (executes on BTCUSDT)
+- Source: [WhaleBotAlerts](https://t.me/s/WhaleBotAlerts)
+- SHORT: Unknown → Exchange, amount ≥ 150 BTC
+- LONG: Exchange → Unknown, amount ≥ 150 BTC
+- First poll seeds existing alerts (no historical fire); only NEW alerts fire
