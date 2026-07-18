@@ -16,7 +16,8 @@ from typing import Any
 import httpx
 
 WHALE_SOURCE_URL = "https://t.me/s/WhaleBotAlerts"
-WHALE_POLL_SECONDS = float(__import__("os").environ.get("WHALE_POLL_SECONDS", "20"))
+# Scan Telegram preview once per minute (1m timeframe).
+WHALE_POLL_SECONDS = float(__import__("os").environ.get("WHALE_POLL_SECONDS", "60"))
 MIN_BTC_AMOUNT = float(__import__("os").environ.get("WHALE_MIN_BTC", "100"))
 SL_PCT = 0.005  # 0.5% reference SL for sizing
 RR_RATIO = 2.0

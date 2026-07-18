@@ -5,8 +5,8 @@ import os
 
 from timeframe_rules import TIMEFRAME_RULES
 
-_DEFAULT_LAMBDA = 1.0
-_DEFAULT_MIN_CANDLE_RANGE = 0.25
+_DEFAULT_LAMBDA = 0.5
+_DEFAULT_MIN_CANDLE_RANGE = 0.0
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -17,7 +17,8 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def cost_aware_enabled() -> bool:
-    return _env_bool("COST_AWARE_ENABLED", True)
+    # Default OFF — candle patterns were never firing through the range gate on flat 1m BTC.
+    return _env_bool("COST_AWARE_ENABLED", False)
 
 
 def cost_aware_dry_run() -> bool:

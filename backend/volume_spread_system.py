@@ -14,8 +14,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 UVSS_POLICIES_ENABLED = True
-# ML paper: naive sign trades die under fees — cost-aware gate ON by default.
-UVSS_COST_AWARE_ENTRY = True
+# Cost-aware gate OFF for candle fires — flat 1m BTC ranges were blocking every signal.
+# Whale loop is separate and keeps its own ≥100 BTC rules.
+UVSS_COST_AWARE_ENTRY = False
 UVSS_SL_EXIT_ENABLED = False
 
 EMA_FAST = 50
@@ -207,13 +208,33 @@ def _midpoint(c: dict) -> float:
     return (c["open"] + c["close"]) / 2.0
 
 
+def _is_pin_bull(c: dict) -> bool:
+    body, upper, lower, rng = _body(c), _upper_wick(c), _lower_wick(c), _range(c)
+    return lower >= body * 1.2 and lower >= rng * 0.4 and upper <= body * 1.5
+
+
+def _is_pin_bear(c: dict) -> bool:
+    body, upper, lower, rng = _body(c), _upper_wick(c), _lower_wick(c), _range(c)
+    return upper >= body * 1.2 and upper >= rng * 0.4 and lower <= body * 1.5
+
+
+def _is_marubozu(c: dict, candles: list[dict]) -> bool:
+    avg = _avg_body(candles)
+    body = _body(c)
+    if avg <= 0 or body < avg * 1.0:
+        return False
+    return _upper_wick(c) <= body * 0.15 and _lower_wick(c) <= body * 0.15
+
+
 def _engulfs(outer: dict, inner: dict) -> bool:
-    """Outer body fully covers inner body."""
+    """Outer body covers inner body (near-engulf allowed — 95% cover)."""
     o_hi = max(outer["open"], outer["close"])
     o_lo = min(outer["open"], outer["close"])
     i_hi = max(inner["open"], inner["close"])
     i_lo = min(inner["open"], inner["close"])
-    return o_hi >= i_hi and o_lo <= i_lo and _body(outer) > _body(inner)
+    inner_body = max(i_hi - i_lo, 1e-12)
+    cover = min(o_hi, i_hi) - max(o_lo, i_lo)
+    return cover >= inner_body * 0.95 and _body(outer) >= _body(inner) * 0.9
 
 
 def compute_ema(closes: list[float], length: int) -> float | None:
@@ -257,24 +278,6 @@ def _recent_direction(candles: list[dict], lookback: int = TREND_LOOKBACK) -> st
     if b < a * (1.0 - LOCAL_SLOPE_PCT):
         return "down"
     return "flat"
-
-
-def _is_pin_bull(c: dict) -> bool:
-    body, upper, lower, rng = _body(c), _upper_wick(c), _lower_wick(c), _range(c)
-    return lower >= body * 1.5 and lower >= rng * 0.45 and upper <= body * 1.2
-
-
-def _is_pin_bear(c: dict) -> bool:
-    body, upper, lower, rng = _body(c), _upper_wick(c), _lower_wick(c), _range(c)
-    return upper >= body * 1.5 and upper >= rng * 0.45 and lower <= body * 1.2
-
-
-def _is_marubozu(c: dict, candles: list[dict]) -> bool:
-    avg = _avg_body(candles)
-    body = _body(c)
-    if avg <= 0 or body < avg * 1.2:
-        return False
-    return _upper_wick(c) <= body * 0.12 and _lower_wick(c) <= body * 0.12
 
 
 def _signal_sl(action: str, candle: dict) -> float:

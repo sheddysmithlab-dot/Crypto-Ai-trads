@@ -4,17 +4,17 @@
 **Short ops spec:** [`DATA/TRADING POLICIES.txt`](DATA/TRADING%20POLICIES.txt)
 
 ## Live pipeline (normal pairs)
-1. Detect candle pattern (`backend/volume_spread_system.py`) — loosened pins / local / conflict pick
+1. Detect candle pattern (`backend/volume_spread_system.py`)
 2. Bible RAM fetch (`candlestick_bible_memory`)
-3. ML cost-aware gate (`trading_policy` · default λ=1.0, range≥0.25×RT)
+3. Cost-aware gate **OFF** for candles (was blocking flat 1m ranges)
 4. Fire BUY→LONG / SELL→SHORT (`main.py` auto_buy_loop)
 
 ## Whale flow (merged into BTC/USDT)
 - Source: [WhaleBotAlerts](https://t.me/s/WhaleBotAlerts)
 - SHORT: Unknown → Exchange (≥100 BTC)
 - LONG: Exchange → Unknown (≥100 BTC)
+- Poll every **60 seconds (1m)** — rules not loosened with candle gate
 - Runs alongside candle patterns when active pair is BTC/USDT (`whale_alert_loop`)
-- No separate WHALE/BTC UI pair
 
 ## Exits
 Profit lock: +0.15% activate, +0.02% steps from peak. No SL auto-exit.
