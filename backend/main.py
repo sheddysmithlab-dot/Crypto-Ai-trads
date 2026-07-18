@@ -1630,6 +1630,7 @@ def load_system_role_text() -> str:
     parts: list[str] = []
     for name in (
         "SYSTEM_ROLE_AND_IDENTITY.md",
+        "CANDLESTICK_PATTERNS_INTRO.md",
         "SMC_ICT_MARKET_STRUCTURE.md",
         "FIB_LIQUIDITY_CONFIRMATION.md",
         "TREND_REVERSAL_PREMIUM.md",
