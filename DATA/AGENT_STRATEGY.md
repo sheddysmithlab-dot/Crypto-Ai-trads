@@ -27,19 +27,21 @@ Trend filters: EMA50/EMA200 + local slope. Same-bar bull+bear conflict → `NO_T
 Each pattern maps to a Bible section id (`PATTERN_BIBLE_KEY`). On signal, agent
 fetches that section in microseconds and logs it in System Log / AI confirm.
 
-## ML fire discipline (arXiv:2606.00060)
+## ML fire discipline (arXiv:2606.00060) — loosened live defaults
 - Round-trip cost ≈ 2 × taker fee
-- Hurdle = λ × round-trip (default λ=2)
-- Require: remaining edge to TP ≥ hurdle **and** candle range ≥ 0.5× round-trip
-- Goal: kill turnover from weak / near-zero magnitude signals
+- Hurdle = λ × round-trip (**default λ=1.0**, was 2.0)
+- Require: remaining edge to TP ≥ hurdle **and** candle range ≥ **0.25×** round-trip
+- Pattern detect also loosened (pins / local slope / conflict → best side)
+- Goal: more actionable fires while still filtering fee-dead noise
 
 ## Exits (unchanged code)
 Profit lock: activate +0.15% gross, step +0.02% from peak, sell on retreat.
 No SL auto-exit (SL used for sizing / reference).
 
-## Whale pair (separate)
-- UI pair: `WHALE/BTC` (executes on BTCUSDT)
+## Whale flow (merged into BTC/USDT)
+- No separate UI pair — runs with BTC candle automation when active pair is BTC/USDT
 - Source: [WhaleBotAlerts](https://t.me/s/WhaleBotAlerts)
-- SHORT: Unknown → Exchange, amount ≥ 150 BTC
-- LONG: Exchange → Unknown, amount ≥ 150 BTC
+- SHORT: Unknown → Exchange, amount ≥ 100 BTC
+- LONG: Exchange → Unknown, amount ≥ 100 BTC
 - First poll seeds existing alerts (no historical fire); only NEW alerts fire
+- Loop: `main.py` `whale_alert_loop` (parallel to `auto_buy_loop`)

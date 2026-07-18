@@ -16,12 +16,11 @@ from typing import Any
 import httpx
 
 WHALE_SOURCE_URL = "https://t.me/s/WhaleBotAlerts"
-WHALE_PAIR_LABEL = "WHALE/BTC"
-WHALE_EXEC_SYMBOL = "BTCUSDT"  # orders / chart price = BTC linear
-MIN_BTC_AMOUNT = 150.0
-WHALE_POLL_SECONDS = 45.0
+WHALE_POLL_SECONDS = float(__import__("os").environ.get("WHALE_POLL_SECONDS", "20"))
+MIN_BTC_AMOUNT = float(__import__("os").environ.get("WHALE_MIN_BTC", "100"))
 SL_PCT = 0.005  # 0.5% reference SL for sizing
 RR_RATIO = 2.0
+
 
 # Venue names as they appear (or substring) on WhaleBotAlerts.
 _EXCHANGES = (
@@ -70,9 +69,15 @@ _last_fetch: dict[str, Any] = {
 }
 
 
+def is_btc_pair(pair_label: str | None) -> bool:
+    """Whale flow merges into BTC/USDT automation (no separate UI pair)."""
+    p = (pair_label or "").strip().upper().replace("-", "/")
+    return p in ("BTC/USDT", "BTC")
+
+
 def is_whale_pair(pair_label: str | None) -> bool:
-    p = (pair_label or "").strip().upper()
-    return p in ("WHALE/BTC", "WHALE-BTC", "WHALE")
+    """Deprecated alias — whale is merged into BTC."""
+    return is_btc_pair(pair_label)
 
 
 def _norm_party(name: str) -> str:

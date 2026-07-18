@@ -71,7 +71,6 @@ from ml_trading_memory import (
 )
 from agent_brain import brain_chat_summary, enrich_signal, strategy_system_blurb
 from whale_alerts import (
-    WHALE_PAIR_LABEL,
     WHALE_POLL_SECONDS,
     WHALE_SOURCE_URL,
     MIN_BTC_AMOUNT,
@@ -79,7 +78,7 @@ from whale_alerts import (
     fetch_whale_alerts,
     is_signal_seen,
     is_seeded,
-    is_whale_pair,
+    is_btc_pair,
     last_fetch_snapshot,
     mark_signal_seen,
     seed_seen_from_snapshot,
@@ -1115,6 +1114,10 @@ class AITradingAgent:
 
     def set_active_pair(self, pair, price):
         """ Switch pair for chart/trading while keeping open positions intact. """
+        # Legacy UI pair removed — whale flow is merged into BTC automation.
+        p = (pair or "").strip().upper().replace("-", "/")
+        if p in ("WHALE/BTC", "WHALE"):
+            pair = "BTC/USDT"
         pair_changed = pair != self.active_pair
         self.active_pair = pair
         self.current_price = price
@@ -1394,8 +1397,6 @@ BYBIT_SYMBOL_MAP = {
     "ETH": "ETHUSDT",
     "XRP": "XRPUSDT",
     "LTC": "LTCUSDT",
-    # Whale-flow pair — executes on BTCUSDT; signals from Telegram WhaleBotAlerts.
-    "WHALE": "BTCUSDT",
     # XMR: no Bybit linear market — UI selectable; synthetic feed only; auto loop skips.
 }
 
@@ -1745,17 +1746,6 @@ def fetch_bible_context_for_signal(pattern_or_query: str | None, *, max_chars: i
 
 def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
-    if is_whale_pair(agent.active_pair):
-        exec_mode = (
-            "paper ledger (simulated fills)"
-            if bybit_api.mode == "PAPER_TRADING"
-            else "Bybit TESTNET linear (real open/close)"
-        )
-        return (
-            f"WHALE/BTC · Telegram WhaleBotAlerts ≥{MIN_BTC_AMOUNT:.0f} BTC | "
-            f"Unknown→Exchange=SHORT · Exchange→Unknown=LONG | "
-            f"exec on BTCUSDT | risk {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% | {exec_mode}"
-        )
     if UVSS_POLICIES_ENABLED:
         exec_mode = (
             "paper ledger (simulated fills)"
@@ -1769,8 +1759,13 @@ def agent_policy_summary() -> str:
             if AUTO_TRADE_AUTO_EXIT_ENABLED
             else "no auto-exit (manual close / STOP only)"
         )
+        whale_note = (
+            f" + WhaleBotAlerts ≥{MIN_BTC_AMOUNT:.0f} BTC (Unknown→Exch=SHORT, Exch→Unknown=LONG)"
+            if is_btc_pair(agent.active_pair)
+            else ""
+        )
         return (
-            f"Candle patterns + Bible + ML cost-aware | BUY→LONG SELL→SHORT | {exit_note}, no SL exit | "
+            f"Candle patterns + Bible + ML cost-aware{whale_note} | BUY→LONG SELL→SHORT | {exit_note}, no SL exit | "
             f"risk {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of available capital per auto fire | {exec_mode}"
         )
     return "Auto trade policies not active."
@@ -2066,11 +2061,6 @@ async def auto_buy_loop():
                 await asyncio.sleep(poll)
                 continue
 
-            # Whale pair uses whale_alert_loop — skip candle pattern engine.
-            if is_whale_pair(agent.active_pair):
-                await asyncio.sleep(poll)
-                continue
-
             bybit_symbol = get_bybit_symbol(agent.active_pair)
             if bybit_symbol is None:
                 await asyncio.sleep(poll)
@@ -2260,14 +2250,14 @@ async def auto_buy_loop():
 
 
 async def whale_alert_loop():
-    """Dedicated WHALE/BTC pair: fetch Telegram WhaleBotAlerts → fire LONG/SHORT."""
+    """BTC/USDT automation: fetch Telegram WhaleBotAlerts → fire LONG/SHORT alongside candle patterns."""
     print(
-        f"[WHALE LOOP] {WHALE_PAIR_LABEL} — poll {WHALE_SOURCE_URL} every {WHALE_POLL_SECONDS}s "
+        f"[WHALE LOOP] BTC/USDT merge — poll {WHALE_SOURCE_URL} every {WHALE_POLL_SECONDS}s "
         f"(≥{MIN_BTC_AMOUNT:.0f} BTC Unknown↔Exchange)."
     )
     async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
         while True:
-            if not agent.is_active or agent.emergency_triggered or not is_whale_pair(agent.active_pair):
+            if not agent.is_active or agent.emergency_triggered or not is_btc_pair(agent.active_pair):
                 await asyncio.sleep(min(WHALE_POLL_SECONDS, 5.0))
                 continue
 
@@ -2841,13 +2831,14 @@ async def agent_whale_status():
     """Latest WhaleBotAlerts fetch snapshot + rules."""
     snap = last_fetch_snapshot()
     return {
-        "pair": WHALE_PAIR_LABEL,
-        "active_pair_is_whale": is_whale_pair(agent.active_pair),
+        "pair": "BTC/USDT",
+        "merged_into_btc": True,
+        "active_pair_is_btc": is_btc_pair(agent.active_pair),
         "source": WHALE_SOURCE_URL,
         "min_btc": MIN_BTC_AMOUNT,
         "rules": {
-            "short": "Unknown → Exchange (≥150 BTC) → SELL/SHORT",
-            "long": "Exchange → Unknown (≥150 BTC) → BUY/LONG",
+            "short": f"Unknown → Exchange (≥{MIN_BTC_AMOUNT:.0f} BTC) → SELL/SHORT",
+            "long": f"Exchange → Unknown (≥{MIN_BTC_AMOUNT:.0f} BTC) → BUY/LONG",
         },
         "seeded": is_seeded(),
         "last_fetch": snap,
@@ -2934,7 +2925,7 @@ async def get_chart_24h(pair: str | None = Query(None, description="e.g. BTC/USD
     fetches live from Bybit on demand when a mapped pair is missing from cache. """
     if pair:
         bybit_symbol = get_bybit_symbol(pair)
-        cache_pair = "BTC/USDT" if is_whale_pair(pair) else pair
+        cache_pair = pair
         try:
             if bybit_symbol:
                 entry = await chart_24h_store.ensure_pair(cache_pair, bybit_symbol)

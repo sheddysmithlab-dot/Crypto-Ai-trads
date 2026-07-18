@@ -5,8 +5,8 @@ import os
 
 from timeframe_rules import TIMEFRAME_RULES
 
-_DEFAULT_LAMBDA = 2.0
-_DEFAULT_MIN_CANDLE_RANGE = 0.5
+_DEFAULT_LAMBDA = 1.0
+_DEFAULT_MIN_CANDLE_RANGE = 0.25
 
 
 def _env_bool(name: str, default: bool) -> bool:

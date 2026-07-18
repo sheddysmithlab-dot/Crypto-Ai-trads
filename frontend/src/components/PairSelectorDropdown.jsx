@@ -37,9 +37,7 @@ export default function PairSelectorDropdown({ pairs, activePair, activePairLabe
             </div>
             <div className="flex-1">
               <div className="font-bold text-sm text-gray-900 dark:text-white leading-tight">{activePairLabel}</div>
-              <div className="text-xs text-gray-500 dark:text-gray-400 leading-tight">
-                {activePair.symbol === 'WHALE' ? 'Whale flow · BTCUSDT' : 'Bybit linear'}
-              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400 leading-tight">Bybit linear</div>
             </div>
           </div>
 
@@ -79,9 +77,7 @@ export default function PairSelectorDropdown({ pairs, activePair, activePairLabe
                     <span className={`text-sm font-bold ${isActive ? 'text-blue-600 dark:text-blue-400' : 'text-gray-900 dark:text-gray-200'}`}>
                       {pair.symbol}
                     </span>
-                    <span className="text-gray-500 dark:text-gray-400 font-normal text-xs">
-                      /{pair.symbol === 'WHALE' ? 'BTC' : 'USDT'}
-                    </span>
+                    <span className="text-gray-500 dark:text-gray-400 font-normal text-xs">/USDT</span>
                   </div>
                   {isActive && <i className="fas fa-check text-blue-500 text-sm ml-auto"></i>}
                 </button>

@@ -2,8 +2,8 @@ const HOW_IT_WORKS = [
   'Pick a coin pair and chart timeframe (1M, 5M, 15M, etc.).',
   'Press START AI AUTOMATION and set your risk level (max open trades).',
   'Normal pairs: Detect candle pattern → Bible → ML cost-aware gate → fire.',
-  'WHALE/BTC pair: polls Telegram WhaleBotAlerts — Unknown→Exchange (≥150 BTC)=SHORT, Exchange→Unknown (≥150 BTC)=LONG on BTCUSDT.',
-  'BUY → LONG, SELL → SHORT. Profit lock: +0.15% activate, +0.02% steps from peak.',
+  'BTC/USDT also merges WhaleBotAlerts: Unknown→Exchange (≥100 BTC)=SHORT, Exchange→Unknown (≥100 BTC)=LONG.',
+  'BUY → LONG, SELL → SHORT. Profit lock / Strict Exit on auto trades.',
   'PAPER simulates fills; testnet sends real orders. STOP ends automation.',
 ];
 

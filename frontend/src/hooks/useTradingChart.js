@@ -246,7 +246,6 @@ export function useTradingChart({
   const tradeFireOverlayElRef = useRef(null);
   const tradeFireLookupRef = useRef(new Map());
   const hoveredTradeFireTimeRef = useRef(null);
-  const onTradeFireHoverRef = useRef(() => {});
   const redrawTradeFireOverlayRef = useRef(() => {});
   const blueBoxLineRefsRef = useRef([]);
   const blueBoxOverlayDataRef = useRef(null);
@@ -304,19 +303,10 @@ export function useTradingChart({
       lookup,
       intervalSecs: currentIntervalRef.current,
       hoveredTime: hoveredTradeFireTimeRef.current,
-      onHover: (time) => onTradeFireHoverRef.current(time),
     });
   }, []);
 
   redrawTradeFireOverlayRef.current = redrawTradeFireOverlay;
-
-  onTradeFireHoverRef.current = (time) => {
-    if (hoveredTradeFireTimeRef.current === time) return;
-    hoveredTradeFireTimeRef.current = time;
-    const tip = time != null ? tradeFireTooltipFromLookup(tradeFireLookupRef.current, time) : null;
-    setReadouts((prev) => ({ ...prev, tradeFireTooltip: tip }));
-    redrawTradeFireOverlay();
-  };
 
   const pushCandlesToChart = useCallback((data) => {
     const series = candleSeriesRef.current;
@@ -665,7 +655,9 @@ export function useTradingChart({
 
     const tradeFireLayer = document.createElement('div');
     tradeFireLayer.setAttribute('aria-hidden', 'true');
-    tradeFireLayer.className = 'absolute inset-0 z-[20] overflow-visible';
+    // Must stay pointer-events-none — a full-bleed layer steals wheel/drag from
+    // lightweight-charts and kills zoom/pan. Hover uses chart crosshair instead.
+    tradeFireLayer.className = 'absolute inset-0 pointer-events-none z-[20] overflow-visible';
     chartContainer.appendChild(tradeFireLayer);
     tradeFireOverlayElRef.current = tradeFireLayer;
 

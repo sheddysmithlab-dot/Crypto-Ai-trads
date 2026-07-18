@@ -21,11 +21,13 @@ UVSS_SL_EXIT_ENABLED = False
 EMA_FAST = 50
 EMA_SLOW = 200
 BODY_AVG_PERIOD = 20
-TREND_LOOKBACK = 8
+TREND_LOOKBACK = 5
 MIN_CANDLES = max(EMA_SLOW + BODY_AVG_PERIOD + 5, 60)
 RISK_PCT_PER_TRADE = 0.01
 RR_RATIO = 2.0
 SL_BUFFER_PCT = 0.001
+# Looser local slope so more bars count as "flat" (more reversal setups).
+LOCAL_SLOPE_PCT = 0.0015
 
 # code → human label
 PATTERN_LABELS: dict[str, str] = {
@@ -250,29 +252,29 @@ def _recent_direction(candles: list[dict], lookback: int = TREND_LOOKBACK) -> st
         return None
     a = candles[-(lookback + 1)]["close"]
     b = candles[-2]["close"]
-    if b > a * 1.001:
+    if b > a * (1.0 + LOCAL_SLOPE_PCT):
         return "up"
-    if b < a * 0.999:
+    if b < a * (1.0 - LOCAL_SLOPE_PCT):
         return "down"
     return "flat"
 
 
 def _is_pin_bull(c: dict) -> bool:
     body, upper, lower, rng = _body(c), _upper_wick(c), _lower_wick(c), _range(c)
-    return lower >= body * 2.0 and lower >= rng * 0.55 and upper <= body * 1.0
+    return lower >= body * 1.5 and lower >= rng * 0.45 and upper <= body * 1.2
 
 
 def _is_pin_bear(c: dict) -> bool:
     body, upper, lower, rng = _body(c), _upper_wick(c), _lower_wick(c), _range(c)
-    return upper >= body * 2.0 and upper >= rng * 0.55 and lower <= body * 1.0
+    return upper >= body * 1.5 and upper >= rng * 0.45 and lower <= body * 1.2
 
 
 def _is_marubozu(c: dict, candles: list[dict]) -> bool:
     avg = _avg_body(candles)
     body = _body(c)
-    if avg <= 0 or body < avg * 1.4:
+    if avg <= 0 or body < avg * 1.2:
         return False
-    return _upper_wick(c) <= body * 0.08 and _lower_wick(c) <= body * 0.08
+    return _upper_wick(c) <= body * 0.12 and _lower_wick(c) <= body * 0.12
 
 
 def _signal_sl(action: str, candle: dict) -> float:
@@ -378,38 +380,46 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
     avg = max(_avg_body(candles), 1e-12)
     strength_base = min(_body(c0) / avg, 3.0)
     hits: list[dict] = []
+    # Reversal context: prefer counter-trend, but still allow flat / unknown.
+    # Against-local setups still fire at slightly lower strength (looser mode).
+    bull_ctx = local in ("down", "flat", None)
+    bear_ctx = local in ("up", "flat", None)
 
     # --- Engulfing (Bible core) ---
-    if _is_red(c1) and _is_green(c0) and _engulfs(c0, c1) and local in ("down", "flat", None):
-        hits.append(_hit("BULL_ENGULF", "BUY", c0, strength=strength_base + 0.5, setup="engulfing"))
-    if _is_green(c1) and _is_red(c0) and _engulfs(c0, c1) and local in ("up", "flat", None):
-        hits.append(_hit("BEAR_ENGULF", "SELL", c0, strength=strength_base + 0.5, setup="engulfing"))
+    if _is_red(c1) and _is_green(c0) and _engulfs(c0, c1):
+        s = strength_base + (0.5 if bull_ctx else 0.25)
+        hits.append(_hit("BULL_ENGULF", "BUY", c0, strength=s, setup="engulfing"))
+    if _is_green(c1) and _is_red(c0) and _engulfs(c0, c1):
+        s = strength_base + (0.5 if bear_ctx else 0.25)
+        hits.append(_hit("BEAR_ENGULF", "SELL", c0, strength=s, setup="engulfing"))
 
     # --- Pin / Hammer / Shooting Star ---
-    if _is_pin_bull(c0) and local in ("down", "flat", None):
-        code = "HAMMER" if _is_green(c0) or _body(c0) <= _range(c0) * 0.35 else "PIN_BULL"
-        hits.append(_hit(code, "BUY", c0, strength=strength_base + 0.4, setup="pin_bar"))
-    if _is_pin_bear(c0) and local in ("up", "flat", None):
-        code = "SHOOTING_STAR" if _is_red(c0) or _body(c0) <= _range(c0) * 0.35 else "PIN_BEAR"
-        hits.append(_hit(code, "SELL", c0, strength=strength_base + 0.4, setup="pin_bar"))
+    if _is_pin_bull(c0):
+        code = "HAMMER" if _is_green(c0) or _body(c0) <= _range(c0) * 0.4 else "PIN_BULL"
+        s = strength_base + (0.4 if bull_ctx else 0.2)
+        hits.append(_hit(code, "BUY", c0, strength=s, setup="pin_bar"))
+    if _is_pin_bear(c0):
+        code = "SHOOTING_STAR" if _is_red(c0) or _body(c0) <= _range(c0) * 0.4 else "PIN_BEAR"
+        s = strength_base + (0.4 if bear_ctx else 0.2)
+        hits.append(_hit(code, "SELL", c0, strength=s, setup="pin_bar"))
 
     # --- Morning / Evening Star ---
     if (
         _is_red(c2)
-        and _body(c1) <= _avg_body(candles) * 0.6
+        and _body(c1) <= _avg_body(candles) * 0.75
         and _is_green(c0)
         and c0["close"] > _midpoint(c2)
-        and local in ("down", "flat", None)
     ):
-        hits.append(_hit("MORNING_STAR", "BUY", c0, strength=strength_base + 0.6, setup="star"))
+        s = strength_base + (0.6 if bull_ctx else 0.3)
+        hits.append(_hit("MORNING_STAR", "BUY", c0, strength=s, setup="star"))
     if (
         _is_green(c2)
-        and _body(c1) <= _avg_body(candles) * 0.6
+        and _body(c1) <= _avg_body(candles) * 0.75
         and _is_red(c0)
         and c0["close"] < _midpoint(c2)
-        and local in ("up", "flat", None)
     ):
-        hits.append(_hit("EVENING_STAR", "SELL", c0, strength=strength_base + 0.6, setup="star"))
+        s = strength_base + (0.6 if bear_ctx else 0.3)
+        hits.append(_hit("EVENING_STAR", "SELL", c0, strength=s, setup="star"))
 
     # --- Piercing / Dark Cloud ---
     if (
@@ -430,9 +440,9 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
         hits.append(_hit("DARK_CLOUD", "SELL", c0, strength=strength_base + 0.3, setup="pierce"))
 
     # --- Harami ---
-    if _is_red(c1) and _is_green(c0) and _engulfs(c1, c0) and _body(c0) < _body(c1) * 0.6:
+    if _is_red(c1) and _is_green(c0) and _engulfs(c1, c0) and _body(c0) < _body(c1) * 0.75:
         hits.append(_hit("BULL_HARAMI", "BUY", c0, strength=strength_base, setup="harami"))
-    if _is_green(c1) and _is_red(c0) and _engulfs(c1, c0) and _body(c0) < _body(c1) * 0.6:
+    if _is_green(c1) and _is_red(c0) and _engulfs(c1, c0) and _body(c0) < _body(c1) * 0.75:
         hits.append(_hit("BEAR_HARAMI", "SELL", c0, strength=strength_base, setup="harami"))
 
     # --- Inside bar break (Bible strategy) ---
@@ -442,26 +452,24 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
         and c1["low"] >= c2["low"]
         and _body(c1) < _body(c2)
     ):
-        if c0["close"] > c2["high"] and (trend == "uptrend" or local == "up"):
+        if c0["close"] > c2["high"]:
             hits.append(_hit("INSIDE_UP", "BUY", c0, strength=strength_base + 0.45, setup="inside_bar"))
-        if c0["close"] < c2["low"] and (trend == "downtrend" or local == "down"):
+        if c0["close"] < c2["low"]:
             hits.append(_hit("INSIDE_DOWN", "SELL", c0, strength=strength_base + 0.45, setup="inside_bar"))
 
     # --- Tweezers ---
-    low_tol = max(c0["low"], c1["low"]) * 0.0004
-    high_tol = max(c0["high"], c1["high"]) * 0.0004
+    low_tol = max(c0["low"], c1["low"]) * 0.0006
+    high_tol = max(c0["high"], c1["high"]) * 0.0006
     if abs(c0["low"] - c1["low"]) <= low_tol and _is_red(c1) and _is_green(c0):
         hits.append(_hit("TWEEZER_BOT", "BUY", c0, strength=strength_base + 0.2, setup="tweezer"))
     if abs(c0["high"] - c1["high"]) <= high_tol and _is_green(c1) and _is_red(c0):
         hits.append(_hit("TWEEZER_TOP", "SELL", c0, strength=strength_base + 0.2, setup="tweezer"))
 
     # --- Doji extremes ---
-    if _is_doji(c0) and _lower_wick(c0) >= _range(c0) * 0.6 and _upper_wick(c0) <= _range(c0) * 0.1:
-        if local in ("down", "flat", None):
-            hits.append(_hit("DRAGONFLY", "BUY", c0, strength=max(strength_base, 0.8), setup="doji"))
-    if _is_doji(c0) and _upper_wick(c0) >= _range(c0) * 0.6 and _lower_wick(c0) <= _range(c0) * 0.1:
-        if local in ("up", "flat", None):
-            hits.append(_hit("GRAVESTONE", "SELL", c0, strength=max(strength_base, 0.8), setup="doji"))
+    if _is_doji(c0) and _lower_wick(c0) >= _range(c0) * 0.55 and _upper_wick(c0) <= _range(c0) * 0.15:
+        hits.append(_hit("DRAGONFLY", "BUY", c0, strength=max(strength_base, 0.8), setup="doji"))
+    if _is_doji(c0) and _upper_wick(c0) >= _range(c0) * 0.55 and _lower_wick(c0) <= _range(c0) * 0.15:
+        hits.append(_hit("GRAVESTONE", "SELL", c0, strength=max(strength_base, 0.8), setup="doji"))
 
     # --- Three soldiers / crows ---
     if len(candles) >= 4:
@@ -469,27 +477,27 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
         if (
             _is_green(a) and _is_green(b) and _is_green(d)
             and d["close"] > b["close"] > a["close"]
-            and _body(a) > avg * 0.7 and _body(b) > avg * 0.7 and _body(d) > avg * 0.7
+            and _body(a) > avg * 0.55 and _body(b) > avg * 0.55 and _body(d) > avg * 0.55
         ):
             hits.append(_hit("THREE_WHITE", "BUY", d, strength=strength_base + 0.35, setup="soldiers"))
         if (
             _is_red(a) and _is_red(b) and _is_red(d)
             and d["close"] < b["close"] < a["close"]
-            and _body(a) > avg * 0.7 and _body(b) > avg * 0.7 and _body(d) > avg * 0.7
+            and _body(a) > avg * 0.55 and _body(b) > avg * 0.55 and _body(d) > avg * 0.55
         ):
             hits.append(_hit("THREE_BLACK", "SELL", d, strength=strength_base + 0.35, setup="crows"))
 
     # --- Belt hold ---
-    if _is_green(c0) and _lower_wick(c0) <= _body(c0) * 0.05 and _body(c0) >= avg and local == "down":
+    if _is_green(c0) and _lower_wick(c0) <= _body(c0) * 0.1 and _body(c0) >= avg * 0.85:
         hits.append(_hit("BULL_BELT", "BUY", c0, strength=strength_base, setup="belt"))
-    if _is_red(c0) and _upper_wick(c0) <= _body(c0) * 0.05 and _body(c0) >= avg and local == "up":
+    if _is_red(c0) and _upper_wick(c0) <= _body(c0) * 0.1 and _body(c0) >= avg * 0.85:
         hits.append(_hit("BEAR_BELT", "SELL", c0, strength=strength_base, setup="belt"))
 
     # --- Marubozu continuation (with trend) ---
     if _is_marubozu(c0, candles):
-        if trend == "uptrend" and _is_green(c0):
+        if trend in ("uptrend", "range", None) and _is_green(c0):
             hits.append(_hit("MBZ_L", "BUY", c0, strength=strength_base + 0.3, setup="marubozu"))
-        if trend == "downtrend" and _is_red(c0):
+        if trend in ("downtrend", "range", None) and _is_red(c0):
             hits.append(_hit("MBZ_S", "SELL", c0, strength=strength_base + 0.3, setup="marubozu"))
 
     return hits
@@ -501,8 +509,14 @@ def _pick_best(hits: list[dict]) -> dict | None:
     buys = [h for h in hits if h["action"] == "BUY"]
     sells = [h for h in hits if h["action"] == "SELL"]
     if buys and sells:
-        # Conflict — skip (ML paper: unstable weak signals → turnover)
-        return None
+        # Looser: pick the stronger side instead of skipping the bar entirely.
+        best_buy = max(buys, key=lambda h: (h["priority"], h["strength"]))
+        best_sell = max(sells, key=lambda h: (h["priority"], h["strength"]))
+        buy_score = (best_buy["priority"], best_buy["strength"])
+        sell_score = (best_sell["priority"], best_sell["strength"])
+        if buy_score == sell_score:
+            return None
+        return best_buy if buy_score > sell_score else best_sell
 
     side = buys or sells
     side.sort(key=lambda h: (h["priority"], h["strength"]), reverse=True)

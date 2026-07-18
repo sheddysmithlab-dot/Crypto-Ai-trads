@@ -99,7 +99,6 @@ export function renderTradeFireOverlay({
   lookup,
   intervalSecs,
   hoveredTime = null,
-  onHover = null,
 }) {
   clearTradeFireOverlay(overlayEl);
   if (!chart || !series || !overlayEl || !lookup?.size) return;
@@ -136,8 +135,7 @@ export function renderTradeFireOverlay({
       `top:${top}px`,
       `width:${width}px`,
       `height:${height}px`,
-      'pointer-events:auto',
-      'cursor:crosshair',
+      'pointer-events:none',
     ].join(';');
     wrap.dataset.time = String(time);
 
@@ -149,6 +147,7 @@ export function renderTradeFireOverlay({
       'border-radius:3px',
       `border:2px solid ${neon.border}`,
       `background:${neon.bg}`,
+      'pointer-events:none',
     ].join(';');
     wrap.appendChild(glow);
 
@@ -157,9 +156,6 @@ export function renderTradeFireOverlay({
     badge.style.color = neon.badge;
     badge.textContent = '⚡';
     wrap.appendChild(badge);
-
-    wrap.addEventListener('mouseenter', () => onHover?.(time));
-    wrap.addEventListener('mouseleave', () => onHover?.(null));
 
     overlayEl.appendChild(wrap);
 

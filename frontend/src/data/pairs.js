@@ -1,6 +1,5 @@
 export const TRADING_PAIRS = [
   { symbol: 'BTC', icon: '₿', color: '#f7931a', starred: true, price: 62281.7 },
-  { symbol: 'WHALE', icon: '🐋', color: '#0ea5e9', starred: true, price: 62281.7, quote: 'BTC' },
   { symbol: 'ETH', icon: 'Ξ', color: '#627eea', starred: true, price: 1742.08 },
   { symbol: 'XRP', icon: 'X', color: '#25a768', starred: true, price: 1.085 },
   { symbol: 'LTC', icon: 'Ł', color: '#345d9d', starred: false, price: 43.79 },
@@ -11,14 +10,12 @@ export const TRADING_PAIRS = [
 // Bybit USDT perpetual (linear) — matches backend signal engine.
 export const BYBIT_SYMBOL_MAP = {
   BTC: 'BTCUSDT',
-  WHALE: 'BTCUSDT', // whale-flow pair executes on BTC
   ETH: 'ETHUSDT',
   XRP: 'XRPUSDT',
   LTC: 'LTCUSDT',
 };
 
 export function pairLabelForSymbol(symbol) {
-  if (symbol === 'WHALE') return 'WHALE/BTC';
   return `${symbol}/USDT`;
 }
 
