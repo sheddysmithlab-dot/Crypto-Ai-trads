@@ -2,20 +2,32 @@ import { getPairMeta, fmtNum } from '../data/pairs';
 import { formatTradeFireTime } from '../utils/time';
 
 function isTradeWinning(trade) {
-  // Price profit only (gross) — fees are shown in the header broker-fee total.
-  if (trade.gross_pnl_pct != null) return trade.gross_pnl_pct >= 0;
-  if (trade.pnl != null) return trade.pnl >= 0;
+  // Real mark-to-market vs entry (no fee) — green when price moved in your favor.
   if (trade.side === 'LONG' && trade.entry != null && trade.current != null) {
-    return trade.current >= trade.entry;
+    return Number(trade.current) >= Number(trade.entry);
   }
   if (trade.side === 'SHORT' && trade.entry != null && trade.current != null) {
-    return trade.current <= trade.entry;
+    return Number(trade.current) <= Number(trade.entry);
   }
+  if (trade.gross_pnl_pct != null) return trade.gross_pnl_pct >= 0;
+  if (trade.pnl != null) return trade.pnl >= 0;
   return false;
 }
 
-function formatProfitPct(pnl) {
-  const n = Number(pnl) || 0;
+function formatMovePct(trade) {
+  // Pure entry→current % — no fee, no suffix text.
+  const entry = Number(trade.entry);
+  const current = Number(trade.current);
+  if (Number.isFinite(entry) && entry > 0 && Number.isFinite(current)) {
+    let pct;
+    if (trade.side === 'SHORT') {
+      pct = ((entry - current) / entry) * 100;
+    } else {
+      pct = ((current - entry) / entry) * 100;
+    }
+    return `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+  }
+  const n = Number(trade.gross_pnl_pct ?? trade.pnl) || 0;
   return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
 }
 
@@ -38,7 +50,6 @@ function TradeRowDesktop({ trade, onRequestClose }) {
   const meta = getPairMeta(trade.pair);
   const isSold = trade.status === 'sold';
   const isProtected = trade.protected || trade.source === 'manual';
-  const totalPnl = trade.gross_pnl_pct ?? trade.pnl ?? 0;
   const isProfit = isTradeWinning(trade);
   const rowBg = isSold
     ? 'bg-white/5 dark:bg-white/5 opacity-90'
@@ -77,11 +88,8 @@ function TradeRowDesktop({ trade, onRequestClose }) {
       </td>
       <td className="px-3 py-1.5 font-mono">${fmtNum(trade.entry)}</td>
       <td className="px-3 py-1.5 font-mono">${fmtNum(trade.current)}</td>
-      <td className={`px-3 py-1.5 font-bold ${pnlColor}`}>
-        <span title="Price profit only — broker fees are in the header Daily Bybit Broker Fee">
-          {formatProfitPct(totalPnl)}
-          <span className="text-[9px] font-normal text-gray-500 ml-0.5">profit</span>
-        </span>
+      <td className={`px-3 py-1.5 font-bold font-mono ${pnlColor}`}>
+        {formatMovePct(trade)}
         {!isSold && trade.status === 'locked' && trade.sell_trigger_pct != null ? (
           <div className="text-[9px] font-normal text-blue-400">
             exit ≤ +{Number(trade.sell_trigger_pct).toFixed(2)}%
@@ -116,7 +124,6 @@ function TradeRowMobile({ trade }) {
   const isSold = trade.status === 'sold';
   const isProtected = trade.protected || trade.source === 'manual';
   const isProfit = isTradeWinning(trade);
-  const totalPnl = trade.gross_pnl_pct ?? trade.pnl ?? 0;
   const rowBg = isSold
     ? 'bg-white/5 dark:bg-white/5 opacity-90'
     : isProfit
@@ -153,10 +160,7 @@ function TradeRowMobile({ trade }) {
         </div>
       </div>
       <div className="flex items-center gap-1.5">
-        <span className={`font-bold ${pnlColor} text-xs`} title="Price profit only — fees in header">
-          {formatProfitPct(totalPnl)}
-          <span className="block text-[9px] font-normal text-gray-500">profit</span>
-        </span>
+        <span className={`font-bold font-mono ${pnlColor} text-xs`}>{formatMovePct(trade)}</span>
         <StatusIcon trade={trade} />
       </div>
     </div>
