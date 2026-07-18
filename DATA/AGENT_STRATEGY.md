@@ -27,9 +27,12 @@ Trend filters: EMA50/EMA200 + local slope. Same-bar bull+bear conflict → `NO_T
 Each pattern maps to a Bible section id (`PATTERN_BIBLE_KEY`). On signal, agent
 fetches that section in microseconds and logs it in System Log / AI confirm.
 
-## ML fire discipline
-- Candle cost-aware gate: **OFF** by default (flat 1m BTC ranges were blocking every signal)
-- Whale loop unchanged: ≥100 BTC, poll every **60s (1m)**
+## ML fire discipline (cost-aware ON, loosened)
+- Gate **ON** — not disabled
+- Hurdle = λ × round-trip (**λ=0.25**, ~0.03% on Bybit taker)
+- Candle-range floor optional (`COST_AWARE_MIN_CANDLE_RANGE=0` → skip range check)
+- Still requires remaining edge to TP ≥ hurdle
+- Whale: ≥100 BTC, poll **60s** (unchanged strictness)
 
 ## Exits (unchanged code)
 Profit lock: activate +0.15% gross, step +0.02% from peak, sell on retreat.

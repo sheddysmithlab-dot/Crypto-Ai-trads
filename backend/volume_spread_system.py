@@ -14,9 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 UVSS_POLICIES_ENABLED = True
-# Cost-aware gate OFF for candle fires — flat 1m BTC ranges were blocking every signal.
-# Whale loop is separate and keeps its own ≥100 BTC rules.
-UVSS_COST_AWARE_ENTRY = False
+# Cost-aware stays ON — loosened in trading_policy (low λ, range floor optional).
+UVSS_COST_AWARE_ENTRY = True
 UVSS_SL_EXIT_ENABLED = False
 
 EMA_FAST = 50
