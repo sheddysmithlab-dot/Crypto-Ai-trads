@@ -27,7 +27,7 @@ RISK_PCT_PER_TRADE = 0.01
 RR_RATIO = 2.0
 SL_BUFFER_PCT = 0.001
 # Looser local slope so more bars count as "flat" (more reversal setups).
-LOCAL_SLOPE_PCT = 0.0015
+LOCAL_SLOPE_PCT = 0.002  # mid: between tight 0.0015 and loose 0.003
 
 # code → human label
 PATTERN_LABELS: dict[str, str] = {
@@ -209,12 +209,12 @@ def _midpoint(c: dict) -> float:
 
 def _is_pin_bull(c: dict) -> bool:
     body, upper, lower, rng = _body(c), _upper_wick(c), _lower_wick(c), _range(c)
-    return lower >= body * 1.2 and lower >= rng * 0.4 and upper <= body * 1.5
+    return lower >= body * 1.3 and lower >= rng * 0.4 and upper <= body * 1.4
 
 
 def _is_pin_bear(c: dict) -> bool:
     body, upper, lower, rng = _body(c), _upper_wick(c), _lower_wick(c), _range(c)
-    return upper >= body * 1.2 and upper >= rng * 0.4 and lower <= body * 1.5
+    return upper >= body * 1.3 and upper >= rng * 0.4 and lower <= body * 1.4
 
 
 def _is_marubozu(c: dict, candles: list[dict]) -> bool:
@@ -489,18 +489,18 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
         ):
             hits.append(_hit("THREE_BLACK", "SELL", d, strength=strength_base + 0.35, setup="crows"))
 
-    # --- Belt hold (reversal only — was firing on every solid candle) ---
+    # --- Belt hold (mid: body >= 1.0× avg — between loose 0.85 and tight 1.1) ---
     if (
         _is_green(c0)
         and _lower_wick(c0) <= _body(c0) * 0.08
-        and _body(c0) >= avg * 1.1
+        and _body(c0) >= avg * 1.0
         and local == "down"
     ):
         hits.append(_hit("BULL_BELT", "BUY", c0, strength=strength_base + 0.2, setup="belt"))
     if (
         _is_red(c0)
         and _upper_wick(c0) <= _body(c0) * 0.08
-        and _body(c0) >= avg * 1.1
+        and _body(c0) >= avg * 1.0
         and local == "up"
     ):
         hits.append(_hit("BEAR_BELT", "SELL", c0, strength=strength_base + 0.2, setup="belt"))

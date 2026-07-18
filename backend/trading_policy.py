@@ -5,10 +5,10 @@ import os
 
 from timeframe_rules import TIMEFRAME_RULES
 
-# Loose-but-disciplined defaults: gate ON, moderate λ, small absolute range floor.
-_DEFAULT_LAMBDA = 1.0
-_DEFAULT_MIN_CANDLE_RANGE = 0.25
-_DEFAULT_ABS_MIN_RANGE_PCT = 0.02  # reject near-flat bars even if mult is low
+# Mid strictness: between loose spam (λ~0.25, abs~0) and tight (λ=1.0, abs=0.02).
+_DEFAULT_LAMBDA = 0.55
+_DEFAULT_MIN_CANDLE_RANGE = 0.15
+_DEFAULT_ABS_MIN_RANGE_PCT = 0.01
 
 
 def _env_bool(name: str, default: bool) -> bool:
