@@ -15,8 +15,10 @@ backend/__pycache__/
 *.pyc
 .env
 
-# Local PDF extract scratch (rebuild via build_bible_memory.py)
+# Local PDF / HTML extract scratch (rebuild via build_*_memory.py)
 DATA/_raw_candlestick_bible.txt
+DATA/_raw_machine_learning.txt
+DATA/_ml_preview/
 
 # OS/editor
 .DS_Store

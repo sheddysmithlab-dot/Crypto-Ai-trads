@@ -62,6 +62,13 @@ from candlestick_bible_memory import (
     memory_stats as bible_memory_stats,
     search_bible,
 )
+from ml_trading_memory import (
+    fetch_ml,
+    list_ml_toc,
+    memory_stats as ml_memory_stats,
+    ml_system_prompt_blurb,
+    search_ml,
+)
 
 from pathlib import Path
 
@@ -1645,6 +1652,7 @@ def load_system_role_text() -> str:
         "SYSTEM_ROLE_AND_IDENTITY.md",
         "CANDLESTICK_PATTERNS_INTRO.md",
         "CANDLESTICK_BIBLE_INDEX.md",
+        "ML_TRADING_PAPER_INDEX.md",
         "SMC_ICT_MARKET_STRUCTURE.md",
         "FIB_LIQUIDITY_CONFIRMATION.md",
         "TREND_REVERSAL_PREMIUM.md",
@@ -1663,6 +1671,12 @@ def load_system_role_text() -> str:
         blurb = bible_system_prompt_blurb()
         if blurb:
             parts.append(blurb)
+    except Exception:
+        pass
+    try:
+        ml_blurb = ml_system_prompt_blurb()
+        if ml_blurb:
+            parts.append(ml_blurb)
     except Exception:
         pass
     if INVERT_AUTO_TRADE_FIRE:
@@ -2317,6 +2331,20 @@ async def start_background_tasks():
         )
     except Exception as exc:
         print(f"[BIBLE MEMORY] load note: {exc}")
+    try:
+        ml_stats = ml_memory_stats()
+        print(
+            f"[ML MEMORY] RAM loaded: {ml_stats.get('section_count')} sections · "
+            f"{ml_stats.get('total_chars')} chars · load_ns={ml_stats.get('load_ns')} · "
+            f"arxiv={ml_stats.get('arxiv_id')}"
+        )
+        system_log.push(
+            "ai",
+            "ML Bitcoin trading paper memory loaded into RAM (microsecond fetch ready).",
+            {k: v for k, v in ml_stats.items() if k != "takeaways"},
+        )
+    except Exception as exc:
+        print(f"[ML MEMORY] load note: {exc}")
     asyncio.create_task(market_simulator())
     asyncio.create_task(bybit_price_feed())
     asyncio.create_task(bybit_balance_refresher())
@@ -2644,6 +2672,33 @@ async def agent_bible_search(
 ):
     """In-RAM keyword search across bible sections."""
     return {"results": search_bible(q, limit=limit)}
+
+
+@app.get("/agent/ml/stats")
+async def agent_ml_stats():
+    """ML Bitcoin trading paper in-RAM memory stats."""
+    return ml_memory_stats()
+
+
+@app.get("/agent/ml/toc")
+async def agent_ml_toc():
+    return {"toc": list_ml_toc(), "stats": ml_memory_stats()}
+
+
+@app.get("/agent/ml/fetch")
+async def agent_ml_fetch(
+    q: str = Query(..., min_length=1, description="Section id or alias, e.g. cost aware, xgboost, h2"),
+    max_chars: int = Query(8000, ge=200, le=50000),
+):
+    return fetch_ml(q, max_chars=max_chars)
+
+
+@app.get("/agent/ml/search")
+async def agent_ml_search(
+    q: str = Query(..., min_length=1),
+    limit: int = Query(8, ge=1, le=30),
+):
+    return {"results": search_ml(q, limit=limit)}
 
 
 @app.get("/system/logs")
