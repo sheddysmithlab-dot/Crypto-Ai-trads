@@ -19,6 +19,7 @@ export function usePortfolio(setConnected) {
     tradingMode: null,
     agentChat: [],
     blueBoxOverlay: null,
+    sessionSchedule: null,
   });
   const reconnectTimer = useRef(null);
 
@@ -47,6 +48,7 @@ export function usePortfolio(setConnected) {
           tradingMode: data.trading_mode,
           agentChat: data.agent_chat || [],
           blueBoxOverlay: data.blue_box_overlay || null,
+          sessionSchedule: data.session_schedule || null,
         });
       };
 

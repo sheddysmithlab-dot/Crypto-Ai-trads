@@ -17,7 +17,8 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
   const [aiModel, setAiModel] = useState('glm-4.5-flash');
   const [aiBaseUrl, setAiBaseUrl] = useState('https://api.z.ai/api/paas/v4');
   const [banner, setBanner] = useState({ tone: 'neutral', message: 'Loading settings status...' });
-  const [busy, setBusy] = useState({ save: false, testBybit: false, testAi: false, reset: false });
+  const [busy, setBusy] = useState({ save: false, testBybit: false, testAi: false, reset: false, schedule: false });
+  const [schedule, setSchedule] = useState(null);
 
   async function refreshStatus() {
     try {
@@ -38,6 +39,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
       setAiProvider(data.ai_provider || 'z-ai');
       setAiModel(data.ai_model || 'glm-4.5-flash');
       setAiBaseUrl(data.ai_base_url || 'https://api.z.ai/api/paas/v4');
+      setSchedule(data.session_schedule || null);
     } catch {
       setBanner({ tone: 'error', message: 'Could not reach backend to load settings status.' });
     }
@@ -164,6 +166,29 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
     }
   }
 
+  async function handleToggleSchedule() {
+    setBusy((b) => ({ ...b, schedule: true }));
+    try {
+      const next = !Boolean(schedule?.enabled);
+      const res = await authFetch('/settings/session-schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSchedule(data.schedule || null);
+        setBanner({ tone: 'success', message: data.message });
+      } else {
+        setBanner({ tone: 'error', message: data.message || 'Failed to update schedule.' });
+      }
+    } catch {
+      setBanner({ tone: 'error', message: 'Connection to backend failed while updating schedule.' });
+    } finally {
+      setBusy((b) => ({ ...b, schedule: false }));
+    }
+  }
+
   return (
     <div
       className="fixed inset-0 bg-black bg-opacity-70 z-[110] flex items-center justify-center backdrop-blur-sm p-4"
@@ -287,6 +312,52 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
                   className="w-full bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
                 />
               </div>
+            </div>
+          </div>
+
+          {/* SESSION SCHEDULE */}
+          <div>
+            <div className="text-xs font-bold text-blue-400 uppercase tracking-widest mb-3">Session Schedule (IST)</div>
+            <div className="bg-[#161A1E] border border-gray-700 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-bold text-white">Auto AI on session windows</div>
+                  <p className="text-[11px] text-gray-500 mt-1 leading-relaxed">
+                    Mon–Fri only. Backend turns automation on/off even if nobody is logged in.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={Boolean(schedule?.enabled)}
+                  disabled={busy.schedule}
+                  onClick={handleToggleSchedule}
+                  className={`relative shrink-0 w-12 h-7 rounded-full transition-colors disabled:opacity-60 ${
+                    schedule?.enabled ? 'bg-emerald-500' : 'bg-gray-600'
+                  }`}
+                >
+                  <span
+                    className={`absolute top-0.5 left-0.5 w-6 h-6 rounded-full bg-white transition-transform ${
+                      schedule?.enabled ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+              <ul className="text-[11px] text-gray-400 space-y-1 leading-relaxed">
+                <li>Morning Momentum — 05:30–08:30</li>
+                <li>Peak Overlap — 18:30–23:30</li>
+                <li>US Core — 19:30–01:30</li>
+              </ul>
+              {schedule && (
+                <div className="text-[11px] text-gray-300 border-t border-gray-700 pt-2">
+                  Now: {schedule.now_ist || '—'} ·{' '}
+                  {schedule.enabled
+                    ? schedule.in_window
+                      ? `IN WINDOW (${(schedule.active_windows || []).join(', ')})`
+                      : 'waiting for next window'
+                    : 'schedule OFF'}
+                </div>
+              )}
             </div>
           </div>
 

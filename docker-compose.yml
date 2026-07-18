@@ -16,6 +16,8 @@ services:
     restart: unless-stopped
     env_file:
       - ./backend/.env
+    volumes:
+      - ./backend/data:/app/data
     expose:
       - "8000"
     environment:

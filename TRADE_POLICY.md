@@ -17,7 +17,10 @@
 - Runs alongside candle patterns when active pair is BTC/USDT (`whale_alert_loop`)
 
 ## Exits
-Profit lock: +0.15% activate, +0.02% steps from peak. No SL auto-exit.
+Strict Exit: +0.20% min lock, +1.2% hard target, trail peak − 1.5×0.10%. No SL auto-exit.
+
+## Session schedule (optional UI switch)
+Mon–Fri IST auto on/off (no browser needed): Morning 05:30–08:30 · Peak Overlap 18:30–23:30 · US Core 19:30–01:30.
 
 ## Size
 Auto fire uses ~10% of available capital (see `AUTO_TRADE_CAPITAL_PCT` in `main.py`).

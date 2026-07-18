@@ -28,6 +28,7 @@ from bybit_public import (
     fetch_ticker_last_price,
     sanitize_price as _sanitize_market_price,
 )
+from session_schedule import schedule_store
 from api_secrets import (
     get_taapi_exchange,
     get_taapi_secret,
@@ -282,6 +283,7 @@ class SettingsStore:
             "taapi_paused": TAAPI_PAUSED,
             "taapi_exchange": get_taapi_exchange(),
             "bybit_testnet_configured": is_bybit_testnet_configured(),
+            "session_schedule": schedule_store.status_dict(),
         }
 
 settings_store = SettingsStore()
@@ -1234,7 +1236,9 @@ class AITradingAgent:
                 "warning",
             )
 
-        if not self.is_active or not self.trades:
+        # Exits keep running even when automation is paused (session schedule off-window).
+        # New entries still require is_active (auto_buy_loop / open_trade gates).
+        if not self.trades:
             return
 
         if not UVSS_POLICIES_ENABLED:
@@ -1449,6 +1453,39 @@ class AITradingAgent:
         self.is_lock_active = False
         system_log.push("ai", "AI automation STOPPED — emergency exit, all positions closed.", {"reason": reason})
         notifications.push("EMERGENCY EXIT: All positions closed and AI automation stopped.", "error")
+
+    def schedule_soft_stop(self, reason: str):
+        """Session schedule off-window: stop new entries, keep open trades for trailing exits."""
+        if not self.is_active:
+            return
+        print(f"[SESSION SCHEDULE] Soft stop — {reason}")
+        self.is_active = False
+        self.end_ai_season()
+        system_log.push("ai", f"Session schedule paused AI automation — {reason}", {"open_positions": len(self.trades)})
+        notifications.push(
+            f"Session schedule OFF-window — automation paused ({len(self.trades)} open position(s) still managed).",
+            "warning",
+        )
+
+    def schedule_auto_start(self, reason: str):
+        """Session schedule in-window: same wake-up as /start-bot (no browser needed)."""
+        if self.is_active:
+            return
+        if self.emergency_awaiting_decision:
+            print(f"[SESSION SCHEDULE] Skip auto-start (emergency awaiting decision): {reason}")
+            return
+        open_count = len(self.trades)
+        self.clear_emergency_state()
+        self.daily_target_reached = False
+        self.begin_ai_season()
+        self.is_active = True
+        print(f"[SESSION SCHEDULE] Auto-start — {reason}")
+        system_log.push(
+            "ai",
+            f"Session schedule STARTED AI automation — {reason}",
+            {"open_positions": open_count},
+        )
+        notifications.push(f"Session schedule ON — AI automation started ({reason}).", "success")
 
     def resume_trading_after_emergency(self):
         """ Legacy continue endpoint — portfolio stop-loss removed; clears halt flags only. """
@@ -2623,6 +2660,27 @@ async def start_background_tasks():
     asyncio.create_task(auto_buy_loop())
     asyncio.create_task(whale_alert_loop())
     asyncio.create_task(chart_24h_refresh_loop(BYBIT_SYMBOL_MAP))
+    asyncio.create_task(session_schedule_loop())
+
+
+async def session_schedule_loop():
+    """Mon–Fri IST windows: auto start/stop AI automation without any browser session."""
+    print(
+        f"[SESSION SCHEDULE] Loop online (enabled={schedule_store.enabled}, "
+        f"want_active={schedule_store.status_dict().get('want_active')})."
+    )
+    while True:
+        try:
+            st = schedule_store.status_dict()
+            if schedule_store.enabled:
+                if st["want_active"] and not agent.is_active:
+                    labels = ", ".join(st["active_windows"]) or "session window"
+                    agent.schedule_auto_start(labels)
+                elif not st["want_active"] and agent.is_active:
+                    agent.schedule_soft_stop("outside Mon–Fri IST session windows")
+        except Exception as exc:
+            print(f"[SESSION SCHEDULE] loop error: {exc}")
+        await asyncio.sleep(20)
 
 # ==========================================
 # 2. REST API COMMAND "WIRES"
@@ -2915,6 +2973,35 @@ async def get_agent_config():
 async def get_settings_status():
     """ Returns only non-secret configuration state. Keys/secrets are never returned. """
     return settings_store.status_dict()
+
+
+class SessionSchedulePayload(BaseModel):
+    enabled: bool
+
+
+@app.get("/settings/session-schedule")
+async def get_session_schedule():
+    return schedule_store.status_dict()
+
+
+@app.post("/settings/session-schedule")
+async def set_session_schedule(payload: SessionSchedulePayload):
+    """Toggle Mon–Fri IST session auto on/off. Works without keeping the browser open."""
+    schedule_store.set_enabled(payload.enabled)
+    st = schedule_store.status_dict()
+    # Apply immediately so user doesn't wait for the 20s loop tick.
+    if schedule_store.enabled and st["want_active"] and not agent.is_active:
+        labels = ", ".join(st["active_windows"]) or "session window"
+        agent.schedule_auto_start(labels)
+    elif schedule_store.enabled and not st["want_active"] and agent.is_active:
+        agent.schedule_soft_stop("outside Mon–Fri IST session windows")
+    msg = (
+        "Session schedule ON — AI will auto-start in Morning / Peak Overlap / US Core (Mon–Fri IST)."
+        if schedule_store.enabled
+        else "Session schedule OFF — use START/STOP manually."
+    )
+    system_log.push("ai", msg, st)
+    return {"status": "success", "message": msg, "schedule": st}
 
 @app.get("/agent/bible/stats")
 async def agent_bible_stats():
@@ -3223,6 +3310,7 @@ async def portfolio_feed(websocket: WebSocket):
                 "ai_season_active": agent.ai_season_start_capital is not None and agent.is_active,
                 "portfolio_drop_pct": round(portfolio_drop, 2),
                 "is_active": agent.is_active,
+                "session_schedule": schedule_store.status_dict(),
                 "emergency": False,
                 "risk_level_pct": agent.risk_level_pct,
                 "max_concurrent_trades": agent.max_concurrent_trades,

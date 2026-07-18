@@ -99,6 +99,27 @@ export default function App() {
     ].slice(0, 20));
   }
 
+  async function handleToggleSchedule() {
+    const currentlyOn = Boolean(portfolio.sessionSchedule?.enabled);
+    const next = !currentlyOn;
+    try {
+      const res = await authFetch('/settings/session-schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        window.alert(data.message || 'Could not update session schedule.');
+        return;
+      }
+      pushActionLog(data.message || `Session schedule ${next ? 'ON' : 'OFF'}`);
+    } catch (err) {
+      console.warn('Session schedule toggle failed:', err);
+      window.alert('Could not reach backend to update session schedule.');
+    }
+  }
+
   async function handleControlClick() {
     if (!portfolio.isActive) {
       // START AI AUTOMATION opens the AI Agent Instructions pre-start popup first.
@@ -332,6 +353,8 @@ export default function App() {
         onClick={handleControlClick}
         onManualBuy={handleManualBuy}
         onManualSell={handleManualSell}
+        sessionSchedule={portfolio.sessionSchedule}
+        onToggleSchedule={handleToggleSchedule}
       />
 
       <PaperTradingModal
