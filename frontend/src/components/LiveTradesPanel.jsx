@@ -76,7 +76,7 @@ function TradeRowDesktop({ trade, onRequestClose }) {
       <td className="px-3 py-1.5 font-mono">${fmtNum(trade.entry)}</td>
       <td className="px-3 py-1.5 font-mono">${fmtNum(trade.current)}</td>
       <td className={`px-3 py-1.5 font-bold ${pnlColor}`}>
-        <span title="Total P&L after entry + exit broker fees">
+        <span title="Unrealized P&L (price move − entry fee). Exit fee applies only when closed.">
           {formatTotalPnl(totalPnl)}
           <span className="text-[9px] font-normal text-gray-500 ml-0.5">total</span>
         </span>
@@ -151,7 +151,7 @@ function TradeRowMobile({ trade }) {
         </div>
       </div>
       <div className="flex items-center gap-1.5">
-        <span className={`font-bold ${pnlColor} text-xs`} title="Total P&L after broker fees">
+        <span className={`font-bold ${pnlColor} text-xs`} title="Unrealized P&L (price move − entry fee). Exit fee at close.">
           {formatTotalPnl(totalPnl)}
           <span className="block text-[9px] font-normal text-gray-500">total</span>
         </span>

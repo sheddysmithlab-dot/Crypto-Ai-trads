@@ -5,9 +5,10 @@ import os
 
 from timeframe_rules import TIMEFRAME_RULES
 
-# Loose defaults: keep gate ON, but don't kill flat-candle pattern fires.
-_DEFAULT_LAMBDA = 0.25
-_DEFAULT_MIN_CANDLE_RANGE = 0.0  # 0 = skip range floor (edge-to-TP check still runs)
+# Loose-but-disciplined defaults: gate ON, moderate λ, small absolute range floor.
+_DEFAULT_LAMBDA = 1.0
+_DEFAULT_MIN_CANDLE_RANGE = 0.25
+_DEFAULT_ABS_MIN_RANGE_PCT = 0.02  # reject near-flat bars even if mult is low
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -37,6 +38,13 @@ def cost_aware_min_candle_range_mult() -> float:
         return float(os.environ.get("COST_AWARE_MIN_CANDLE_RANGE", str(_DEFAULT_MIN_CANDLE_RANGE)))
     except ValueError:
         return _DEFAULT_MIN_CANDLE_RANGE
+
+
+def cost_aware_abs_min_range_pct() -> float:
+    try:
+        return float(os.environ.get("COST_AWARE_ABS_MIN_RANGE_PCT", str(_DEFAULT_ABS_MIN_RANGE_PCT)))
+    except ValueError:
+        return _DEFAULT_ABS_MIN_RANGE_PCT
 
 
 def round_trip_cost_pct(taker_fee_pct: float) -> float:
@@ -84,12 +92,13 @@ def evaluate_cost_aware_entry(
     timeframe_key: str,
     taker_fee_pct: float,
 ) -> dict:
-    """Loose cost-aware gate: ON, but range floor optional; low λ on remaining edge."""
+    """Cost-aware gate ON with moderate λ + absolute range floor (blocks flat spam)."""
     lam = cost_aware_lambda()
     rt_cost = round_trip_cost_pct(taker_fee_pct)
     hurdle = entry_hurdle_pct(taker_fee_pct, lam)
     min_range_mult = cost_aware_min_candle_range_mult()
-    min_range_hurdle = min_range_mult * rt_cost
+    abs_min_range = cost_aware_abs_min_range_pct()
+    min_range_hurdle = max(min_range_mult * rt_cost, abs_min_range)
 
     action = result.get("action", "")
     entry = result.get("entry")
@@ -98,14 +107,8 @@ def evaluate_cost_aware_entry(
     candle_range = compute_candle_range_pct(candle.get("high"), candle.get("low"))
     planned_tp = planned_gross_tp_pct(timeframe_key)
 
-    # Remaining edge to TP must clear λ×fees (loose λ=0.25 ≈ 0.03% on Bybit).
     remaining_ok = remaining is not None and remaining >= hurdle
-    # Range floor: skipped when mult<=0 (flat 1m BTC often has ~0.000% range).
-    if min_range_mult <= 0:
-        range_ok = True
-    else:
-        range_ok = candle_range is not None and candle_range >= min_range_hurdle
-
+    range_ok = candle_range is not None and candle_range >= min_range_hurdle
     gate_ok = remaining_ok and range_ok
 
     enabled = cost_aware_enabled()
@@ -117,13 +120,13 @@ def evaluate_cost_aware_entry(
         block_reasons.append(
             f"remaining edge {remaining:.3f}% < hurdle {hurdle:.3f}% (λ={lam})"
         )
-    if enabled and min_range_mult > 0 and candle_range is not None and not range_ok:
+    if enabled and candle_range is not None and not range_ok:
         block_reasons.append(
             f"candle range {candle_range:.3f}% < min {min_range_hurdle:.3f}%"
         )
     if enabled and remaining is None:
         block_reasons.append("could not compute remaining edge")
-    if enabled and min_range_mult > 0 and candle_range is None:
+    if enabled and candle_range is None:
         block_reasons.append("could not compute candle range")
 
     return {
@@ -133,7 +136,7 @@ def evaluate_cost_aware_entry(
         "round_trip_cost_pct": round(rt_cost, 4),
         "entry_hurdle_pct": round(hurdle, 4),
         "min_candle_range_pct": round(min_range_hurdle, 4),
-        "range_check": min_range_mult > 0,
+        "range_check": True,
         "remaining_edge_pct": round(remaining, 4) if remaining is not None else None,
         "candle_range_pct": round(candle_range, 4) if candle_range is not None else None,
         "planned_gross_tp_pct": round(planned_tp, 4) if planned_tp is not None else None,

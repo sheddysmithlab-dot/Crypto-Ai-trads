@@ -489,17 +489,27 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
         ):
             hits.append(_hit("THREE_BLACK", "SELL", d, strength=strength_base + 0.35, setup="crows"))
 
-    # --- Belt hold ---
-    if _is_green(c0) and _lower_wick(c0) <= _body(c0) * 0.1 and _body(c0) >= avg * 0.85:
-        hits.append(_hit("BULL_BELT", "BUY", c0, strength=strength_base, setup="belt"))
-    if _is_red(c0) and _upper_wick(c0) <= _body(c0) * 0.1 and _body(c0) >= avg * 0.85:
-        hits.append(_hit("BEAR_BELT", "SELL", c0, strength=strength_base, setup="belt"))
+    # --- Belt hold (reversal only — was firing on every solid candle) ---
+    if (
+        _is_green(c0)
+        and _lower_wick(c0) <= _body(c0) * 0.08
+        and _body(c0) >= avg * 1.1
+        and local == "down"
+    ):
+        hits.append(_hit("BULL_BELT", "BUY", c0, strength=strength_base + 0.2, setup="belt"))
+    if (
+        _is_red(c0)
+        and _upper_wick(c0) <= _body(c0) * 0.08
+        and _body(c0) >= avg * 1.1
+        and local == "up"
+    ):
+        hits.append(_hit("BEAR_BELT", "SELL", c0, strength=strength_base + 0.2, setup="belt"))
 
-    # --- Marubozu continuation (with trend) ---
+    # --- Marubozu continuation (with clear trend only) ---
     if _is_marubozu(c0, candles):
-        if trend in ("uptrend", "range", None) and _is_green(c0):
+        if trend == "uptrend" and _is_green(c0):
             hits.append(_hit("MBZ_L", "BUY", c0, strength=strength_base + 0.3, setup="marubozu"))
-        if trend in ("downtrend", "range", None) and _is_red(c0):
+        if trend == "downtrend" and _is_red(c0):
             hits.append(_hit("MBZ_S", "SELL", c0, strength=strength_base + 0.3, setup="marubozu"))
 
     return hits

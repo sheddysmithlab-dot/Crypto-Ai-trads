@@ -746,27 +746,40 @@ class AITradingAgent:
             )
         return None
 
-    def _trade_metrics(self, t):
-        """ RULE 6: True Net Profit = Gross Profit - (Entry Fee + Estimated Exit Fee).
-        RULE 7: Exit fee is recalculated dynamically off the LIVE current price. """
+    def _trade_metrics(self, t, *, for_close: bool = False):
+        """PnL metrics for a position.
+
+        Open (UI): unrealized = gross − entry fee only (exit fee not paid yet).
+        Close: true net = gross − entry − exit (RULE 6/7).
+        """
         if t["side"] == "LONG":
             gross_pct = ((self.current_price - t["entry"]) / t["entry"]) * 100
         else:
             gross_pct = ((t["entry"] - self.current_price) / t["entry"]) * 100
 
-        entry_fee_pct = t["entry_fee_pct"]  # fixed at the moment of entry
-        # Exit fee scales with the live price ratio - it is an ESTIMATE until actually filled
+        entry_fee_pct = float(t["entry_fee_pct"])
         exit_fee_pct = bybit_api.get_taker_fee_pct() * (self.current_price / t["entry"])
-        net_pct = gross_pct - entry_fee_pct - exit_fee_pct
+        if for_close:
+            net_pct = gross_pct - entry_fee_pct - exit_fee_pct
+        else:
+            # Unrealized: do not mark exit fee — that was painting winners red.
+            net_pct = gross_pct - entry_fee_pct
 
         gross_usd = t["position_size"] * (gross_pct / 100)
-        exit_fee_usd = t["position_size"] * (exit_fee_pct / 100)
-        net_usd = gross_usd - t["entry_fee_usd"] - exit_fee_usd
+        exit_fee_usd = t["position_size"] * (exit_fee_pct / 100) if for_close else 0.0
+        if for_close:
+            net_usd = gross_usd - t["entry_fee_usd"] - exit_fee_usd
+        else:
+            net_usd = gross_usd - t["entry_fee_usd"]
 
         return {
-            "gross_pct": gross_pct, "net_pct": net_pct,
-            "gross_usd": gross_usd, "exit_fee_usd": exit_fee_usd, "net_usd": net_usd,
-            "entry_fee_pct": entry_fee_pct, "exit_fee_pct": exit_fee_pct,
+            "gross_pct": gross_pct,
+            "net_pct": net_pct,
+            "gross_usd": gross_usd,
+            "exit_fee_usd": exit_fee_usd,
+            "net_usd": net_usd,
+            "entry_fee_pct": entry_fee_pct,
+            "exit_fee_pct": exit_fee_pct if for_close else 0.0,
         }
 
     def _append_trade_history(self, trade):
@@ -1207,6 +1220,8 @@ class AITradingAgent:
 
     def _close_single_trade(self, trade, metrics, reason) -> bool:
         """Close one position. Returns True if closed locally (and on Bybit when applicable)."""
+        # Always settle with full round-trip fees at close.
+        metrics = self._trade_metrics(trade, for_close=True)
         if trade_uses_bybit_executor(trade):
             ok, err = bybit_close_trade(trade)
             if not ok:
@@ -1268,9 +1283,18 @@ class AITradingAgent:
         signal_candle_time: int | None,
         entry_price: float,
     ) -> bool:
-        """Block double-fire: same candle+pattern+side, or same pattern+entry on this pair."""
+        """Block stacking: same candle (any pattern), or same side+pattern near same price."""
         for t in self.trades:
-            if t.get("source") != "auto" or t["pair"] != pair or t["side"] != side:
+            if t.get("source") != "auto" or t["pair"] != pair:
+                continue
+            # One auto entry per signal candle — stops every-pattern spam on same bar.
+            if (
+                signal_candle_time
+                and t.get("signal_candle_time") is not None
+                and int(t["signal_candle_time"]) == int(signal_candle_time)
+            ):
+                return True
+            if t["side"] != side:
                 continue
             if (
                 pattern
@@ -1283,6 +1307,16 @@ class AITradingAgent:
                 if abs(t["entry"] - entry_price) / entry_price < 0.0002:
                     return True
         return False
+
+    def last_auto_entry_candle_time(self, pair: str) -> int | None:
+        times = [
+            int(t["signal_candle_time"])
+            for t in self.trades
+            if t.get("source") == "auto"
+            and t.get("pair") == pair
+            and t.get("signal_candle_time") is not None
+        ]
+        return max(times) if times else None
 
     def execute_sell(self, reason):
         # RULE 4/6 & 7: Profit-protection sell. Exit orders are Market Orders.
@@ -1552,6 +1586,13 @@ async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
 # Auto-order sizing: 10% of available capital per fired trade.
 AUTO_TRADE_CAPITAL_PCT = 0.10
 
+# Fire discipline — stop "every candle / every pattern" spam.
+MIN_PATTERN_STRENGTH = float(os.environ.get("MIN_PATTERN_STRENGTH", "0.7"))
+MIN_BARS_BETWEEN_AUTO_ENTRIES = int(os.environ.get("MIN_BARS_BETWEEN_AUTO_ENTRIES", "3"))
+BLOCK_OPPOSITE_AUTO_SIDE = os.environ.get("BLOCK_OPPOSITE_AUTO_SIDE", "true").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
 # Strict Exit Logic — auto trades only (see AITradingAgent._evaluate_strict_exit).
 AUTO_TRADE_AUTO_EXIT_ENABLED = True
 
@@ -1820,7 +1861,8 @@ def _log_auto_trade_fire(
 
 
 def _signal_fire_key(pair: str, timeframe_key: str, action: str, pattern: str | None, candle_close_time: int) -> str:
-    return f"{pair}|{timeframe_key}|{action}|{pattern or ''}|{candle_close_time}"
+    # One fire slot per candle (pattern/action ignored) — stops multi-pattern spam.
+    return f"{pair}|{timeframe_key}|candle|{candle_close_time}"
 
 
 def _register_signal_fire(key: str) -> None:
@@ -1861,11 +1903,49 @@ async def fire_taapi_auto_trade(
             )
             if fire_key in _recent_signal_fire_keys:
                 err = (
-                    f"Duplicate signal blocked — already fired {exec_action} "
-                    f"{pattern or 'signal'} for candle {candle_close_time}."
+                    f"Duplicate candle blocked — already fired on {agent.active_pair} "
+                    f"candle {candle_close_time}."
                 )
                 _log_trade_skip(exec_action, bybit_symbol, pattern, err)
                 return None, False, err
+
+        strength = float(result.get("strength") or 0)
+        if strength < MIN_PATTERN_STRENGTH:
+            err = (
+                f"Pattern strength {strength:.2f} < min {MIN_PATTERN_STRENGTH:.2f} — skipped."
+            )
+            _log_trade_skip(exec_action, bybit_symbol, pattern, err)
+            return None, False, err
+
+        if BLOCK_OPPOSITE_AUTO_SIDE and agent.has_opposite_position(side, agent.active_pair):
+            err = (
+                f"Opposite open position on {agent.active_pair} — "
+                f"won't flip to {side} until flat or same-side only."
+            )
+            _log_trade_skip(exec_action, bybit_symbol, pattern, err)
+            return None, False, err
+
+        if candle_close_time is not None and MIN_BARS_BETWEEN_AUTO_ENTRIES > 0:
+            last_ct = agent.last_auto_entry_candle_time(agent.active_pair)
+            if last_ct is not None:
+                # signal_candle_time is often ms from Bybit; normalize to seconds for bar math.
+                cur = int(candle_close_time)
+                prev = int(last_ct)
+                if cur > 1_000_000_000_000:
+                    cur //= 1000
+                if prev > 1_000_000_000_000:
+                    prev //= 1000
+                tf_secs = {"30s": 30, "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1D": 86400}.get(
+                    timeframe_key or "1m", 60
+                )
+                bars_apart = abs(cur - prev) / max(tf_secs, 1)
+                if bars_apart < MIN_BARS_BETWEEN_AUTO_ENTRIES:
+                    err = (
+                        f"Cooldownoldown: need {MIN_BARS_BETWEEN_AUTO_ENTRIES} bars between auto entries "
+                        f"(only {bars_apart:.1f} since last)."
+                    )
+                    _log_trade_skip(exec_action, bybit_symbol, pattern, err)
+                    return None, False, err
 
         if agent.has_duplicate_auto_entry(side, agent.active_pair, pattern, candle_close_time, float(entry_px)):
             err = (
@@ -1875,7 +1955,7 @@ async def fire_taapi_auto_trade(
             _log_trade_skip(exec_action, bybit_symbol, pattern, err)
             return None, False, err
 
-        # Opposite LONG/SHORT may both stay open — no skip, no flip-close.
+        # Opposite LONG/SHORT blocked above when BLOCK_OPPOSITE_AUTO_SIDE is on.
 
         if bybit_api.mode == "PAPER_TRADING":
             trade = agent.open_trade(
