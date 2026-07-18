@@ -1,9 +1,12 @@
 # AI Trading Agent — System Role & Operations
 
-**Pattern detection / pattern-name memory: CLEARED.**
+**Candlestick Trading Bible:** loaded in RAM at backend startup
+(`DATA/candlestick_bible_memory.json` → `candlestick_bible_memory.py`).
+Fetch any section in ~microseconds via `fetch_bible(id_or_alias)` / API
+`GET /agent/bible/fetch?q=hammer`. Do not re-read the PDF at runtime.
 
-Full framework files under DATA/ no longer hold candle-pattern names or detection rules.
-Live scanning is code-only: Blue Box + VSA + Marubozu (`volume_spread_system.py`).
+**Pattern detection engine:** `volume_spread_system.py` (rules TBD — currently
+NO_TRADE until patterns are coded). Intro vocabulary: `CANDLESTICK_PATTERNS_INTRO.md`.
 
 ## Profit Book (Active — code)
 - Activate lock at +0.15% gross per trade

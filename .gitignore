@@ -15,6 +15,9 @@ backend/__pycache__/
 *.pyc
 .env
 
+# Local PDF extract scratch (rebuild via build_bible_memory.py)
+DATA/_raw_candlestick_bible.txt
+
 # OS/editor
 .DS_Store
 .vscode/

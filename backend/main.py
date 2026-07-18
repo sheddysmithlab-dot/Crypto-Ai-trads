@@ -55,6 +55,13 @@ from volume_spread_system import (
 )
 from bybit_executor import BybitAgent
 from trading_policy import evaluate_cost_aware_entry
+from candlestick_bible_memory import (
+    bible_system_prompt_blurb,
+    fetch_bible,
+    list_bible_toc,
+    memory_stats as bible_memory_stats,
+    search_bible,
+)
 
 from pathlib import Path
 
@@ -311,6 +318,12 @@ async def consult_ai_provider(context):
     system_role = load_system_role_text()
     if system_role:
         messages.append({"role": "system", "content": system_role[:20000]})
+    # Inject matching Candlestick Bible section from RAM (not full book every call).
+    bible_ctx = fetch_bible_context_for_signal(
+        context.get("pattern") or context.get("condition")
+    )
+    if bible_ctx:
+        messages.append({"role": "system", "content": bible_ctx[:4000]})
     messages.append({"role": "user", "content": prompt})
 
     try:
@@ -1631,6 +1644,7 @@ def load_system_role_text() -> str:
     for name in (
         "SYSTEM_ROLE_AND_IDENTITY.md",
         "CANDLESTICK_PATTERNS_INTRO.md",
+        "CANDLESTICK_BIBLE_INDEX.md",
         "SMC_ICT_MARKET_STRUCTURE.md",
         "FIB_LIQUIDITY_CONFIRMATION.md",
         "TREND_REVERSAL_PREMIUM.md",
@@ -1644,6 +1658,13 @@ def load_system_role_text() -> str:
                 parts.append(text)
         except OSError:
             continue
+    # Compact in-RAM bible TOC (full sections fetched via fetch_bible, not pasted every turn).
+    try:
+        blurb = bible_system_prompt_blurb()
+        if blurb:
+            parts.append(blurb)
+    except Exception:
+        pass
     if INVERT_AUTO_TRADE_FIRE:
         parts.append(
             "EXECUTION OVERRIDE (pattern engine unchanged): "
@@ -1652,6 +1673,28 @@ def load_system_role_text() -> str:
             "place BUY (LONG). Do not change how patterns are detected — only invert the order side at fire."
         )
     return "\n\n---\n\n".join(parts)
+
+
+def fetch_bible_context_for_signal(pattern_or_query: str | None, *, max_chars: int = 1800) -> str:
+    """Pull matching bible section from RAM for AI confirmation (microsecond lookup)."""
+    if not pattern_or_query:
+        return ""
+    hit = fetch_bible(str(pattern_or_query), max_chars=max_chars)
+    if hit.get("ok"):
+        return (
+            f"[Candlestick Bible · {hit.get('title')} · pp.{hit.get('pages')} · "
+            f"fetch_ns={hit.get('fetch_ns')}]\n{hit.get('text') or ''}"
+        )
+    results = search_bible(str(pattern_or_query), limit=1)
+    if not results:
+        return ""
+    hit = fetch_bible(results[0]["id"], max_chars=max_chars)
+    if not hit.get("ok"):
+        return ""
+    return (
+        f"[Candlestick Bible · {hit.get('title')} · pp.{hit.get('pages')} · "
+        f"fetch_ns={hit.get('fetch_ns')}]\n{hit.get('text') or ''}"
+    )
 
 
 def agent_policy_summary() -> str:
@@ -2260,6 +2303,20 @@ async def self_ping_keepalive():
 
 @app.on_event("startup")
 async def start_background_tasks():
+    try:
+        stats = bible_memory_stats()
+        print(
+            f"[BIBLE MEMORY] RAM loaded: {stats.get('section_count')} sections · "
+            f"{stats.get('total_chars')} chars · load_ns={stats.get('load_ns')} · "
+            f"aliases={stats.get('aliases')}"
+        )
+        system_log.push(
+            "ai",
+            "Candlestick Trading Bible memory loaded into RAM (microsecond fetch ready).",
+            stats,
+        )
+    except Exception as exc:
+        print(f"[BIBLE MEMORY] load note: {exc}")
     asyncio.create_task(market_simulator())
     asyncio.create_task(bybit_price_feed())
     asyncio.create_task(bybit_balance_refresher())
@@ -2558,6 +2615,36 @@ async def get_agent_config():
 async def get_settings_status():
     """ Returns only non-secret configuration state. Keys/secrets are never returned. """
     return settings_store.status_dict()
+
+@app.get("/agent/bible/stats")
+async def agent_bible_stats():
+    """Candlestick Trading Bible in-RAM memory stats (startup load once)."""
+    return bible_memory_stats()
+
+
+@app.get("/agent/bible/toc")
+async def agent_bible_toc():
+    """Full TOC of bible sections available for microsecond fetch."""
+    return {"toc": list_bible_toc(), "stats": bible_memory_stats()}
+
+
+@app.get("/agent/bible/fetch")
+async def agent_bible_fetch(
+    q: str = Query(..., min_length=1, description="Section id or alias, e.g. hammer, pin bar"),
+    max_chars: int = Query(8000, ge=200, le=50000),
+):
+    """O(1) in-RAM fetch of one bible section by id/alias."""
+    return fetch_bible(q, max_chars=max_chars)
+
+
+@app.get("/agent/bible/search")
+async def agent_bible_search(
+    q: str = Query(..., min_length=1),
+    limit: int = Query(8, ge=1, le=30),
+):
+    """In-RAM keyword search across bible sections."""
+    return {"results": search_bible(q, limit=limit)}
+
 
 @app.get("/system/logs")
 async def get_system_logs():
