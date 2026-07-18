@@ -37,6 +37,6 @@ fetches that section in microseconds and logs it in System Log / AI confirm.
 Profit lock: activate +0.15% gross, step +0.02% from peak, sell on retreat.
 No SL auto-exit (SL used for sizing / reference).
 
-## Retired
-Blue Box sweep/displacement, classic VSA L1–S4 codes, TAAPI scanners,
-`main_engine.py` stub — removed from live brain.
+## Retired (deleted from repo)
+Legacy Blue Box / VSA / TAAPI docs and stubs (`STRATEGY.md`, old DATA notes,
+`main_engine.py`, `taapi_scanner.py`) — do not restore.

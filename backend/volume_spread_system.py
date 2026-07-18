@@ -609,9 +609,6 @@ def evaluate_uvss(
     }
 
 
-evaluate_smc_vsa = evaluate_uvss
-
-
 def _to_chart_time(raw: int | None) -> int | None:
     if raw is None:
         return None

@@ -1667,9 +1667,6 @@ def load_system_role_text() -> str:
         "CANDLESTICK_PATTERNS_INTRO.md",
         "CANDLESTICK_BIBLE_INDEX.md",
         "ML_TRADING_PAPER_INDEX.md",
-        "SMC_ICT_MARKET_STRUCTURE.md",
-        "FIB_LIQUIDITY_CONFIRMATION.md",
-        "TREND_REVERSAL_PREMIUM.md",
     ):
         path = _DATA_DIR / name
         if not path.is_file():
