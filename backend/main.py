@@ -1628,7 +1628,7 @@ AUTO_TRADE_CAPITAL_PCT = 0.10
 # Fire discipline — stop "every candle / every pattern" spam.
 # Mid strictness: between spam-every-candle (low) and hard filter (0.7 / 3 bars).
 MIN_PATTERN_STRENGTH = float(os.environ.get("MIN_PATTERN_STRENGTH", "0.5"))
-MIN_BARS_BETWEEN_AUTO_ENTRIES = int(os.environ.get("MIN_BARS_BETWEEN_AUTO_ENTRIES", "2"))
+MIN_BARS_BETWEEN_AUTO_ENTRIES = int(os.environ.get("MIN_BARS_BETWEEN_AUTO_ENTRIES", "0"))
 BLOCK_OPPOSITE_AUTO_SIDE = os.environ.get("BLOCK_OPPOSITE_AUTO_SIDE", "true").strip().lower() in (
     "1", "true", "yes", "on",
 )
