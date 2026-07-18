@@ -3,14 +3,18 @@ import { formatTradeFireTime } from '../utils/time';
 
 function isTradeWinning(trade) {
   if (trade.pnl != null) return trade.pnl >= 0;
-  if (trade.gross_pnl_pct != null) return trade.gross_pnl_pct >= 0;
   if (trade.side === 'LONG' && trade.entry != null && trade.current != null) {
     return trade.current >= trade.entry;
   }
   if (trade.side === 'SHORT' && trade.entry != null && trade.current != null) {
     return trade.current <= trade.entry;
   }
-  return trade.pnl >= 0;
+  return false;
+}
+
+function formatTotalPnl(pnl) {
+  const n = Number(pnl) || 0;
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
 }
 
 function StatusIcon({ trade }) {
@@ -32,8 +36,7 @@ function TradeRowDesktop({ trade, onRequestClose }) {
   const meta = getPairMeta(trade.pair);
   const isSold = trade.status === 'sold';
   const isProtected = trade.protected || trade.source === 'manual';
-  const netPnl = trade.pnl ?? 0;
-  const grossPnl = trade.gross_pnl_pct;
+  const totalPnl = trade.pnl ?? 0;
   const isProfit = isTradeWinning(trade);
   const rowBg = isSold
     ? 'bg-white/5 dark:bg-white/5 opacity-90'
@@ -73,25 +76,15 @@ function TradeRowDesktop({ trade, onRequestClose }) {
       <td className="px-3 py-1.5 font-mono">${fmtNum(trade.entry)}</td>
       <td className="px-3 py-1.5 font-mono">${fmtNum(trade.current)}</td>
       <td className={`px-3 py-1.5 font-bold ${pnlColor}`}>
-        <span title={grossPnl != null ? `Gross: ${grossPnl >= 0 ? '+' : ''}${grossPnl.toFixed(2)}%` : undefined}>
-          {netPnl >= 0 ? '+' : ''}
-          {netPnl.toFixed(2)}%
-          <span className="text-[9px] font-normal text-gray-500 ml-0.5">net</span>
+        <span title="Total P&L after entry + exit broker fees">
+          {formatTotalPnl(totalPnl)}
+          <span className="text-[9px] font-normal text-gray-500 ml-0.5">total</span>
         </span>
-                    {grossPnl != null ? (
-                      <div className="text-[9px] font-normal text-gray-500">
-                        {grossPnl >= 0 ? '+' : ''}
-                        {grossPnl.toFixed(2)}% gross
-                      </div>
-                    ) : null}
-                    {!isSold && trade.peak_gross_pct > 0 && trade.status === 'locked' ? (
-                      <div className="text-[9px] font-normal text-blue-400">
-                        peak +{Number(trade.peak_gross_pct).toFixed(2)}%
-                        {trade.sell_trigger_pct != null
-                          ? ` · exit ≤ +${Number(trade.sell_trigger_pct).toFixed(2)}%`
-                          : ''}
-                      </div>
-                    ) : null}
+        {!isSold && trade.status === 'locked' && trade.sell_trigger_pct != null ? (
+          <div className="text-[9px] font-normal text-blue-400">
+            exit ≤ +{Number(trade.sell_trigger_pct).toFixed(2)}%
+          </div>
+        ) : null}
         {isSold && trade.closed_reason ? (
           <div className="text-[9px] font-normal text-cyan-400/90 truncate max-w-[180px]" title={trade.closed_reason}>
             {trade.closed_reason}
@@ -121,7 +114,7 @@ function TradeRowMobile({ trade }) {
   const isSold = trade.status === 'sold';
   const isProtected = trade.protected || trade.source === 'manual';
   const isProfit = isTradeWinning(trade);
-  const netPnl = trade.pnl ?? 0;
+  const totalPnl = trade.pnl ?? 0;
   const rowBg = isSold
     ? 'bg-white/5 dark:bg-white/5 opacity-90'
     : isProfit
@@ -158,15 +151,9 @@ function TradeRowMobile({ trade }) {
         </div>
       </div>
       <div className="flex items-center gap-1.5">
-        <span className={`font-bold ${pnlColor} text-xs`}>
-          {netPnl >= 0 ? '+' : ''}
-          {netPnl.toFixed(2)}%
-          {trade.gross_pnl_pct != null ? (
-            <span className="block text-[9px] font-normal text-gray-500">
-              {trade.gross_pnl_pct >= 0 ? '+' : ''}
-              {trade.gross_pnl_pct.toFixed(2)}% gross
-            </span>
-          ) : null}
+        <span className={`font-bold ${pnlColor} text-xs`} title="Total P&L after broker fees">
+          {formatTotalPnl(totalPnl)}
+          <span className="block text-[9px] font-normal text-gray-500">total</span>
         </span>
         <StatusIcon trade={trade} />
       </div>
@@ -210,7 +197,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                 <th className="px-3 py-1.5 font-semibold">Fired</th>
                 <th className="px-3 py-1.5 font-semibold">Entry</th>
                 <th className="px-3 py-1.5 font-semibold">Current</th>
-                <th className="px-3 py-1.5 font-semibold">PnL (net)</th>
+                <th className="px-3 py-1.5 font-semibold">Total</th>
                 <th className="px-3 py-1.5 font-semibold text-right">Status</th>
               </tr>
             </thead>

@@ -12,6 +12,12 @@ import { fmtNum, getBybitSymbol } from '../data/pairs';
 import { formatChartAxisTime, formatLiveClock } from '../utils/time';
 import { decorateCandlestickSeries, computeTradeFireMarkers } from '../utils/chartCandles';
 import {
+  buildTradeFireLookup,
+  renderTradeFireOverlay,
+  clearTradeFireOverlay,
+  tradeFireTooltipFromLookup,
+} from '../utils/tradeFireChart';
+import {
   renderBlueBoxChartOverlay,
   clearBlueBoxChartGraphics,
   blueBoxStatusLabel,
@@ -21,6 +27,17 @@ import {
 // and live WebSocket tick bucketing so the chart genuinely reacts to the
 // selected timeframe (not just a cosmetic label change).
 const TIMEFRAME_SECONDS = { '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 86400 };
+const CHART_TIMEFRAME_STORAGE_KEY = 'ai_trading_bot_chart_timeframe';
+
+function readStoredTimeframe() {
+  try {
+    const saved = localStorage.getItem(CHART_TIMEFRAME_STORAGE_KEY);
+    if (saved && TIMEFRAME_SECONDS[saved]) return saved;
+  } catch {
+    /* private browsing / storage blocked */
+  }
+  return '1M';
+}
 
 // Standard kline granularities on each exchange (1M and above).
 const BYBIT_KLINE_INTERVAL = { '1M': '1', '5M': '5', '15M': '15', '1H': '60', '1D': 'D' };
@@ -226,13 +243,19 @@ export function useTradingChart({
   const volumeMaSeriesRef = useRef(null);
   const trailingLockLineRef = useRef(null);
   const blueBoxOverlayElRef = useRef(null);
+  const tradeFireOverlayElRef = useRef(null);
+  const tradeFireLookupRef = useRef(new Map());
+  const hoveredTradeFireTimeRef = useRef(null);
+  const onTradeFireHoverRef = useRef(() => {});
+  const redrawTradeFireOverlayRef = useRef(() => {});
   const blueBoxLineRefsRef = useRef([]);
   const blueBoxOverlayDataRef = useRef(null);
   const entryCandlesRef = useRef([]);
   const botIsActiveRef = useRef(botIsActive);
   const mockDataRef = useRef([]);
   const entryPriceRef = useRef(pairPrice);
-  const currentIntervalRef = useRef(TIMEFRAME_SECONDS['1M']);
+  const initialTimeframe = readStoredTimeframe();
+  const currentIntervalRef = useRef(TIMEFRAME_SECONDS[initialTimeframe] || 60);
   const tradingModeRef = useRef(null);
   const freeSourceWsRef = useRef(null);
   const pairLabelRef = useRef(pairLabel);
@@ -243,7 +266,7 @@ export function useTradingChart({
   const zoomTimeoutRef = useRef(null);
   pairLabelRef.current = pairLabel;
 
-  const [timeframe, setTimeframe] = useState('1M');
+  const [timeframe, setTimeframe] = useState(initialTimeframe);
   const [chartSourceMode, setChartSourceModeState] = useState('PAPER_TRADING');
   const [chartHistorySource, setChartHistorySource] = useState('—');
   const [chartLiveSource, setChartLiveSource] = useState('—');
@@ -254,23 +277,62 @@ export function useTradingChart({
     liveClock: '--:--:--',
     chartCandleTime: '—',
     blueBoxStatus: null,
+    tradeFireTooltip: null,
   });
 
   botIsActiveRef.current = botIsActive;
   blueBoxOverlayDataRef.current = blueBoxOverlay;
   entryCandlesRef.current = entryCandles;
 
+  const redrawTradeFireOverlay = useCallback(() => {
+    const chart = chartRef.current;
+    const series = candleSeriesRef.current;
+    const overlayEl = tradeFireOverlayElRef.current;
+    if (!chart || !series || !overlayEl) return;
+
+    const lookup = buildTradeFireLookup(
+      entryCandlesRef.current,
+      mockDataRef.current,
+      currentIntervalRef.current,
+    );
+    tradeFireLookupRef.current = lookup;
+
+    renderTradeFireOverlay({
+      chart,
+      series,
+      overlayEl,
+      lookup,
+      intervalSecs: currentIntervalRef.current,
+      hoveredTime: hoveredTradeFireTimeRef.current,
+      onHover: (time) => onTradeFireHoverRef.current(time),
+    });
+  }, []);
+
+  redrawTradeFireOverlayRef.current = redrawTradeFireOverlay;
+
+  onTradeFireHoverRef.current = (time) => {
+    if (hoveredTradeFireTimeRef.current === time) return;
+    hoveredTradeFireTimeRef.current = time;
+    const tip = time != null ? tradeFireTooltipFromLookup(tradeFireLookupRef.current, time) : null;
+    setReadouts((prev) => ({ ...prev, tradeFireTooltip: tip }));
+    redrawTradeFireOverlay();
+  };
+
   const pushCandlesToChart = useCallback((data) => {
     const series = candleSeriesRef.current;
     if (!series || !data?.length) {
       series?.setData([]);
+      clearTradeFireOverlay(tradeFireOverlayElRef.current);
+      tradeFireLookupRef.current = new Map();
       return;
     }
-    const decorated = decorateCandlestickSeries(data, entryCandlesRef.current);
-    series.setData(decorated);
-    const fireMarkers = computeTradeFireMarkers(entryCandlesRef.current);
+    series.setData(decorateCandlestickSeries(data));
+    const lookup = buildTradeFireLookup(entryCandlesRef.current, data, currentIntervalRef.current);
+    tradeFireLookupRef.current = lookup;
+    const fireMarkers = computeTradeFireMarkers();
     series.setMarkers(fireMarkers.length ? fireMarkers : computeExtremeMarkers(data));
-  }, []);
+    redrawTradeFireOverlay();
+  }, [redrawTradeFireOverlay]);
 
   const redrawBlueBoxOverlay = useCallback(() => {
     const chart = chartRef.current;
@@ -330,12 +392,12 @@ export function useTradingChart({
       }
     }
     trailingLockLineRef.current = series.createPriceLine({
-      price: basePrice * 1.0015,
+      price: basePrice * 1.002,
       color: '#3b82f6',
       lineWidth: 2,
       lineStyle: LineStyle.Dashed,
       axisLabelVisible: true,
-      title: 'Lock +0.15%',
+      title: 'Lock +0.20%',
     });
   }, []);
 
@@ -455,9 +517,7 @@ export function useTradingChart({
         mockData[mockData.length - 1] = updated;
       }
 
-      candleSeriesRef.current.update(
-        decorateCandlestickSeries([updated], entryCandlesRef.current)[0],
-      );
+      candleSeriesRef.current.update(decorateCandlestickSeries([updated])[0]);
       updateReadouts(updated, mockData);
       applyAllOverlays(mockData);
       if (newCandle) {
@@ -471,8 +531,9 @@ export function useTradingChart({
         }
       }
       redrawBlueBoxOverlay();
+      redrawTradeFireOverlay();
     },
-    [updateReadouts, applyAllOverlays, zoomToRecentCandles, redrawBlueBoxOverlay]
+    [updateReadouts, applyAllOverlays, zoomToRecentCandles, redrawBlueBoxOverlay, redrawTradeFireOverlay]
   );
 
   const connectFreeSource = useCallback(
@@ -554,13 +615,14 @@ export function useTradingChart({
       applyDataset([]);
       loadRealHistoryInBackground(pairLabelRef.current, tf, entryPriceRef.current);
 
-      // RULE 2: Dynamic Timeframe Syncing - tell the backend AI Agent to read
-      // volume/price data on this exact interval from now on.
-      authFetch('/set-timeframe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ seconds: currentIntervalRef.current }),
-      }).catch((err) => console.error('Failed to sync timeframe with backend:', err));
+      // Chart timeframe is display-only — do NOT call /set-timeframe here.
+      // Backend trading engine keeps its own candle interval so open trades
+      // and Blue Box state are unaffected by viewing a different chart zoom.
+      try {
+        localStorage.setItem(CHART_TIMEFRAME_STORAGE_KEY, tf);
+      } catch {
+        /* storage blocked */
+      }
     },
     [applyDataset, loadRealHistoryInBackground]
   );
@@ -600,6 +662,12 @@ export function useTradingChart({
     blueBoxLayer.className = 'absolute inset-0 pointer-events-none z-[15] overflow-hidden';
     chartContainer.appendChild(blueBoxLayer);
     blueBoxOverlayElRef.current = blueBoxLayer;
+
+    const tradeFireLayer = document.createElement('div');
+    tradeFireLayer.setAttribute('aria-hidden', 'true');
+    tradeFireLayer.className = 'absolute inset-0 z-[20] overflow-visible';
+    chartContainer.appendChild(tradeFireLayer);
+    tradeFireOverlayElRef.current = tradeFireLayer;
 
     // MA(5,10,20,30) overlay lines
     maSeriesRef.current = {};
@@ -646,36 +714,45 @@ export function useTradingChart({
       }
     });
 
-    // Fetch real history for the initial pair on the default 1M timeframe.
-    loadRealHistoryInBackground(pairLabelRef.current, '1M', entryPrice);
-
-    // RULE 2: Sync the default timeframe to the backend on load too, not just on every
-    // subsequent switchTimeframe click, so a fresh page load and a fresh backend start
-    // agree on the candle interval from the very first tick.
-    authFetch('/set-timeframe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ seconds: currentIntervalRef.current }),
-    }).catch((err) => console.error('Failed to sync initial timeframe with backend:', err));
+    // Fetch real history for the initial pair using the persisted chart timeframe.
+    loadRealHistoryInBackground(pairLabelRef.current, initialTimeframe, entryPrice);
 
     chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
       redrawBlueBoxOverlay();
+      redrawTradeFireOverlayRef.current();
     });
 
-    // Live crosshair OHLC readout
+    // Live crosshair OHLC readout + trade-fire pattern tooltip
     // own seriesData only carries {time,open,high,low,close} - it strips our custom
     // `volume` field - so look the full bar up in mockDataRef.current by time instead
     // of using param.seriesData.get() directly (that was producing "NaN" volume).
     chart.subscribeCrosshairMove((param) => {
-      if (!param.time) return;
+      if (!param.time) {
+        if (hoveredTradeFireTimeRef.current != null) {
+          hoveredTradeFireTimeRef.current = null;
+          setReadouts((prev) => ({ ...prev, tradeFireTooltip: null }));
+          redrawTradeFireOverlayRef.current();
+        }
+        return;
+      }
       const fullBar = mockDataRef.current.find((d) => d.time === param.time);
       if (fullBar) updateReadouts(fullBar, mockDataRef.current);
+
+      const tip = tradeFireTooltipFromLookup(tradeFireLookupRef.current, param.time);
+      const prevHover = hoveredTradeFireTimeRef.current;
+      const nextHover = tip ? param.time : null;
+      if (prevHover !== nextHover) {
+        hoveredTradeFireTimeRef.current = nextHover;
+        setReadouts((prev) => ({ ...prev, tradeFireTooltip: tip }));
+        redrawTradeFireOverlayRef.current();
+      }
     });
 
     const handleResize = () => {
       chart.applyOptions({ width: chartContainer.clientWidth, height: chartContainer.clientHeight });
       volumeChart.applyOptions({ width: volumeContainer.clientWidth, height: volumeContainer.clientHeight });
       redrawBlueBoxOverlay();
+      redrawTradeFireOverlayRef.current();
     };
     window.addEventListener('resize', handleResize);
 
@@ -761,6 +838,7 @@ export function useTradingChart({
         lineRefs: blueBoxLineRefsRef,
       });
       if (blueBoxLayer.parentNode) blueBoxLayer.parentNode.removeChild(blueBoxLayer);
+      if (tradeFireLayer.parentNode) tradeFireLayer.parentNode.removeChild(tradeFireLayer);
       chart.remove();
       volumeChart.remove();
     };
@@ -806,7 +884,8 @@ export function useTradingChart({
 
   useEffect(() => {
     redrawBlueBoxOverlay();
-  }, [botIsActive, blueBoxOverlay, timeframe, redrawBlueBoxOverlay]);
+    redrawTradeFireOverlay();
+  }, [botIsActive, blueBoxOverlay, timeframe, redrawBlueBoxOverlay, redrawTradeFireOverlay]);
 
   useEffect(() => {
     if (mockDataRef.current.length > 0) {

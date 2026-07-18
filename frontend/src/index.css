@@ -40,3 +40,102 @@ body.dark {
 .dark .trade-card:hover {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
 }
+
+/* Trade-fire neon glow on pattern-detected candles */
+@keyframes trade-fire-pulse-long {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(57, 255, 20, 0.55), 0 0 16px rgba(57, 255, 20, 0.35), inset 0 0 6px rgba(57, 255, 20, 0.15);
+  }
+  50% {
+    box-shadow: 0 0 14px rgba(57, 255, 20, 0.85), 0 0 28px rgba(57, 255, 20, 0.45), inset 0 0 10px rgba(57, 255, 20, 0.25);
+  }
+}
+
+@keyframes trade-fire-pulse-short {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(255, 16, 240, 0.55), 0 0 16px rgba(255, 16, 240, 0.35), inset 0 0 6px rgba(255, 16, 240, 0.15);
+  }
+  50% {
+    box-shadow: 0 0 14px rgba(255, 16, 240, 0.85), 0 0 28px rgba(255, 16, 240, 0.45), inset 0 0 10px rgba(255, 16, 240, 0.25);
+  }
+}
+
+.trade-fire-neon__glow {
+  animation-duration: 1.8s;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+
+.trade-fire-neon--long .trade-fire-neon__glow {
+  animation-name: trade-fire-pulse-long;
+}
+
+.trade-fire-neon--short .trade-fire-neon__glow {
+  animation-name: trade-fire-pulse-short;
+}
+
+.trade-fire-neon--hover .trade-fire-neon__glow {
+  animation: none;
+}
+
+.trade-fire-neon--hover.trade-fire-neon--long .trade-fire-neon__glow {
+  box-shadow: 0 0 18px rgba(57, 255, 20, 0.9), 0 0 32px rgba(57, 255, 20, 0.5), inset 0 0 12px rgba(57, 255, 20, 0.3);
+}
+
+.trade-fire-neon--hover.trade-fire-neon--short .trade-fire-neon__glow {
+  box-shadow: 0 0 18px rgba(255, 16, 240, 0.9), 0 0 32px rgba(255, 16, 240, 0.5), inset 0 0 12px rgba(255, 16, 240, 0.3);
+}
+
+.trade-fire-neon__badge {
+  position: absolute;
+  bottom: -10px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  line-height: 1;
+  filter: drop-shadow(0 0 4px currentColor);
+  pointer-events: none;
+}
+
+.trade-fire-tooltip {
+  min-width: 120px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  backdrop-filter: blur(8px);
+  white-space: nowrap;
+}
+
+.trade-fire-tooltip--long {
+  background: rgba(10, 20, 10, 0.92);
+  border: 1px solid rgba(57, 255, 20, 0.65);
+  box-shadow: 0 0 12px rgba(57, 255, 20, 0.45);
+}
+
+.trade-fire-tooltip--short {
+  background: rgba(20, 8, 18, 0.92);
+  border: 1px solid rgba(255, 16, 240, 0.65);
+  box-shadow: 0 0 12px rgba(255, 16, 240, 0.45);
+}
+
+.trade-fire-tooltip__pattern {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #e5e7eb;
+}
+
+.trade-fire-tooltip--long .trade-fire-tooltip__pattern {
+  color: #bbf7d0;
+}
+
+.trade-fire-tooltip--short .trade-fire-tooltip__pattern {
+  color: #f5d0fe;
+}
+
+.trade-fire-tooltip__time {
+  margin-top: 2px;
+  font-size: 9px;
+  font-family: ui-monospace, monospace;
+  color: #9ca3af;
+}
