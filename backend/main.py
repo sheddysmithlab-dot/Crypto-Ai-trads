@@ -832,7 +832,8 @@ class AITradingAgent:
         for row in self.trade_history:
             if row["id"] == trade["id"]:
                 row["current"] = round(self.current_price, 4)
-                row["pnl"] = round(metrics["net_pct"], 4)
+                # Trade list shows gross profit only — fees live in header broker-fee total.
+                row["pnl"] = round(metrics["gross_pct"], 4)
                 row["gross_pnl_pct"] = round(metrics["gross_pct"], 4)
                 row["net_pnl_usd"] = round(metrics["net_usd"], 2)
                 row["exit_fee_usd"] = round(metrics["exit_fee_usd"], 4)
@@ -842,6 +843,40 @@ class AITradingAgent:
 
     def get_unrealized_net_usd(self):
         return sum(self._trade_metrics(t)["net_usd"] for t in self.trades)
+
+    def get_session_gross_and_fees_usd(self) -> dict:
+        """Gross trade P&L + Bybit broker fees (open entry + est. exit + closed)."""
+        open_gross = 0.0
+        open_fees = 0.0
+        for t in self.trades:
+            m_open = self._trade_metrics(t, for_close=False)
+            m_close = self._trade_metrics(t, for_close=True)
+            open_gross += float(m_open["gross_usd"])
+            open_fees += float(t.get("entry_fee_usd") or 0) + float(m_close["exit_fee_usd"])
+
+        closed_gross = 0.0
+        closed_fees = 0.0
+        for row in self.trade_history:
+            if row.get("status") != "sold":
+                continue
+            entry_f = float(row.get("entry_fee_usd") or 0)
+            exit_f = float(row.get("exit_fee_usd") or 0)
+            net_u = float(row.get("net_pnl_usd") or 0)
+            closed_fees += entry_f + exit_f
+            # net = gross - fees → gross = net + fees
+            closed_gross += net_u + entry_f + exit_f
+
+        gross = open_gross + closed_gross
+        fees = open_fees + closed_fees
+        return {
+            "gross_usd": gross,
+            "broker_fee_usd": fees,
+            "net_usd": gross - fees,
+            "open_gross_usd": open_gross,
+            "closed_gross_usd": closed_gross,
+            "open_fee_usd": open_fees,
+            "closed_fee_usd": closed_fees,
+        }
 
     def get_available_capital(self):
         """Free cash for the next 10% auto slot (paper ledger after open reserves)."""
@@ -1153,7 +1188,8 @@ class AITradingAgent:
             out.update({
                 "current": round(self.current_price, 4),
                 "gross_pnl_pct": round(m["gross_pct"], 4),
-                "pnl": round(m["net_pct"], 4),
+                # UI trade list: price profit only (no fee). Fees roll up in header.
+                "pnl": round(m["gross_pct"], 4),
                 "net_pnl_usd": round(m["net_usd"], 2),
                 "exit_fee_usd": round(m["exit_fee_usd"], 4),
                 "status": "locked" if trade.get("is_lock_active") else "active",
@@ -1176,6 +1212,9 @@ class AITradingAgent:
         for row in sold_rows:
             out = dict(row)
             out.setdefault("protected", out.get("source") == "manual")
+            # Prefer stored gross for list display.
+            if out.get("gross_pnl_pct") is not None:
+                out["pnl"] = out["gross_pnl_pct"]
             snapshot.append(out)
         return snapshot
 
@@ -3119,8 +3158,12 @@ async def portfolio_feed(websocket: WebSocket):
             unrealized_net = agent.get_unrealized_net_usd()
             margin_in_use = sum(float(t.get("margin") or 0) for t in agent.trades)
             trade_notional = sum(float(t.get("position_size") or 0) for t in agent.trades)
-            # Daily profit = vs paper-account starting capital (lifetime account P&L).
-            daily_profit = total_value - agent.starting_capital
+
+            # Fee roll-up for header — trade list shows gross only.
+            fee_book = agent.get_session_gross_and_fees_usd()
+            broker_fee = float(fee_book["broker_fee_usd"])
+            # Daily / season profit = gross − Bybit fees (shown net in header).
+            daily_profit = float(fee_book["net_usd"])
             daily_profit_pct = (daily_profit / agent.starting_capital) * 100 if agent.starting_capital else 0
 
             if (
@@ -3137,10 +3180,14 @@ async def portfolio_feed(websocket: WebSocket):
                     "success",
                 )
 
-            # AI Season profit = vs capital at the moment START AI AUTOMATION was clicked.
+            # AI Season profit = fee-aware net while season is active.
             if agent.ai_season_start_capital is not None and agent.is_active:
-                ai_season_profit = total_value - agent.ai_season_start_capital
-                ai_season_profit_pct = (ai_season_profit / agent.ai_season_start_capital) * 100
+                ai_season_profit = float(fee_book["net_usd"])
+                ai_season_profit_pct = (
+                    (ai_season_profit / agent.ai_season_start_capital) * 100
+                    if agent.ai_season_start_capital
+                    else 0
+                )
             else:
                 ai_season_profit = 0.0
                 ai_season_profit_pct = 0.0
@@ -3168,6 +3215,8 @@ async def portfolio_feed(websocket: WebSocket):
                 "trading_mode": bybit_api.mode,
                 "daily_profit": round(daily_profit, 2),
                 "daily_profit_pct": round(daily_profit_pct, 2),
+                "daily_broker_fee": round(broker_fee, 4),
+                "daily_gross_profit": round(float(fee_book["gross_usd"]), 2),
                 "ai_season_profit": round(ai_season_profit, 2),
                 "ai_season_profit_pct": round(ai_season_profit_pct, 2),
                 "ai_season_active": agent.ai_season_start_capital is not None and agent.is_active,

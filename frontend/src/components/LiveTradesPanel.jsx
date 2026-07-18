@@ -2,6 +2,8 @@ import { getPairMeta, fmtNum } from '../data/pairs';
 import { formatTradeFireTime } from '../utils/time';
 
 function isTradeWinning(trade) {
+  // Price profit only (gross) — fees are shown in the header broker-fee total.
+  if (trade.gross_pnl_pct != null) return trade.gross_pnl_pct >= 0;
   if (trade.pnl != null) return trade.pnl >= 0;
   if (trade.side === 'LONG' && trade.entry != null && trade.current != null) {
     return trade.current >= trade.entry;
@@ -12,7 +14,7 @@ function isTradeWinning(trade) {
   return false;
 }
 
-function formatTotalPnl(pnl) {
+function formatProfitPct(pnl) {
   const n = Number(pnl) || 0;
   return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
 }
@@ -36,7 +38,7 @@ function TradeRowDesktop({ trade, onRequestClose }) {
   const meta = getPairMeta(trade.pair);
   const isSold = trade.status === 'sold';
   const isProtected = trade.protected || trade.source === 'manual';
-  const totalPnl = trade.pnl ?? 0;
+  const totalPnl = trade.gross_pnl_pct ?? trade.pnl ?? 0;
   const isProfit = isTradeWinning(trade);
   const rowBg = isSold
     ? 'bg-white/5 dark:bg-white/5 opacity-90'
@@ -76,9 +78,9 @@ function TradeRowDesktop({ trade, onRequestClose }) {
       <td className="px-3 py-1.5 font-mono">${fmtNum(trade.entry)}</td>
       <td className="px-3 py-1.5 font-mono">${fmtNum(trade.current)}</td>
       <td className={`px-3 py-1.5 font-bold ${pnlColor}`}>
-        <span title="Unrealized P&L (price move − entry fee). Exit fee applies only when closed.">
-          {formatTotalPnl(totalPnl)}
-          <span className="text-[9px] font-normal text-gray-500 ml-0.5">total</span>
+        <span title="Price profit only — broker fees are in the header Daily Bybit Broker Fee">
+          {formatProfitPct(totalPnl)}
+          <span className="text-[9px] font-normal text-gray-500 ml-0.5">profit</span>
         </span>
         {!isSold && trade.status === 'locked' && trade.sell_trigger_pct != null ? (
           <div className="text-[9px] font-normal text-blue-400">
@@ -114,7 +116,7 @@ function TradeRowMobile({ trade }) {
   const isSold = trade.status === 'sold';
   const isProtected = trade.protected || trade.source === 'manual';
   const isProfit = isTradeWinning(trade);
-  const totalPnl = trade.pnl ?? 0;
+  const totalPnl = trade.gross_pnl_pct ?? trade.pnl ?? 0;
   const rowBg = isSold
     ? 'bg-white/5 dark:bg-white/5 opacity-90'
     : isProfit
@@ -151,9 +153,9 @@ function TradeRowMobile({ trade }) {
         </div>
       </div>
       <div className="flex items-center gap-1.5">
-        <span className={`font-bold ${pnlColor} text-xs`} title="Unrealized P&L (price move − entry fee). Exit fee at close.">
-          {formatTotalPnl(totalPnl)}
-          <span className="block text-[9px] font-normal text-gray-500">total</span>
+        <span className={`font-bold ${pnlColor} text-xs`} title="Price profit only — fees in header">
+          {formatProfitPct(totalPnl)}
+          <span className="block text-[9px] font-normal text-gray-500">profit</span>
         </span>
         <StatusIcon trade={trade} />
       </div>

@@ -2,6 +2,7 @@ export default function MobilePortfolioCard({
   totalCapital,
   tradeValue = 0,
   dailyProfit,
+  dailyBrokerFee = 0,
   seasonProfit,
   seasonActive,
   tradesCount,
@@ -11,6 +12,7 @@ export default function MobilePortfolioCard({
   const capStr = totalCapital.toLocaleString('en-US', { minimumFractionDigits: 2 });
   const tradeValStr = tradeValue.toLocaleString('en-US', { minimumFractionDigits: 2 });
   const pnlStr = `${isProfit ? '+' : '-'}$${Math.abs(dailyProfit).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+  const feeStr = `-$${Math.abs(Number(dailyBrokerFee) || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
   const seasonStr = seasonActive
     ? `${isSeasonProfit ? '+' : '-'}$${Math.abs(seasonProfit).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
     : '$0.00';
@@ -18,7 +20,7 @@ export default function MobilePortfolioCard({
   return (
     <div className="lg:hidden bg-lightCard dark:bg-darkCard mx-3 mt-3 rounded-xl shadow border border-gray-200 dark:border-gray-800 p-4">
       <div className="text-xs font-bold text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wide">Portfolio</div>
-      <div className="flex justify-between text-center">
+      <div className="grid grid-cols-3 gap-3 text-center">
         <div>
           <div className="text-[11px] text-gray-500 dark:text-gray-400">Total Capital</div>
           <div className="font-bold text-sm">${capStr}</div>
@@ -32,6 +34,10 @@ export default function MobilePortfolioCard({
           <div className={`font-bold text-sm ${isProfit ? 'text-green-500' : 'text-red-500'}`}>{pnlStr}</div>
         </div>
         <div>
+          <div className="text-[11px] text-gray-500 dark:text-gray-400">Bybit Fee</div>
+          <div className="font-bold text-sm text-amber-400">{feeStr}</div>
+        </div>
+        <div>
           <div className="text-[11px] text-gray-500 dark:text-gray-400">AI Season</div>
           <div
             className={`font-bold text-sm ${
@@ -43,7 +49,9 @@ export default function MobilePortfolioCard({
         </div>
         <div>
           <div className="text-[11px] text-gray-500 dark:text-gray-400">Open</div>
-          <div className="font-bold text-sm">{tradesCount}</div>
+          <div className="font-bold text-sm">
+            {tradesCount} <span className="text-[10px] font-normal text-gray-400">pos</span>
+          </div>
         </div>
       </div>
     </div>

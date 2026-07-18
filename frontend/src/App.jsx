@@ -272,6 +272,7 @@ export default function App() {
         tradeValue={tradeValue}
         dailyProfit={portfolio.dailyProfit}
         dailyProfitPct={portfolio.dailyProfitPct}
+        dailyBrokerFee={portfolio.dailyBrokerFee}
         seasonProfit={portfolio.seasonProfit}
         seasonProfitPct={portfolio.seasonProfitPct}
         seasonActive={portfolio.seasonActive}
@@ -297,6 +298,7 @@ export default function App() {
         totalCapital={totalEquity}
         tradeValue={tradeValue}
         dailyProfit={portfolio.dailyProfit}
+        dailyBrokerFee={portfolio.dailyBrokerFee}
         seasonProfit={portfolio.seasonProfit}
         seasonActive={portfolio.seasonActive}
         tradesCount={activeCount}
