@@ -35,6 +35,7 @@ export default function Header({
   onOpenPaperModal,
   onOpenSettings,
   onOpenLog,
+  onOpenStatement,
   onLogout,
   username,
 }) {
@@ -195,7 +196,7 @@ export default function Header({
           </button>
 
           {profileOpen && (
-            <div className="absolute right-0 mt-2 w-52 bg-white dark:bg-darkRow rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 overflow-hidden z-50">
+            <div className="absolute right-0 mt-2 w-56 bg-white dark:bg-darkRow rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 overflow-hidden z-50">
               <div className="px-3 py-3 border-b border-gray-200 dark:border-gray-700">
                 <div className="text-[10px] uppercase tracking-wider text-gray-500 dark:text-gray-400">Username</div>
                 <div className="text-sm font-bold text-gray-800 dark:text-gray-100 truncate mt-0.5" title={username}>
@@ -206,9 +207,20 @@ export default function Header({
                 type="button"
                 onClick={() => {
                   setProfileOpen(false);
+                  onOpenStatement?.();
+                }}
+                className="w-full px-3 py-2.5 text-left text-sm font-semibold text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2 transition"
+              >
+                <i className="fas fa-file-invoice-dollar text-blue-500"></i>
+                Trading Statement
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setProfileOpen(false);
                   onLogout?.();
                 }}
-                className="w-full px-3 py-2.5 text-left text-sm font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center gap-2 transition"
+                className="w-full px-3 py-2.5 text-left text-sm font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center gap-2 transition border-t border-gray-200 dark:border-gray-700"
               >
                 <i className="fas fa-right-from-bracket"></i>
                 Logout

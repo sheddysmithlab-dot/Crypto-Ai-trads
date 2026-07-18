@@ -29,6 +29,7 @@ from bybit_public import (
     sanitize_price as _sanitize_market_price,
 )
 from session_schedule import schedule_store
+import trade_db
 from api_secrets import (
     get_taapi_exchange,
     get_taapi_secret,
@@ -284,6 +285,7 @@ class SettingsStore:
             "taapi_exchange": get_taapi_exchange(),
             "bybit_testnet_configured": is_bybit_testnet_configured(),
             "session_schedule": schedule_store.status_dict(),
+            "mysql": trade_db.status_dict(),
         }
 
 settings_store = SettingsStore()
@@ -807,6 +809,10 @@ class AITradingAgent:
             "opened_at": trade.get("opened_at"),
             "exchange": trade.get("exchange"),
         })
+        try:
+            trade_db.upsert_open_trade(trade)
+        except Exception as exc:
+            print(f"[MYSQL] open persist skipped: {exc}")
 
     def get_entry_candle_highlights(self) -> list[dict]:
         """Candles where auto trades fired — for frontend neon chart markers."""
@@ -841,7 +847,20 @@ class AITradingAgent:
                 row["exit_fee_usd"] = round(metrics["exit_fee_usd"], 4)
                 row["status"] = "sold"
                 row["closed_reason"] = reason
-                return
+                break
+        try:
+            trade_db.finalize_trade(
+                trade,
+                exit_price=float(self.current_price),
+                gross_pnl_pct=float(metrics["gross_pct"]),
+                net_pnl_usd=float(metrics["net_usd"]),
+                exit_fee_usd=float(metrics["exit_fee_usd"]),
+                exit_fee_pct=float(metrics.get("exit_fee_pct") or 0),
+                closed_reason=reason,
+                gross_pnl_usd=float(metrics.get("gross_usd") or 0),
+            )
+        except Exception as exc:
+            print(f"[MYSQL] close persist skipped: {exc}")
 
     def get_unrealized_net_usd(self):
         return sum(self._trade_metrics(t)["net_usd"] for t in self.trades)
@@ -2653,6 +2672,16 @@ async def start_background_tasks():
         )
     except Exception as exc:
         print(f"[ML MEMORY] load note: {exc}")
+    try:
+        db_status = trade_db.init_db()
+        if db_status.get("ok"):
+            synced = trade_db.max_bot_trade_id()
+            if synced > agent.trade_seq:
+                agent.trade_seq = synced
+                print(f"[MYSQL] trade_seq synced to {agent.trade_seq}")
+        system_log.push("ai", f"MySQL: {db_status.get('message')}", db_status)
+    except Exception as exc:
+        print(f"[MYSQL] startup note: {exc}")
     asyncio.create_task(market_simulator())
     asyncio.create_task(bybit_price_feed())
     asyncio.create_task(bybit_balance_refresher())
@@ -3002,6 +3031,29 @@ async def set_session_schedule(payload: SessionSchedulePayload):
     )
     system_log.push("ai", msg, st)
     return {"status": "success", "message": msg, "schedule": st}
+
+@app.get("/trades/statement")
+async def trades_statement(
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    status: str | None = Query(None),
+    pair: str | None = Query(None),
+):
+    """Full trading statement from MySQL (Hostinger). Falls back to empty if DB off."""
+    data = await asyncio.to_thread(
+        trade_db.fetch_statement,
+        limit=limit,
+        offset=offset,
+        status=status,
+        pair=pair,
+    )
+    return data
+
+
+@app.get("/settings/mysql-status")
+async def mysql_status():
+    return trade_db.status_dict()
+
 
 @app.get("/agent/bible/stats")
 async def agent_bible_stats():

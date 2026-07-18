@@ -24,6 +24,7 @@ import StartConfirmModal from './components/StartConfirmModal';
 import TradeExitConfirmModal from './components/TradeExitConfirmModal';
 import SystemLogModal from './components/SystemLogModal';
 import AgentChatStrip from './components/AgentChatStrip';
+import TradingStatementModal from './components/TradingStatementModal';
 
 export default function App() {
   const { logout, username } = useAuth();
@@ -39,6 +40,7 @@ export default function App() {
   const [startConfirmOpen, setStartConfirmOpen] = useState(false);
   const [pendingConfig, setPendingConfig] = useState(null);
   const [logModalOpen, setLogModalOpen] = useState(false);
+  const [statementOpen, setStatementOpen] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState(null);
   const [systemLogs, setSystemLogs] = useState(null);
   const [actionLogs, setActionLogs] = useState([]);
@@ -311,6 +313,7 @@ export default function App() {
         }}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenLog={() => setLogModalOpen(true)}
+        onOpenStatement={() => setStatementOpen(true)}
         onLogout={logout}
         username={username}
       />
@@ -370,6 +373,8 @@ export default function App() {
       <AlertModal open={alertOpen} onClose={() => setAlertOpen(false)} />
 
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onLiveTradingConnected={() => {}} />
+
+      <TradingStatementModal open={statementOpen} onClose={() => setStatementOpen(false)} />
 
       <AgentInstructionsModal
         open={agentModalOpen}

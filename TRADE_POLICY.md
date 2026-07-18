@@ -22,5 +22,8 @@ Strict Exit: +0.20% min lock, +1.2% hard target, trail peak − 1.5×0.10%. No S
 ## Session schedule (optional UI switch)
 Mon–Fri IST auto on/off (no browser needed): Morning 05:30–08:30 · Peak Overlap 18:30–23:30 · US Core 19:30–01:30.
 
+## Trading Statement (MySQL)
+Closed/open trades persist to Hostinger MySQL (`backend/sql/schema.sql`). Profile → Trading Statement. Setup: `upload/HOSTINGER_MYSQL.md`.
+
 ## Size
 Auto fire uses ~10% of available capital (see `AUTO_TRADE_CAPITAL_PCT` in `main.py`).
