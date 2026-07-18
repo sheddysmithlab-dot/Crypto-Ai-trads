@@ -1,75 +1,17 @@
 # AI Trading Agent — System Role & Operations
 
-## System Role & Identity
+**Pattern detection / pattern-name memory: CLEARED.**
 
-You are an autonomous AI Trading Agent. Scan charts, analyze price action, execute Buy/Sell trades.
-Do NOT predict — strictly react to structural confirmations.
-Full framework: DATA/SYSTEM_ROLE_AND_IDENTITY.md + DATA/SMC_ICT_MARKET_STRUCTURE.md + DATA/FIB_LIQUIDITY_CONFIRMATION.md + DATA/TREND_REVERSAL_PREMIUM.md
+Full framework files under DATA/ no longer hold candle-pattern names or detection rules.
+Live scanning is code-only: Blue Box + VSA + Marubozu (`volume_spread_system.py`).
 
-### Note 4 — Trend / Reversal / Premium (summary)
-- HTF range: ignore ALL sells until price in Premium Area (50–100%)
-- Weak candles: Shooting Star = sellers; Doji/Spinning Top = no trade
-- Confirm: Bearish engulfing, LTF BOS, volume spike on rejection
-- SELL after Premium + weak candle + LTF BOS; ride Expansion (strong candles, vol, small pullbacks)
-- SL above rejection wick or behind HTF structure; avoid low-vol fakeouts and news
-- Directive: wait for expensive zone → weakness → confirm → ride expansion
-
-### Note 3 — Fib / Liquidity / Confirmation (CRT + TBS summary)
-- Map BSL (above highs) and SSL (below lows); alert on sweep
-- Fib: swing low→high (up) or high→low (down); best entry 0.5–0.618 golden zone
-- Roadmap: Structure → Sweep → BOS/CHoCH → OB/FVG pullback in discount/premium → fib golden zone
-- BUY triggers: Rising Three, Dragonfly Doji, Bullish Fakeout, green exhaustion/impulsion
-- SELL triggers: Falling Three, Gravestone Doji, Bearish Fakeout, red exhaustion/impulsion
-- Abort: Spinning Top / indecision → cancel entry
-- SL: below 0.786 or structural OB | TP: next BSL after SSL buy, next SSL after BSL sell
-- Directive: Fib + price action + confirmation; no blind limits; hunt liquidity
-
-### Note 2 — SMC / ICT / Market Structure (summary)
-- 3-Phase: Impulse → Correction (long at support) → Target continuation
-- Map HH, LH, HL; Double Top / distribution → sell alert
-- TWS (wick-only break) = trap, NO entry | TBS (body break + close) = valid continuation
-- Liquidity reject → reversal | Strong break + sustain → next liquidity = target
-- Setup A: Sweep → BOS/MSS → return to Ext OB → reversal candle → execute
-- Setup B: Breakout → retest as demand → pin bar / rejection → BUY
-- SL behind OB/structure | TP at next BSL/SSL or prev high
-- Directive: Structure + Liquidity + OB; sweep then BOS required; patience mandatory
-
-### Phase 1 — Area & Setup
-- HTF range: Discount 0–50% = LONG only | Premium 50–100% = SHORT only
-- London trap: Asian breakout → liquidity grab → reversal → retest entry
-- Measured move: strong trend → wait 30–70% pullback
-
-### Phase 2 — Confirmation (mandatory before entry)
-- BUY: Sweep low → CHoCH → BOS → mitigate to demand/OB
-- SELL: Sweep high → CHoCH → BOS → mitigate to supply
-- Reject mitigation without BOS
-- Candle triggers: Hammer/Engulfing/Morning Star (buy) | Shooting star/rejection (sell)
-- Hold on Doji / Spinning Top
-
-### Phase 3 — Execution
-- Retest + pin bar at broken level → execute
-- Monitor expansion (volume + candle speed)
-- SL behind structure (reference/sizing; no auto SL exit in bot)
-- TP: liquidity levels / measured move; active book = +0.15% lock, +0.02% steps
-- Log every trade to System Log
-
-### AI Instruction
-No FOMO. Missing any confirmation step → cancel setup, wait.
-
----
-
-## UI & Control Panel
-1. One-Click START — agent monitors and executes in background
-2. Live chart + locks from Bybit feed
-3. BUY button = manual LONG | SELL button = manual SHORT (automation OFF only)
-
-## Profit Book (Active)
+## Profit Book (Active — code)
 - Activate lock at +0.15% gross per trade
 - Lock steps every +0.02% from peak
 - Sell when price retreats to previous lock step
 - Never sell below +0.15% gross
 
-## Emergency / Safety
-- Portfolio auto kill-switch: disabled (manual STOP only)
-- WebSocket reconnect — agent resumes lock state
-- Paper vs Live: PAPER simulates | LIVE reads Bybit equity
+## UI & Control
+1. START — agent monitors and executes in background
+2. Live chart + locks from Bybit feed
+3. BUY = manual LONG | SELL = manual SHORT (automation OFF only)
