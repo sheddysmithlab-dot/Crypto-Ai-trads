@@ -199,7 +199,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                 <th className="px-3 py-1.5 font-semibold">Fired</th>
                 <th className="px-3 py-1.5 font-semibold">Entry</th>
                 <th className="px-3 py-1.5 font-semibold">Current</th>
-                <th className="px-3 py-1.5 font-semibold">Total</th>
+                <th className="px-3 py-1.5 font-semibold">Profit</th>
                 <th className="px-3 py-1.5 font-semibold text-right">Status</th>
               </tr>
             </thead>
