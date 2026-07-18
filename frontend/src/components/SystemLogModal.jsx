@@ -229,7 +229,13 @@ export default function SystemLogModal({
   const agent = systemLogs?.agent || {};
   const scan = systemLogs?.last_taapi_scan;
   const scanEngine =
-    scan?.engine === 'smc_vsa' ? 'Blue Box' : scan?.engine === 'uvss' ? 'UVSS' : 'Signal';
+    scan?.engine === 'candle_pattern' || scan?.decision?.engine === 'candle_pattern'
+      ? 'Candle Brain'
+      : scan?.engine === 'smc_vsa'
+        ? 'Legacy'
+        : scan?.engine === 'uvss'
+          ? 'UVSS'
+          : 'Signal';
   const tradeFire = systemLogs?.last_trade_fire;
   const backendEntries = systemLogs?.entries || [];
   const backendNotifications = systemLogs?.notifications || [];
@@ -333,8 +339,8 @@ export default function SystemLogModal({
             </div>
             <div className="bg-[#161A1E] border border-cyan-800/50 rounded-xl p-2">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Entry Engine</div>
-              <StatusPill ok label="BLUE BOX ACTIVE" />
-              <p className="text-[11px] text-gray-500 mt-2">15 patterns · VSA+Blue Box · Bybit klines</p>
+              <StatusPill ok label="CANDLE BRAIN" />
+              <p className="text-[11px] text-gray-500 mt-2">24 patterns · Bible + ML gate · Bybit klines</p>
             </div>
             <div className="bg-[#161A1E] border border-amber-700/40 rounded-xl p-2">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Bybit TESTNET</div>
@@ -343,7 +349,7 @@ export default function SystemLogModal({
                 label={isPaper ? 'PAPER MODE' : bybitTestnetOk ? 'KEYS SET' : 'KEYS MISSING'}
               />
               <p className="text-[11px] text-gray-500 mt-2">
-                {isPaper ? 'Paper ledger — same Blue Box rules as TESTNET' : 'Bybit TESTNET — real orders, same rules as paper'}
+                {isPaper ? 'Paper ledger — same candle brain rules as TESTNET' : 'Bybit TESTNET — real orders, same rules as paper'}
               </p>
             </div>
           </section>
@@ -420,7 +426,7 @@ export default function SystemLogModal({
           {/* Last signal scan */}
           <section className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">
             <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-2">
-              <i className={`fas ${scanEngine === 'Blue Box' ? 'fa-chart-bar' : 'fa-wave-square'} text-cyan-400 mr-1.5`} />
+              <i className={`fas ${scanEngine === 'Candle Brain' ? 'fa-brain' : 'fa-wave-square'} text-cyan-400 mr-1.5`} />
               Last {scanEngine} Scan
               {scan?.timestamp ? (
                 <span className="text-gray-500 font-normal normal-case ml-2">{formatIso(scan.timestamp)}</span>

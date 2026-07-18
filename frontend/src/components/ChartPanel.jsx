@@ -1,5 +1,6 @@
 import PairSelectorDropdown from './PairSelectorDropdown';
 import { fmtNum } from '../data/pairs';
+import { formatTradeFireTime } from '../utils/time';
 
 const TIMEFRAMES = ['1M', '5M', '15M', '1H', '1D'];
 
@@ -24,10 +25,30 @@ export default function ChartPanel({
           toggleStar={pairSelector.toggleStar}
         />
         <div className="flex flex-wrap justify-end items-center gap-2 text-xs font-semibold">
+          {readouts.tradeFireTooltip ? (
+            <div
+              className={`flex flex-col gap-0.5 px-2 py-1 rounded border text-[10px] font-bold uppercase tracking-wide ${
+                readouts.tradeFireTooltip.side === 'SHORT'
+                  ? 'border-fuchsia-500/50 bg-fuchsia-500/10 text-fuchsia-200'
+                  : 'border-lime-500/50 bg-lime-500/10 text-lime-200'
+              }`}
+              title="Pattern-detected trade fire candle"
+            >
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
+                {readouts.tradeFireTooltip.pattern}
+              </span>
+              <span className="text-[9px] font-mono font-normal normal-case tracking-normal text-gray-400">
+                {formatTradeFireTime(
+                  readouts.tradeFireTooltip.opened_at || readouts.tradeFireTooltip.signal_candle_time,
+                )}
+              </span>
+            </div>
+          ) : null}
           {botIsActive && readouts.blueBoxStatus ? (
             <div
               className="flex items-center gap-1.5 px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-[10px] font-bold uppercase tracking-wide text-cyan-300"
-              title="AI is using the Blue Box sweep + displacement engine"
+              title="AI candle brain: detect → Bible → ML cost-aware → fire"
             >
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
               {readouts.blueBoxStatus}
@@ -61,14 +82,14 @@ export default function ChartPanel({
         {botIsActive ? (
           <div className="absolute top-2 right-2 z-20 pointer-events-none flex flex-col items-end gap-1">
             <div className="px-2 py-1 rounded-md bg-cyan-950/80 border border-cyan-500/50 text-[9px] font-black uppercase tracking-widest text-cyan-200 shadow-lg">
-              Blue Box AI
+              Candle Brain
             </div>
             <div className="text-[8px] text-cyan-300/80 font-mono text-right leading-tight">
-              <span className="text-cyan-400">—</span> L20 · <span className="text-yellow-400">—</span> EMA50
+              detect → Bible → ML gate
               <br />
-              <span className="text-pink-400">—</span> H20 · <span className="text-purple-400">—</span> EMA200
+              <span className="text-yellow-400">—</span> EMA50 · <span className="text-purple-400">—</span> EMA200
               <br />
-              <span className="text-cyan-300">▢</span> trap · <span className="text-lime-400">█</span> trade fire
+              <span className="text-lime-400">⚡</span> neon trade fire
             </div>
           </div>
         ) : null}

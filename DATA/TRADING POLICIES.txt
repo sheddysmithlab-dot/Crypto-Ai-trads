@@ -1,43 +1,20 @@
-# Blue Box + VSA + Marubozu — Active Entry Policies
+# Candle Brain — Active Entry Policies
 
-Signals fire **once per closed candle** only. Data: **Bybit LINEAR klines**.
+Pipeline: Detect → Bible (RAM) → ML cost-aware → Fire
 
-## Priority (first match wins)
-1. Blue Box displacement (BB-L / BB-S)
-2. VSA + SMC rules (L1–L4, S1–S3, plus L5/S4 momentum-style)
-3. Marubozu pullback (MBZ-L / MBZ-S)
-4. Standalone momentum (MOM-L / MOM-S)
+## Active pattern families
+1. Engulfing / Piercing / Dark Cloud
+2. Pin bar / Hammer / Shooting Star
+3. Morning / Evening Star
+4. Inside-bar break (Bible)
+5. Harami / Tweezers / Doji extremes
+6. Three White / Three Black
+7. Belt hold / Marubozu continuation
 
-## Blue Box trap
-- Sweep + displacement on next 1–2 bars → **BB-L / BB-S** (1:2 R:R)
+## Filters
+- EMA50 / EMA200 trend + local slope
+- Same-bar bull+bear conflict = NO_TRADE
+- ML cost-aware: remaining edge & candle range must clear λ×fee hurdle
 
-## VSA + SMC (200 EMA trend filter; L3/L5/S2/S4 bypass)
-
-| Code | Setup | R:R |
-|------|--------|-----|
-| L1 | Red exhaustion, uptrend | 1:1 |
-| L2 | Hammer, uptrend | 1:2 |
-| L3 | Spring: low < L20, close top 50%, vol > 1.5× SMA20 | 1:2 |
-| L4 | Buy absorption, uptrend | 1:2 |
-| L5 | Green body ≥ 2× expected | 1:1 |
-| S1 | Green exhaustion, downtrend | 1:1 |
-| S2 | Up-thrust: high > H20, close bottom 50%, vol > 1.5× SMA20 | 1:2 |
-| S3 | Sell absorption, downtrend | 1:2 |
-| S4 | Red body ≥ 2× expected | 1:1 |
-
-## Marubozu pullback (EMA 50/200)
-- **MBZ-L / MBZ-S** — pullback + marubozu trigger (1:2 R:R)
-
-## Momentum
-- **MOM-L / MOM-S** — body ≥ 2× expected (1:2 R:R)
-
-## Execution
-- Entry at close; SL stored for sizing/logs only — **no automatic SL exit**
-- BUY button = manual LONG | SELL button = manual SHORT (automation OFF only)
-- **Profit book (stepped lock):**
-  - Activate at **+0.15% gross**
-  - Lock steps every **+0.02%**: +0.17% → +0.19% → +0.21% … (continues as price rises)
-  - **Sell** when price retreats to the **previous lock step** (e.g. lock at +0.24% → sell at +0.22%)
-  - **Hard floor:** never sell below **+0.15%** under any condition
-- R:R TP levels stored for reference; exit is trailing-lock driven
-- Size: 1% balance risked to SL distance (reference only for qty)
+## Exits
+Profit lock +0.15% / +0.02% steps (code). No SL auto-exit.

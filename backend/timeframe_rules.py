@@ -1,6 +1,6 @@
 """Per-timeframe gross TP / SL reference matrix (used by cost-aware helpers).
 
-Live entries use Blue Box + VSA (`volume_spread_system.py`), not this matrix for
+Live entries use candle patterns (`volume_spread_system.py`); this matrix supports
 signal direction. Kept for optional cost-aware / legacy TP % lookups.
 """
 from __future__ import annotations

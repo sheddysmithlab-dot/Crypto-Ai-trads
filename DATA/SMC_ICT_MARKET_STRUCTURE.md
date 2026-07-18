@@ -1,6 +1,6 @@
-# Note 2 — SMC / ICT (cleared)
+# Note — SMC / ICT
 
-**Pattern detection memory: CLEARED.**
+Superseded by **Agent Brain v2** (`AGENT_STRATEGY.md`).
 
-No SMC/ICT pattern names or detection rules are stored here.
-Live entries use the code UVSS engine only.
+Live structure cues are EMA50/EMA200 trend + local slope inside
+`volume_spread_system.py`. Full SMC pattern catalogs are not stored here.

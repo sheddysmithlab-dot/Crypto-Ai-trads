@@ -1,6 +1,6 @@
-# Note 4 — Trend / Reversal / Premium (cleared)
+# Note — Trend Reversal Premium
 
-**Pattern detection memory: CLEARED.**
+Superseded by **Agent Brain v2**.
 
-No weak-candle / premium / expansion pattern-name memory is stored here.
-Live entries use the code UVSS engine only.
+Reversal patterns (hammer, engulfing, morning/evening star, tweezers) are
+detected in code; tactics come from the Candlestick Bible RAM pack.

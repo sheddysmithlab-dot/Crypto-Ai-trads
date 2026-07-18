@@ -1,16 +1,17 @@
-# AI Trading Agent — System Role & Operations
+# AI Trading Agent — Brain v2
 
-**Candlestick Trading Bible:** RAM pack (`candlestick_bible_memory.json`) —
-`fetch_bible()` / `GET /agent/bible/fetch?q=hammer`.
+**Pipeline:** Detect candle pattern → Bible RAM fetch → ML cost-aware gate → Fire.
 
-**ML Bitcoin Trading Paper (arXiv:2606.00060):** RAM pack
-(`ml_trading_memory.json`) — `fetch_ml()` / `GET /agent/ml/fetch?q=cost-aware`.
-Core lesson: naive sign trades die under ~10bp costs; use cost-aware magnitude
-filter; walk-forward evaluation; XGBoost long-only was strongest in the paper
-(regime-dependent).
+| Pack | Role |
+|------|------|
+| `CANDLESTICK_PATTERNS_INTRO.md` | 38-pattern vocabulary |
+| `candlestick_bible_memory.json` | How to trade setups |
+| `ml_trading_memory.json` | Cost-aware fire discipline |
+| `AGENT_STRATEGY.md` | Full deep strategy |
 
-**Pattern detection engine:** `volume_spread_system.py` (rules TBD — currently
-NO_TRADE until patterns are coded). Intro vocabulary: `CANDLESTICK_PATTERNS_INTRO.md`.
+**Engine:** `volume_spread_system.py` (candle_pattern_v1)  
+**Enrich:** `agent_brain.py`  
+**Gate:** `UVSS_COST_AWARE_ENTRY=True`
 
 ## Profit Book (Active — code)
 - Activate lock at +0.15% gross per trade

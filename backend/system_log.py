@@ -53,11 +53,11 @@ class SystemLogStore:
             "pair": pair,
             "timeframe": timeframe,
             "timestamp": time.time(),
-            "engine": "smc_vsa",
+            "engine": decision.get("engine") or "candle_pattern",
             "bullish": long_rules,
             "bearish": short_rules,
             "active_count": len(long_rules) + len(short_rules),
-            "total_patterns": 15,
+            "total_patterns": 24,
             "decision": decision,
             "candle": {
                 "high": candle.get("high"),
@@ -70,7 +70,7 @@ class SystemLogStore:
         action = decision.get("action", "UNKNOWN")
         reason = decision.get("reason") or decision.get("pattern") or ""
         self.push(
-            "smc_vsa",
+            "pattern",
             f"{pair} @ {timeframe}: {action} — {reason}",
             {"long_rules": long_rules, "short_rules": short_rules, "decision": decision},
         )

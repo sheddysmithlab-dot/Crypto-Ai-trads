@@ -69,6 +69,7 @@ from ml_trading_memory import (
     ml_system_prompt_blurb,
     search_ml,
 )
+from agent_brain import brain_chat_summary, enrich_signal, strategy_system_blurb
 
 from pathlib import Path
 
@@ -225,7 +226,7 @@ class SettingsStore:
             print(f"[SETTINGS] Z.ai AI loaded (model={self.ai_model}, provider={self.ai_provider}).")
         else:
             print("[SETTINGS] Z.ai is the default AI provider — set ZAI_API_KEY to enable.")
-        print("[SETTINGS] Entry engine: Blue Box + VSA on Bybit linear klines (public API).")
+        print("[SETTINGS] Entry engine: Candle patterns + Bible + ML cost-aware (Bybit linear).")
 
     def save(self, payload: SettingsPayload):
         # Only overwrite secret fields if the user actually typed a new value
@@ -325,12 +326,24 @@ async def consult_ai_provider(context):
     system_role = load_system_role_text()
     if system_role:
         messages.append({"role": "system", "content": system_role[:20000]})
-    # Inject matching Candlestick Bible section from RAM (not full book every call).
-    bible_ctx = fetch_bible_context_for_signal(
-        context.get("pattern") or context.get("condition")
-    )
+    # Inject matching Candlestick Bible + ML context from RAM.
+    bible_q = context.get("bible_key") or context.get("pattern") or context.get("condition")
+    bible_ctx = fetch_bible_context_for_signal(bible_q)
     if bible_ctx:
         messages.append({"role": "system", "content": bible_ctx[:4000]})
+    try:
+        ml_hit = fetch_ml("cost aware", max_chars=1200)
+        if ml_hit.get("ok"):
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"[ML cost-aware · {ml_hit.get('title')}]\n{ml_hit.get('text')}"
+                    )[:2500],
+                }
+            )
+    except Exception:
+        pass
     messages.append({"role": "user", "content": prompt})
 
     try:
@@ -889,7 +902,7 @@ class AITradingAgent:
     def set_timeframe(self, seconds):
         """Trading-engine candle interval (not the frontend chart view).
 
-        Drives auto_buy_loop polling and Blue Box scans. The chart UI may use a
+        Drives auto_buy_loop polling and pattern scans. The chart UI may use a
         different display timeframe without calling this — open trades must not
         be reset when the user only changes how candles are drawn.
         """
@@ -900,7 +913,7 @@ class AITradingAgent:
         _recent_signal_fire_keys.clear()
         reset_blue_box_state()
         _invalidate_kline_cache()
-        print(f"[TIMEFRAME SYNC] Backend trading timeframe set to {seconds}s. Blue Box state cleared.")
+        print(f"[TIMEFRAME SYNC] Backend trading timeframe set to {seconds}s. Pattern state cleared.")
 
     def open_trade(
         self,
@@ -1650,6 +1663,7 @@ def load_system_role_text() -> str:
     parts: list[str] = []
     for name in (
         "SYSTEM_ROLE_AND_IDENTITY.md",
+        "AGENT_STRATEGY.md",
         "CANDLESTICK_PATTERNS_INTRO.md",
         "CANDLESTICK_BIBLE_INDEX.md",
         "ML_TRADING_PAPER_INDEX.md",
@@ -1666,6 +1680,10 @@ def load_system_role_text() -> str:
                 parts.append(text)
         except OSError:
             continue
+    try:
+        parts.append(strategy_system_blurb())
+    except Exception:
+        pass
     # Compact in-RAM bible TOC (full sections fetched via fetch_bible, not pasted every turn).
     try:
         blurb = bible_system_prompt_blurb()
@@ -1693,10 +1711,11 @@ def fetch_bible_context_for_signal(pattern_or_query: str | None, *, max_chars: i
     """Pull matching bible section from RAM for AI confirmation (microsecond lookup)."""
     if not pattern_or_query:
         return ""
+    # Prefer enrich_signal path when full decision dict fields are available later.
     hit = fetch_bible(str(pattern_or_query), max_chars=max_chars)
     if hit.get("ok"):
         return (
-            f"[Candlestick Bible · {hit.get('title')} · pp.{hit.get('pages')} · "
+            f"[Candlestick Bible · {hit.get('title')} · "
             f"fetch_ns={hit.get('fetch_ns')}]\n{hit.get('text') or ''}"
         )
     results = search_bible(str(pattern_or_query), limit=1)
@@ -1706,7 +1725,7 @@ def fetch_bible_context_for_signal(pattern_or_query: str | None, *, max_chars: i
     if not hit.get("ok"):
         return ""
     return (
-        f"[Candlestick Bible · {hit.get('title')} · pp.{hit.get('pages')} · "
+        f"[Candlestick Bible · {hit.get('title')} · "
         f"fetch_ns={hit.get('fetch_ns')}]\n{hit.get('text') or ''}"
     )
 
@@ -1727,7 +1746,7 @@ def agent_policy_summary() -> str:
             else "no auto-exit (manual close / STOP only)"
         )
         return (
-            f"Blue Box + VSA + Marubozu | BUY→LONG SELL→SHORT | {exit_note}, no SL exit | "
+            f"Candle patterns + Bible + ML cost-aware | BUY→LONG SELL→SHORT | {exit_note}, no SL exit | "
             f"risk {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of available capital per auto fire | {exec_mode}"
         )
     return "Auto trade policies not active."
@@ -1815,7 +1834,7 @@ async def fire_taapi_auto_trade(
             if INVERT_AUTO_TRADE_FIRE and orig_signal != exec_action
             else ""
         )
-        reason = f"Blue Box {pattern or 'signal'} ({orig_signal}→{exec_action}) 1:{RR_RATIO:.0f} R:R{invert_note}"
+        reason = f"Pattern {pattern or 'signal'} ({orig_signal}→{exec_action}) 1:{RR_RATIO:.0f} R:R{invert_note}"
 
         if candle_close_time is not None and timeframe_key:
             fire_key = _signal_fire_key(
@@ -2002,12 +2021,12 @@ _last_real_feed_update = 0.0
 REAL_FEED_STALE_AFTER_SECONDS = 10
 
 # ==========================================
-# ENTRY POLICY: SMC + VSA (11 rule groups + 200 EMA)
+# ENTRY POLICY: Candle patterns → Bible → ML cost-aware → fire
 # ==========================================
 
 async def auto_buy_loop():
     print(
-        "[AUTO BUY LOOP] Blue Box + Marubozu — ultra-fast closed-candle scan "
+        "[AUTO BUY LOOP] Candle pattern → Bible → ML cost-aware — closed-candle scan "
         f"(burst poll {_AUTO_BUY_BURST_POLL}s after each bar close)."
     )
     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -2035,7 +2054,7 @@ async def auto_buy_loop():
                 if agent.active_pair not in _CANDLE_FETCH_WARNED_PAIRS:
                     _CANDLE_FETCH_WARNED_PAIRS.add(agent.active_pair)
                     notifications.push(
-                        f"SMC+VSA can't read {bybit_symbol} candles — auto-entries paused for {agent.active_pair}.",
+                        f"Pattern engine can't read {bybit_symbol} candles — auto-entries paused for {agent.active_pair}.",
                         "warning",
                     )
                 await asyncio.sleep(max(poll, 1.0))
@@ -2070,6 +2089,9 @@ async def auto_buy_loop():
 
             signal_candle = history[-1]
             result = evaluate_uvss(history, timeframe_key, pair=agent.active_pair)
+            # Brain enrich only on actionable signals (keep fire path lean).
+            if result.get("action") in ("BUY", "SELL"):
+                result = enrich_signal(result)
             candle = {
                 "high": signal_candle["high"],
                 "low": signal_candle["low"],
@@ -2166,8 +2188,8 @@ async def auto_buy_loop():
                 agent.active_pair, timeframe_key, result, candle, cost_aware=cost_aware
             )
             system_log.push_agent_chat(
-                f"AI agent scanned closed {timeframe_key} candle on {agent.active_pair} "
-                f"— Blue Box + VSA + Marubozu check…",
+                f"AI brain scanned closed {timeframe_key} candle on {agent.active_pair} "
+                f"— detect → Bible → ML gate…",
                 status="scanning",
                 details={
                     "pair": agent.active_pair,
@@ -2185,27 +2207,18 @@ async def auto_buy_loop():
                     else str(result["action"])
                 )
                 system_log.push_agent_chat(
-                    f"Pattern detected on {agent.active_pair}: {result.get('pattern', 'signal')} "
-                    f"→ {fire_hint} (1:{RR_RATIO:.0f} R:R)"
+                    brain_chat_summary(result)
+                    + f" → {fire_hint} (1:{RR_RATIO:.0f} R:R)"
                     + (" — ORDER FIRED" if fired_trade else " — evaluating entry…"),
                     status="match",
                     details={"decision": result, "pair": agent.active_pair, "timeframe": timeframe_key},
                 )
             elif result["action"] not in ("BUY", "SELL"):
-                sweep_ev = result.get("sweep_events") or []
-                if sweep_ev:
-                    system_log.push_agent_chat(
-                        f"Liquidity sweep on {agent.active_pair} ({', '.join(sweep_ev)}) "
-                        f"— watching next 1–2 candles for displacement…",
-                        status="scanning",
-                        details={"decision": result, "pair": agent.active_pair, "timeframe": timeframe_key},
-                    )
-                else:
-                    system_log.push_agent_chat(
-                        f"No entry signal on {agent.active_pair} this bar. {result.get('reason', '')}",
-                        status="no_match",
-                        details={"decision": result, "pair": agent.active_pair, "timeframe": timeframe_key},
-                    )
+                system_log.push_agent_chat(
+                    f"No entry signal on {agent.active_pair} this bar. {result.get('reason', '')}",
+                    status="no_match",
+                    details={"decision": result, "pair": agent.active_pair, "timeframe": timeframe_key},
+                )
                 print(f"[AUTO BUY LOOP] {result['action']}: {result['reason']}")
 
             if cost_aware and cost_aware.get("would_block") and cost_aware.get("dry_run"):
@@ -2370,7 +2383,7 @@ async def start_bot():
     )
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     system_log.push_agent_chat(
-        f"AI agent active on {agent.active_pair} ({tf_key}) — Blue Box + Marubozu on each closed candle.",
+        f"AI brain active on {agent.active_pair} ({tf_key}) — detect → Bible → ML cost-aware → fire.",
         status="active",
         details={"pair": agent.active_pair, "timeframe": tf_key},
     )
@@ -2703,7 +2716,7 @@ async def agent_ml_search(
 
 @app.get("/system/logs")
 async def get_system_logs():
-    """ Transparency snapshot for the System Log modal — connections, SMC+VSA scan,
+    """ Transparency snapshot for the System Log modal — connections, pattern scan,
     trade pipeline, and rolling backend event log. No secrets are returned. """
     timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     return {

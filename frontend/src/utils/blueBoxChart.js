@@ -177,14 +177,9 @@ export function renderBlueBoxChartOverlay({
 
 export function blueBoxStatusLabel(overlay, botIsActive) {
   if (!botIsActive || !overlay?.active) return null;
-  if (overlay.bullish_trap?.active) return 'Blue Box · Bull trap armed';
-  if (overlay.bearish_trap?.active) return 'Blue Box · Bear trap armed';
-  if (overlay.status === 'marubozu_watch' || overlay.is_marubozu) {
-    const t = overlay.trend ? ` (${overlay.trend})` : '';
-    return `Marubozu watch${t}`;
-  }
   if (overlay.last_action === 'BUY' || overlay.last_action === 'SELL') {
-    return `Blue Box · ${overlay.last_pattern || 'signal'}`;
+    return `Brain · ${overlay.last_pattern || 'signal'}`;
   }
-  return 'Blue Box engine ON';
+  if (overlay.trend) return `Brain · ${overlay.trend}`;
+  return 'Candle brain ON';
 }

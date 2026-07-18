@@ -1,6 +1,7 @@
-# Note 3 — Fib / Liquidity / Confirmation (cleared)
+# Note — Fib / Liquidity
 
-**Pattern detection memory: CLEARED.**
+Superseded by **Agent Brain v2**.
 
-No Fibonacci, liquidity, or candlestick pattern-name memory is stored here.
-Live entries use the code UVSS engine only.
+Bible confluence (S/R, Fib, MA) is available via RAM fetch
+(`fetch_bible('engulfing_fib')`, `pin_bar_confluence`, etc.) when the agent
+reads a matched section — not as a separate live detector.

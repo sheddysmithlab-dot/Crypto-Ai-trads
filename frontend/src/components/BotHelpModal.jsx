@@ -1,12 +1,11 @@
 const HOW_IT_WORKS = [
   'Pick a coin pair and chart timeframe (1M, 5M, 15M, etc.).',
   'Press START AI AUTOMATION and set your risk level (max open trades).',
-  'On each closed candle: Blue Box traps, VSA rules (L1–S4), Marubozu pullback, and momentum.',
-  'Blue Box: sweep below L20 or above H20, then displacement in the next 1–2 bars.',
-  'VSA long (200 EMA uptrend): L1 exhaustion, L2 hammer, L4 absorption. L3 spring + L5 momentum bypass EMA.',
-  'VSA short (200 EMA downtrend): S1 exhaustion, S3 absorption. S2 up-thrust + S4 momentum bypass EMA.',
-  'Marubozu: EMA50/200 trend + 2–4 bar pullback + large-body marubozu candle.',
-  'BUY → LONG, SELL → SHORT. Stepped profit lock books winners (+0.15% on, +0.02% steps); exits drop below in Live Trades.',
+  'On each closed candle the AI brain runs: Detect pattern → read Candlestick Bible → ML cost-aware gate → fire.',
+  'Patterns: engulfing, pin/hammer/shooting star, morning/evening star, inside-bar break, harami, tweezers, doji, soldiers/crows, belt, marubozu.',
+  'Bible (RAM): tactics for pin bar, engulfing, and inside bar with confluence.',
+  'ML gate: only fire when remaining edge and candle range clear λ×fee hurdle — weak signals are blocked.',
+  'BUY → LONG, SELL → SHORT. Profit lock: +0.15% activate, +0.02% steps from peak.',
   'PAPER simulates fills; testnet sends real orders. STOP ends automation.',
 ];
 
@@ -42,7 +41,7 @@ export default function BotHelpModal({ open, onClose }) {
 
         <div className="px-5 py-4 max-h-[70vh] overflow-y-auto">
           <p className="text-sm text-gray-600 dark:text-gray-300 mb-4 leading-relaxed">
-            Blue Box + Marubozu continuation in plain English. Not financial advice.
+            Candle patterns + Bible + ML cost-aware fire — in plain English. Not financial advice.
           </p>
           <ul className="space-y-2.5 text-sm text-gray-700 dark:text-gray-200 list-disc pl-5 leading-relaxed">
             {HOW_IT_WORKS.map((line) => (
