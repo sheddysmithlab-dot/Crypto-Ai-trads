@@ -1,13 +1,9 @@
-"""Cost-aware entry/exit policy (paper-style execution filter for TAAPI signals).
-
-Maps the academic cost-aware rule to this bot:
-  trade only when expected edge exceeds λ × round-trip transaction cost.
-"""
+"""Cost-aware entry/exit helpers (optional filter; UVSS currently has it off)."""
 from __future__ import annotations
 
 import os
 
-from taapi_scanner import TIMEFRAME_RULES
+from timeframe_rules import TIMEFRAME_RULES
 
 _DEFAULT_LAMBDA = 2.0
 _DEFAULT_MIN_CANDLE_RANGE = 0.5

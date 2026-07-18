@@ -10,9 +10,7 @@ from pybit.unified_trading import HTTP
 
 # Windows' default console codepage (cp1252) can't encode the emoji used in
 # the FIRED/FAILED prints below - reconfigure defensively here too (main.py
-# already does this, but this module is also imported/run standalone via
-# main_engine.py, which doesn't), so a bare `python main_engine.py` never
-# crashes on its very first order print.
+# already does this, but this module may also be imported standalone).
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")

@@ -23,8 +23,6 @@ services:
       ZAI_MODEL: ${ZAI_MODEL:-glm-4.5-flash}
       ZAI_BASE_URL: ${ZAI_BASE_URL:-https://api.z.ai/api/paas/v4}
       ZAI_API_KEY: ${ZAI_API_KEY:-}
-      TAAPI_SECRET: ${TAAPI_SECRET:-}
-      TAAPI_EXCHANGE: ${TAAPI_EXCHANGE:-bybit}
       BYBIT_TESTNET_API_KEY: ${BYBIT_TESTNET_API_KEY:-}
       BYBIT_TESTNET_API_SECRET: ${BYBIT_TESTNET_API_SECRET:-}
       AUTH_USERNAME: ${AUTH_USERNAME:-}

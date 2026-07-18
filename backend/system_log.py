@@ -1,4 +1,4 @@
-"""Rolling transparency log for the System Log modal (TAAPI, AI, Bybit, trades, chart)."""
+"""Rolling transparency log for the System Log modal (UVSS, AI, Bybit, trades, chart)."""
 import time
 
 
@@ -9,6 +9,7 @@ class SystemLogStore:
         self.entries: list[dict] = []
         self.agent_chat: list[dict] = []
         self.seq = 0
+        # last_taapi_scan kept as API field name for older frontends; engine is UVSS.
         self.last_taapi_scan: dict | None = None
         self.last_trade_fire: dict | None = None
 
@@ -41,35 +42,6 @@ class SystemLogStore:
         if len(self.entries) > self.max_entries:
             self.entries = self.entries[-self.max_entries :]
         print(f"[SYSTEM-LOG:{category.upper()}] {message}")
-
-    def set_last_taapi_scan(self, pair, timeframe, signals, decision, candle, cost_aware=None):
-        active = [s for s in signals if s.get("value", 0) != 0]
-        bullish = [s["pattern"] for s in active if s["value"] == 1]
-        bearish = [s["pattern"] for s in active if s["value"] == -1]
-        self.last_taapi_scan = {
-            "pair": pair,
-            "timeframe": timeframe,
-            "timestamp": time.time(),
-            "engine": "taapi",
-            "bullish": bullish,
-            "bearish": bearish,
-            "active_count": len(active),
-            "total_patterns": len(signals),
-            "decision": decision,
-            "candle": {
-                "high": candle.get("high"),
-                "low": candle.get("low"),
-                "close_time": candle.get("close_time"),
-            },
-            "cost_aware": cost_aware,
-        }
-        action = decision.get("action", "UNKNOWN")
-        reason = decision.get("reason") or decision.get("pattern") or ""
-        self.push(
-            "taapi",
-            f"{pair} @ {timeframe}: {action} — {reason}",
-            {"bullish": bullish, "bearish": bearish, "decision": decision},
-        )
 
     def set_last_uvss_scan(self, pair, timeframe, decision, candle, cost_aware=None):
         long_rules = decision.get("long_rules") or decision.get("rules_fired") if decision.get("action") == "BUY" else []

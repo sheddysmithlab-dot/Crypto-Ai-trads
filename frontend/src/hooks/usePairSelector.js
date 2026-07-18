@@ -18,7 +18,7 @@ async function fetchLivePairPrice(symbol) {
 }
 
 // "Select Trading Pair" state - drives the chart symbol switch, the free
-// Binance feed re-subscription, and backend single-coin-focus sync.
+// Pair switch: refresh chart history + backend single-coin-focus sync.
 export function usePairSelector() {
   const [pairs, setPairs] = useState(TRADING_PAIRS);
   const [activeSymbol, setActiveSymbol] = useState('BTC');

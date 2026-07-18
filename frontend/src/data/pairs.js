@@ -3,11 +3,7 @@ export const TRADING_PAIRS = [
   { symbol: 'ETH', icon: 'Ξ', color: '#627eea', starred: true, price: 1742.08 },
   { symbol: 'XRP', icon: 'X', color: '#25a768', starred: true, price: 1.085 },
   { symbol: 'LTC', icon: 'Ł', color: '#345d9d', starred: false, price: 43.79 },
-  // XMR is DELISTED from both Bybit and Binance spot (no live market data on
-  // either source) - kept in the dropdown per product decision, but it has no
-  // symbol mapping below, so the chart falls back to simulated data and the
-  // backend runs its synthetic price feed for it. No TAAPI scans / auto trades
-  // can fire on it.
+  // XMR has no Bybit linear market — UI selectable; chart/sim only; no auto trades.
   { symbol: 'XMR', icon: 'ɱ', color: '#f26822', starred: false, price: 165.0 },
 ];
 

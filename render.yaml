@@ -19,10 +19,6 @@ services:
         value: https://api.z.ai/api/paas/v4
       - key: ZAI_API_KEY
         sync: false
-      - key: TAAPI_SECRET
-        sync: false
-      - key: TAAPI_EXCHANGE
-        value: binance
       - key: BYBIT_TESTNET_API_KEY
         sync: false
       - key: BYBIT_TESTNET_API_SECRET

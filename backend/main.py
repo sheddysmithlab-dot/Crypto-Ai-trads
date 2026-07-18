@@ -211,10 +211,7 @@ class SettingsStore:
             print(f"[SETTINGS] Z.ai AI loaded (model={self.ai_model}, provider={self.ai_provider}).")
         else:
             print("[SETTINGS] Z.ai is the default AI provider — set ZAI_API_KEY to enable.")
-        if is_taapi_configured():
-            print(f"[SETTINGS] TAAPI.io loaded (exchange={get_taapi_exchange()}).")
-        else:
-            print("[SETTINGS] TAAPI.io paused — SMC+VSA uses Bybit klines only.")
+        print("[SETTINGS] Entry engine: Blue Box + VSA on Bybit linear klines (public API).")
 
     def save(self, payload: SettingsPayload):
         # Only overwrite secret fields if the user actually typed a new value
@@ -571,20 +568,11 @@ bybit_api = BybitAPIWrapper()
 # PILLAR 3: CORE AI AGENT LOGIC (State & Rules)
 # ==========================================
 class AITradingAgent:
-    # Stepped profit book: activate +0.15%, lock steps +0.02% (0.17→0.19→…),
-    # sell when price retreats to previous lock step; never sell below +0.15%.
-    PROFIT_LOCK_ACTIVATION_GROSS_PCT = 0.15
-    PROFIT_LOCK_STEP_GROSS_PCT = 0.02
-    PROFIT_LOCK_TRAIL_DROP_GROSS_PCT = 0.02  # alias: one step back to sell
-    TRAILING_DROP_PCT = 0.02
-    PROFIT_FLOOR_BY_TIMEFRAME = {
-        "1m": 0.15,
-        "5m": 0.15,
-        "15m": 0.15,
-        "1h": 0.15,
-        "1D": 0.15,
-    }
-    PROFIT_FLOOR_PCT = 0.15
+    # Strict Exit Logic (replaces all prior profit-lock / trailing / target exit rules).
+    STRICT_EXIT_HARD_TARGET_PCT = float(os.environ.get("STRICT_EXIT_HARD_TARGET", "1.2"))
+    STRICT_EXIT_MIN_LOCK_PCT = float(os.environ.get("STRICT_EXIT_MIN_LOCK", "0.20"))
+    STRICT_EXIT_FLUCTUATION_X_PCT = float(os.environ.get("STRICT_EXIT_FLUCTUATION_X", "0.10"))
+    STRICT_EXIT_TRAIL_MULTIPLIER = float(os.environ.get("STRICT_EXIT_TRAIL_MULT", "1.5"))
 
     def __init__(self):
         self.is_active = False
@@ -606,7 +594,7 @@ class AITradingAgent:
         self.max_concurrent_trades = 5
         # AI Agent Instructions modal: optional "Capital profit of the day" target.
         # 0.0 means disabled. Once the day's profit % crosses this, new entries are
-        # halted (existing positions keep being managed by the trailing lock).
+        # halted (existing positions keep being managed by strict exit logic).
         self.daily_profit_target_pct = 0.0
         self.daily_target_reached = False
         # AI Season: profit tracked from START until STOP.
@@ -633,9 +621,8 @@ class AITradingAgent:
         self.timeframe_seconds = 60
 
     def get_profit_floor_pct(self):
-        """Activation gross-% for the trailing profit lock (0.15% default)."""
-        key = SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
-        return self.PROFIT_FLOOR_BY_TIMEFRAME.get(key, self.PROFIT_FLOOR_PCT)
+        """Minimum profit lock floor (Rule 2) — 0.20% gross."""
+        return self.STRICT_EXIT_MIN_LOCK_PCT
 
     def _sync_agent_trailing_lock_state(self):
         """Mirror per-trade lock/peak to agent-level fields for WS + UI."""
@@ -655,17 +642,24 @@ class AITradingAgent:
         else:
             self.peak_net_pct = max(float(t.get("peak_gross_pct") or 0) for t in auto)
 
-    def _evaluate_stepped_profit_lock(self, trade: dict, gross: float, net: float) -> str | None:
-        """Book profit when gross retreats ~0.02% from peak (floor +0.15%).
+    def _evaluate_strict_exit(self, trade: dict, gross: float, net: float) -> str | None:
+        """Strict Exit Logic — 3 rules only (gross % P&L).
 
-        Peak is tracked on every tick. Lock activates at +0.15% gross.
-        Sell trigger = max(+0.15%, peak − 0.02%). This uses absolute peak so
-        slow climbs still raise the trail (old tick-to-tick milestone logic
-        left lock stuck at +0.15% even after peak hit +0.30%).
+        Rule 1: Hard target at +1.2% — immediate auto-exit.
+        Rule 2: Once +0.20% is reached, profit floor locks at +0.20% permanently.
+        Rule 3: Trailing exit = peak − (1.5 × x), never below +0.20% floor.
         """
-        act = self.PROFIT_LOCK_ACTIVATION_GROSS_PCT
-        step = self.PROFIT_LOCK_STEP_GROSS_PCT
-        min_sell = act
+        hard_target = self.STRICT_EXIT_HARD_TARGET_PCT
+        min_lock = self.STRICT_EXIT_MIN_LOCK_PCT
+        x = self.STRICT_EXIT_FLUCTUATION_X_PCT
+        trail_mult = self.STRICT_EXIT_TRAIL_MULTIPLIER
+
+        # Rule 1 — hard target (no trailing wait).
+        if gross >= hard_target:
+            return (
+                f"Strict Exit Rule 1 (Hard Target): +{gross:.3f}% ≥ +{hard_target:.2f}% — "
+                "immediate auto-exit."
+            )
 
         prev_peak = float(trade.get("peak_gross_pct") or 0.0)
         if gross > prev_peak:
@@ -673,45 +667,36 @@ class AITradingAgent:
             trade["peak_net_pct"] = max(float(trade.get("peak_net_pct") or 0.0), net)
         peak = float(trade.get("peak_gross_pct") or 0.0)
 
-        if peak < act and gross < act:
-            return None
-
-        if not trade.get("is_lock_active"):
-            if gross < act:
-                return None
+        # Rule 2 — minimum profit lock at +0.20%.
+        if peak >= min_lock and not trade.get("is_lock_active"):
             trade["is_lock_active"] = True
-            trade["lock_level_pct"] = act
+            trade["lock_level_pct"] = min_lock
             notifications.push(
-                f"Profit lock ON #{trade['id']} @ +{gross:.3f}% "
-                f"(trail peak−{step:.2f}%, floor +{min_sell:.2f}%).",
+                f"Min profit lock ON #{trade['id']} @ +{gross:.3f}% "
+                f"(floor locked at +{min_lock:.2f}% gross).",
                 "success",
             )
             system_log.push(
                 "agent",
-                f"Profit lock #{trade['id']} +{gross:.3f}%",
-                {"trade_id": trade["id"], "peak_gross_pct": gross},
+                f"Strict Exit Rule 2 — min lock #{trade['id']} +{gross:.3f}%",
+                {"trade_id": trade["id"], "peak_gross_pct": gross, "min_lock_pct": min_lock},
             )
 
-        # Absolute lock from peak (not prev_peak+step per tick — that never advanced).
-        steps_above = int((peak - act + 1e-12) / step)
-        lock_level = act + max(0, steps_above) * step
-        prev_lock = float(trade.get("lock_level_pct") or act)
-        trade["lock_level_pct"] = lock_level
+        if peak >= min_lock:
+            trade["lock_level_pct"] = min_lock
 
-        # Trail: book when price gives back one step from peak (never below floor).
-        sell_trigger = max(min_sell, peak - step)
+        if peak < min_lock:
+            return None
+
+        # Rule 3 — 1.5× trailing stop from peak, floored at Rule 2 minimum.
+        sell_trigger = max(min_lock, peak - (trail_mult * x))
         trade["sell_trigger_pct"] = sell_trigger
-
-        if lock_level > prev_lock + 1e-12:
-            notifications.push(
-                f"Lock step #{trade['id']} peak +{peak:.2f}% → sell if back to +{sell_trigger:.2f}%.",
-                "info",
-            )
 
         if gross < peak and gross <= sell_trigger + 1e-9:
             return (
-                f"Profit Book #{trade['id']}: peak +{peak:.3f}% lock +{lock_level:.2f}% "
-                f"-> +{gross:.3f}% (sell step +{sell_trigger:.2f}%). Market close."
+                f"Strict Exit Rule 3 (1.5× trail): peak +{peak:.3f}% → "
+                f"exit trigger +{sell_trigger:.3f}% (peak − {trail_mult}×{x:.2f}%, "
+                f"floor +{min_lock:.2f}%) → +{gross:.3f}%. Market close."
             )
         return None
 
@@ -780,6 +765,7 @@ class AITradingAgent:
                 "time": chart_time,
                 "side": row.get("side", "LONG"),
                 "pattern": row.get("pattern"),
+                "opened_at": row.get("opened_at"),
             })
         return out
 
@@ -881,17 +867,20 @@ class AITradingAgent:
         print(f"[PILLAR 3: AI AGENT] Paper trading capital reset to ${amount:,.2f}.")
 
     def set_timeframe(self, seconds):
-        """ Frontend -> backend timeframe sync. Drives the TAAPI candle-pattern
-        auto-buy loop's polling interval. A candle's close_time isn't
-        comparable across different candle granularities, so a timeframe
-        change clears every pair's last-processed timestamp - otherwise the
-        loop could wrongly treat the new timeframe's current candle as
-        "already seen" and skip it until the next boundary. """
+        """Trading-engine candle interval (not the frontend chart view).
+
+        Drives auto_buy_loop polling and Blue Box scans. The chart UI may use a
+        different display timeframe without calling this — open trades must not
+        be reset when the user only changes how candles are drawn.
+        """
+        if self.timeframe_seconds == seconds:
+            return
         self.timeframe_seconds = seconds
         LAST_CANDLE_TIMESTAMPS.clear()
         _recent_signal_fire_keys.clear()
         reset_blue_box_state()
-        print(f"[TIMEFRAME SYNC] Backend timeframe set to {seconds}s. Blue Box state cleared.")
+        _invalidate_kline_cache()
+        print(f"[TIMEFRAME SYNC] Backend trading timeframe set to {seconds}s. Blue Box state cleared.")
 
     def open_trade(
         self,
@@ -1086,6 +1075,7 @@ class AITradingAgent:
             self.peak_net_pct = 0.0
             self.is_lock_active = False
             reset_blue_box_state()
+            _invalidate_kline_cache()
             print(f"[PILLAR 3: AI AGENT] Active pair switched to {pair}. Open positions preserved.")
         else:
             print(f"[PILLAR 3: AI AGENT] Active pair refreshed to {pair} @ {price}.")
@@ -1127,7 +1117,7 @@ class AITradingAgent:
         return snapshot
 
     async def process_tick(self, new_price, volume_increment):
-        """Updates live price; stepped profit lock (+0.15% on, +0.02% steps, sell prior step)."""
+        """Updates live price; evaluates Strict Exit Logic on each auto trade."""
         clean_price = _sanitize_market_price(new_price)
         if clean_price is None:
             print(f"[PILLAR 3: AI AGENT] Ignoring invalid market tick: {new_price!r}")
@@ -1156,7 +1146,7 @@ class AITradingAgent:
 
             m = self._trade_metrics(trade)
             if AUTO_TRADE_AUTO_EXIT_ENABLED:
-                reason = self._evaluate_stepped_profit_lock(trade, m["gross_pct"], m["net_pct"])
+                reason = self._evaluate_strict_exit(trade, m["gross_pct"], m["net_pct"])
                 if reason and self._close_single_trade(trade, m, reason):
                     continue
 
@@ -1351,44 +1341,21 @@ agent = AITradingAgent()
 # Runs regardless of whether any browser tab is connected, keeping
 # current_price live for the trailing-lock exit math in process_tick.
 # ==========================================
-# Bybit's own public market data (no API key needed) - this is a Bybit bot,
-# so its real-price source should be Bybit itself. This also sidesteps a
-# real finding: Binance's endpoints (both WebSocket, on ports 9443 AND 443,
-# and REST) never delivered a single real tick when called FROM this Render
-# backend, despite working perfectly from a local machine and from the
-# user's own browser (the frontend chart, which fetches Binance directly
-# client-side, always showed correct real data) - strongly suggesting
-# Binance blocks/throttles this hosting provider's server IP range
-# specifically, not a protocol/port issue. Bybit's public API has no such
-# problem, verified working from this exact backend.
+# Bybit public market data (no API key) — linear USDT perpetual symbols.
 BYBIT_SYMBOL_MAP = {
     "BTC": "BTCUSDT",
     "ETH": "ETHUSDT",
     "XRP": "XRPUSDT",
     "LTC": "LTCUSDT",
-    # XMR intentionally has NO mapping: delisted from both Bybit and Binance
-    # spot (verified live 2026-07-08 - "Not supported symbols" / last Binance
-    # candle Feb 2024). The pair stays selectable in the UI, but with no
-    # mapping the synthetic market_simulator drives its price and the TAAPI
-    # auto-buy loop skips it entirely (no real market -> no real trades).
+    # XMR: no Bybit linear market — UI selectable; synthetic feed only; auto loop skips.
 }
 
 def get_bybit_symbol(pair_label):
     symbol = (pair_label or "").split("/")[0]
     return BYBIT_SYMBOL_MAP.get(symbol)
 
-# ==========================================
-# TAAPI CANDLE-PATTERN POLICY: interval translation tables.
-# Three different "interval" vocabularies have to agree here:
-#  - agent.timeframe_seconds: raw seconds, set by the frontend's chart timeframe
-#    selector (1M/5M/15M/1H/1D).
-#  - TIMEFRAME_RULES keys (taapi_scanner.py / SYSTEM_RULES.md): "30s".."1D" -
-#    includes 3m/10m/30m, which nothing on the frontend can select yet. TAAPI's
-#    own query interval is translated FROM these keys inside taapi_scanner
-#    (TAAPI_INTERVAL_MAP) - callers only ever deal in TIMEFRAME_RULES keys.
-#  - Bybit kline's `interval` param: plain minute numbers ("1","5","60") or "D" -
-#    no native 30s or 10m candle, so those fall back to the nearest one available.
-# ==========================================
+# Chart timeframe (seconds) → UVSS key → Bybit kline interval.
+# Frontend: 1M/5M/15M/1H/1D. Bybit has no native 30s/10m (fallbacks below).
 SECONDS_TO_TIMEFRAME_KEY = {
     30: "30s",
     60: "1m",
@@ -1412,7 +1379,15 @@ TIMEFRAME_KEY_TO_BYBIT_KLINE = {
 # different candle granularities.
 LAST_CANDLE_TIMESTAMPS = {}
 
-# Prevent concurrent / duplicate TAAPI fires for the same candle+pattern.
+# Cached OHLCV windows for UVSS — avoids refetching 200+ klines on every poll.
+_KLINE_HISTORY_CACHE: dict[str, dict] = {}
+
+# Ultra-fast entry loop tuning (seconds). Override via env if needed.
+_AUTO_BUY_BURST_POLL = float(os.environ.get("AUTO_BUY_BURST_POLL", "0.12"))
+_AUTO_BUY_FAST_POLL = float(os.environ.get("AUTO_BUY_FAST_POLL", "0.35"))
+_AUTO_BUY_TICKER_POLL = float(os.environ.get("MARKET_TICKER_POLL", "0.35"))
+
+# Prevent concurrent / duplicate auto fires for the same candle+pattern.
 _trade_fire_lock = asyncio.Lock()
 _recent_signal_fire_keys: set[str] = set()
 
@@ -1422,18 +1397,92 @@ _recent_signal_fire_keys: set[str] = set()
 # failed poll cycle, so a genuinely-unsupported pair doesn't spam the bell.
 _CANDLE_FETCH_WARNED_PAIRS = set()
 
-async def fetch_kline_history(bybit_symbol, timeframe_key, limit=None):
+async def fetch_kline_history(bybit_symbol, timeframe_key, limit=None, client=None):
     """Fetch chronological OHLCV history (oldest first) for UVSS."""
     from volume_spread_system import parse_bybit_kline, MIN_CANDLES as _min
 
     need = limit or max(_min + 5, 230)
     bybit_interval = TIMEFRAME_KEY_TO_BYBIT_KLINE.get(timeframe_key, "1")
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    if client is not None:
         rows = await fetch_kline_rows(client, bybit_symbol, bybit_interval, need)
+    else:
+        async with httpx.AsyncClient(timeout=5.0) as _client:
+            rows = await fetch_kline_rows(_client, bybit_symbol, bybit_interval, need)
     candles = [parse_bybit_kline(row) for row in reversed(rows)]
     if len(candles) >= 2:
         candles = candles[:-1]
     return candles
+
+
+def _invalidate_kline_cache(pair: str | None = None) -> None:
+    """Drop cached kline windows after pair/timeframe switch."""
+    if pair is None:
+        _KLINE_HISTORY_CACHE.clear()
+        return
+    prefix = f"{pair}|"
+    for key in list(_KLINE_HISTORY_CACHE):
+        if key.startswith(prefix):
+            del _KLINE_HISTORY_CACHE[key]
+
+
+def _auto_buy_poll_seconds(timeframe_key: str, timeframe_seconds: int) -> float:
+    """Adaptive poll — burst right after each candle close so entries fire in <1s."""
+    into_bucket = time.time() % max(timeframe_seconds, 1)
+    # First ~4s of a new bar: Bybit publishes the closed candle here — poll aggressively.
+    if into_bucket <= 4.0:
+        return _AUTO_BUY_BURST_POLL
+    # Last 2s before close: watch for early pattern completion on forming bar (next loop picks closed).
+    if into_bucket >= max(timeframe_seconds - 2.0, 0):
+        return 0.2
+    if timeframe_key in ("30s", "1m"):
+        return _AUTO_BUY_FAST_POLL
+    if timeframe_key in ("5m", "15m"):
+        return 0.8
+    if timeframe_key == "1h":
+        return 2.0
+    return 3.0
+
+
+async def probe_latest_closed_kline(client, bybit_symbol, timeframe_key) -> dict | None:
+    """Tiny 3-kline probe — detects new closed bar without downloading full history."""
+    from volume_spread_system import parse_bybit_kline
+
+    bybit_interval = TIMEFRAME_KEY_TO_BYBIT_KLINE.get(timeframe_key, "1")
+    rows = await fetch_kline_rows(client, bybit_symbol, bybit_interval, 3)
+    if len(rows) < 2:
+        return None
+    candles = [parse_bybit_kline(row) for row in reversed(rows)]
+    if len(candles) >= 2:
+        candles = candles[:-1]
+    return candles[-1] if candles else None
+
+
+async def resolve_uvss_history(
+    client,
+    pair_label: str,
+    bybit_symbol: str,
+    timeframe_key: str,
+    latest_closed: dict,
+) -> list[dict]:
+    """Return full UVSS window — incremental slide when possible, else one REST pull."""
+    cache_key = f"{pair_label}|{timeframe_key}"
+    close_time = latest_closed["close_time"]
+    cached = _KLINE_HISTORY_CACHE.get(cache_key)
+
+    if cached and cached.get("candles"):
+        history = cached["candles"]
+        last_ct = history[-1]["close_time"] if history else 0
+        if last_ct == close_time:
+            return history
+        if last_ct < close_time and len(history) >= MIN_CANDLES:
+            history = history[1:] + [latest_closed]
+            if len(history) >= MIN_CANDLES:
+                _KLINE_HISTORY_CACHE[cache_key] = {"close_time": close_time, "candles": history}
+                return history
+
+    history = await fetch_kline_history(bybit_symbol, timeframe_key, client=client)
+    _KLINE_HISTORY_CACHE[cache_key] = {"close_time": close_time, "candles": history}
+    return history
 
 
 async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
@@ -1450,12 +1499,10 @@ async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
     # startTime doubles as a unique, strictly-increasing per-candle id.
     return {"high": float(closed[2]), "low": float(closed[3]), "close_time": int(closed[0])}
 
-# TAAPI auto-order sizing: 10% of total portfolio value per fired trade.
-# Example: $1,000 capital -> $100 position -> ~0.00103 BTC @ $97,000.
+# Auto-order sizing: 10% of available capital per fired trade.
 AUTO_TRADE_CAPITAL_PCT = 0.10
 
-# Stepped profit lock books winners (+0.15% activate, +0.02% steps).
-# Opposite LONG+SHORT on the same pair are both allowed (no skip / no flip-close).
+# Strict Exit Logic — auto trades only (see AITradingAgent._evaluate_strict_exit).
 AUTO_TRADE_AUTO_EXIT_ENABLED = True
 
 # False = normal fire: BUY pattern → LONG, SELL pattern → SHORT.
@@ -1541,11 +1588,11 @@ def _log_trade_skip(action: str, symbol: str, pattern: str | None, reason: str, 
     system_log.push("trade", msg, {"pattern": pattern, **extra})
     print(f"[AUTO BUY LOOP] Trade skipped: {reason}")
 
-def taapi_action_to_trade_side(taapi_action: str) -> str:
-    """TAAPI BUY -> LONG, TAAPI SELL -> SHORT."""
-    if taapi_action == "BUY":
+def signal_action_to_trade_side(action: str) -> str:
+    """BUY -> LONG, SELL -> SHORT."""
+    if action == "BUY":
         return "LONG"
-    if taapi_action == "SELL":
+    if action == "SELL":
         return "SHORT"
     return "LONG"
 
@@ -1566,11 +1613,16 @@ def execution_action_for_fire(signal_action: str) -> str:
     return signal_action
 
 
-def taapi_action_to_bybit_order_action(taapi_action: str) -> str:
-    """Bybit market open: BUY signal -> Buy (long), SELL signal -> Sell (short)."""
-    if taapi_action in ("BUY", "SELL"):
-        return taapi_action
+def signal_action_to_bybit_order_action(action: str) -> str:
+    """Bybit market open: BUY -> Buy (long), SELL -> Sell (short)."""
+    if action in ("BUY", "SELL"):
+        return action
     return "BUY"
+
+
+# Back-compat aliases (older call sites / logs).
+taapi_action_to_trade_side = signal_action_to_trade_side
+taapi_action_to_bybit_order_action = signal_action_to_bybit_order_action
 
 
 def load_system_role_text() -> str:
@@ -1610,7 +1662,9 @@ def agent_policy_summary() -> str:
             else "Bybit TESTNET linear (real open/close)"
         )
         exit_note = (
-            "stepped profit lock +0.15% (+0.02% steps, book prior step)"
+            f"Strict Exit (+{agent.STRICT_EXIT_HARD_TARGET_PCT:.1f}% hard target, "
+            f"+{agent.STRICT_EXIT_MIN_LOCK_PCT:.2f}% min lock, "
+            f"{agent.STRICT_EXIT_TRAIL_MULTIPLIER}×{agent.STRICT_EXIT_FLUCTUATION_X_PCT:.2f}% trail)"
             if AUTO_TRADE_AUTO_EXIT_ENABLED
             else "no auto-exit (manual close / STOP only)"
         )
@@ -1894,193 +1948,215 @@ REAL_FEED_STALE_AFTER_SECONDS = 10
 # ==========================================
 
 async def auto_buy_loop():
-    print("[AUTO BUY LOOP] Blue Box + Marubozu pullback — signals on each closed candle.")
-    while True:
-        timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
-        if timeframe_key in ("30s", "1m"):
-            sleep_seconds = 5
-        elif timeframe_key in ("5m", "15m"):
-            sleep_seconds = 15
-        else:
-            sleep_seconds = 30
-        await asyncio.sleep(sleep_seconds)
+    print(
+        "[AUTO BUY LOOP] Blue Box + Marubozu — ultra-fast closed-candle scan "
+        f"(burst poll {_AUTO_BUY_BURST_POLL}s after each bar close)."
+    )
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        while True:
+            timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+            poll = _auto_buy_poll_seconds(timeframe_key, agent.timeframe_seconds)
 
-        if not agent.is_active or agent.emergency_triggered:
-            continue
+            if not agent.is_active or agent.emergency_triggered:
+                await asyncio.sleep(poll)
+                continue
 
-        if not UVSS_POLICIES_ENABLED:
-            continue
+            if not UVSS_POLICIES_ENABLED:
+                await asyncio.sleep(poll)
+                continue
 
-        bybit_symbol = get_bybit_symbol(agent.active_pair)
-        if bybit_symbol is None:
-            continue
+            bybit_symbol = get_bybit_symbol(agent.active_pair)
+            if bybit_symbol is None:
+                await asyncio.sleep(poll)
+                continue
 
-        try:
-            history = await fetch_kline_history(bybit_symbol, timeframe_key)
-        except Exception as exc:
-            print(f"[AUTO BUY LOOP] Kline history failed for {bybit_symbol}: {exc}")
-            if agent.active_pair not in _CANDLE_FETCH_WARNED_PAIRS:
-                _CANDLE_FETCH_WARNED_PAIRS.add(agent.active_pair)
-                notifications.push(
-                    f"SMC+VSA can't read {bybit_symbol} candles — auto-entries paused for {agent.active_pair}.",
-                    "warning",
+            try:
+                latest_closed = await probe_latest_closed_kline(client, bybit_symbol, timeframe_key)
+            except Exception as exc:
+                print(f"[AUTO BUY LOOP] Kline probe failed for {bybit_symbol}: {exc}")
+                if agent.active_pair not in _CANDLE_FETCH_WARNED_PAIRS:
+                    _CANDLE_FETCH_WARNED_PAIRS.add(agent.active_pair)
+                    notifications.push(
+                        f"SMC+VSA can't read {bybit_symbol} candles — auto-entries paused for {agent.active_pair}.",
+                        "warning",
+                    )
+                await asyncio.sleep(max(poll, 1.0))
+                continue
+            _CANDLE_FETCH_WARNED_PAIRS.discard(agent.active_pair)
+
+            if latest_closed is None:
+                await asyncio.sleep(poll)
+                continue
+
+            close_time = latest_closed["close_time"]
+            if close_time <= LAST_CANDLE_TIMESTAMPS.get(agent.active_pair, 0):
+                await asyncio.sleep(poll)
+                continue
+
+            t_detect = time.time()
+            LAST_CANDLE_TIMESTAMPS[agent.active_pair] = close_time
+            print(f"🔄 New {timeframe_key} candle for {agent.active_pair} @ {close_time} — scanning NOW")
+
+            try:
+                history = await resolve_uvss_history(
+                    client, agent.active_pair, bybit_symbol, timeframe_key, latest_closed
                 )
-            continue
-        _CANDLE_FETCH_WARNED_PAIRS.discard(agent.active_pair)
+            except Exception as exc:
+                print(f"[AUTO BUY LOOP] History resolve failed for {bybit_symbol}: {exc}")
+                await asyncio.sleep(poll)
+                continue
 
-        if len(history) < MIN_CANDLES:
-            continue
+            if len(history) < MIN_CANDLES:
+                await asyncio.sleep(poll)
+                continue
 
-        signal_candle = history[-1]
-        close_time = signal_candle["close_time"]
-        if close_time <= LAST_CANDLE_TIMESTAMPS.get(agent.active_pair, 0):
-            continue
-        LAST_CANDLE_TIMESTAMPS[agent.active_pair] = close_time
-        print(f"🔄 New {timeframe_key} candle for {agent.active_pair}. Running Blue Box engine...")
-
-        system_log.push_agent_chat(
-            f"AI agent is scanning the closed {timeframe_key} candle on {agent.active_pair} "
-            f"— Blue Box + VSA + Marubozu check…",
-            status="scanning",
-            details={
-                "pair": agent.active_pair,
-                "timeframe": timeframe_key,
+            signal_candle = history[-1]
+            result = evaluate_uvss(history, timeframe_key, pair=agent.active_pair)
+            candle = {
+                "high": signal_candle["high"],
+                "low": signal_candle["low"],
+                "close": signal_candle["close"],
                 "close_time": close_time,
-            },
-        )
+            }
+            cost_aware = None
+            if UVSS_COST_AWARE_ENTRY:
+                fee_pct = bybit_api.get_taker_fee_pct()
+                cost_aware = evaluate_cost_aware_entry(
+                    result,
+                    candle,
+                    agent.current_price,
+                    timeframe_key,
+                    fee_pct,
+                )
 
-        result = evaluate_uvss(history, timeframe_key, pair=agent.active_pair)
-        candle = {
-            "high": signal_candle["high"],
-            "low": signal_candle["low"],
-            "close": signal_candle["close"],
-            "close_time": close_time,
-        }
-        cost_aware = None
-        if UVSS_COST_AWARE_ENTRY:
-            fee_pct = bybit_api.get_taker_fee_pct()
-            cost_aware = evaluate_cost_aware_entry(
-                result,
-                candle,
-                agent.current_price,
-                timeframe_key,
-                fee_pct,
-            )
-        system_log.set_last_uvss_scan(
-            agent.active_pair, timeframe_key, result, candle, cost_aware=cost_aware
-        )
+            # Fire first on BUY/SELL — logging/chat after order path to cut latency.
+            fired_trade = False
+            if result["action"] in ("BUY", "SELL"):
+                if not (cost_aware and cost_aware.get("would_block") and not cost_aware.get("dry_run")):
+                    balance = agent.get_available_capital()
+                    if balance is not None and balance > 0:
+                        entry_px = result.get("entry") or agent.current_price
+                        plan = compute_auto_trade_plan(agent, float(entry_px))
+                        if plan is not None and result.get("sl") is not None:
+                            position_size_usd = plan["position_usd"]
+                            qty = plan["qty"]
+                            sl_px = result.get("sl")
+                            tp_px = result.get("tp")
+                            signal_action = result["action"]
+                            fire_payload = {**result, "action": execution_action_for_fire(signal_action)}
+                            fire_payload["symbol"] = bybit_symbol
+                            fire_payload["signal_candle_time"] = close_time
 
-        if result["action"] in ("BUY", "SELL"):
-            exec_action = execution_action_for_fire(result["action"])
-            fire_hint = (
-                f"signal {result['action']} → fire {exec_action} (inverted)"
-                if INVERT_AUTO_TRADE_FIRE and exec_action != result["action"]
-                else str(result["action"])
+                            if is_bybit_testnet_configured() or bybit_api.mode == "PAPER_TRADING":
+                                log_trade_execution(
+                                    taapi_action_to_trade_side(execution_action_for_fire(result["action"])),
+                                    float(entry_px),
+                                    float(sl_px),
+                                    float(tp_px) if tp_px else float(entry_px),
+                                    float(qty),
+                                    float(balance),
+                                    result.get("pattern", "signal"),
+                                )
+                                await fire_taapi_auto_trade(
+                                    fire_payload,
+                                    bybit_symbol,
+                                    plan,
+                                    position_size_usd,
+                                    qty,
+                                    candle_close_time=close_time,
+                                    timeframe_key=timeframe_key,
+                                    signal_action=signal_action,
+                                )
+                                fired_trade = True
+                                ms = (time.time() - t_detect) * 1000
+                                print(f"[AUTO BUY LOOP] Trade fire completed in {ms:.0f}ms after bar close")
+                            else:
+                                global _bybit_testnet_keys_warned
+                                err = (
+                                    "BYBIT_TESTNET_API_KEY / BYBIT_TESTNET_API_SECRET not set — "
+                                    "add keys from https://testnet.bybit.com to backend/.env"
+                                )
+                                if not _bybit_testnet_keys_warned:
+                                    _bybit_testnet_keys_warned = True
+                                    system_log.push("bybit", err, {"symbol": bybit_symbol})
+                                    notifications.push(
+                                        "Bybit TESTNET keys missing — signals fire but orders cannot execute.",
+                                        "error",
+                                    )
+                                _log_trade_skip(result["action"], bybit_symbol, result.get("pattern"), err)
+                        elif plan is None:
+                            _log_trade_skip(
+                                result["action"], bybit_symbol, result.get("pattern"),
+                                f"Could not size 10% trade (available=${balance}, entry=${entry_px}).",
+                            )
+                        else:
+                            _log_trade_skip(
+                                result["action"], bybit_symbol, result.get("pattern"),
+                                "Signal missing stop-loss level.",
+                            )
+                    else:
+                        _log_trade_skip(
+                            result["action"], bybit_symbol, result.get("pattern"),
+                            f"Insufficient available capital (balance=${balance}).",
+                        )
+                else:
+                    reason = cost_aware.get("block_reason") or "Cost-aware entry gate blocked weak signal."
+                    _log_trade_skip(result["action"], bybit_symbol, result.get("pattern"), reason, cost_aware=cost_aware)
+
+            # Deferred UI/logging (never blocks the fire path above).
+            system_log.set_last_uvss_scan(
+                agent.active_pair, timeframe_key, result, candle, cost_aware=cost_aware
             )
             system_log.push_agent_chat(
-                f"Pattern detected on {agent.active_pair}: {result.get('pattern', 'signal')} "
-                f"→ {fire_hint} (1:{RR_RATIO:.0f} R:R) — evaluating entry…",
-                status="match",
-                details={"decision": result, "pair": agent.active_pair, "timeframe": timeframe_key},
+                f"AI agent scanned closed {timeframe_key} candle on {agent.active_pair} "
+                f"— Blue Box + VSA + Marubozu check…",
+                status="scanning",
+                details={
+                    "pair": agent.active_pair,
+                    "timeframe": timeframe_key,
+                    "close_time": close_time,
+                    "fire_ms": round((time.time() - t_detect) * 1000, 1),
+                },
             )
-        else:
-            sweep_ev = result.get("sweep_events") or []
-            if sweep_ev:
+
+            if result["action"] in ("BUY", "SELL"):
+                exec_action = execution_action_for_fire(result["action"])
+                fire_hint = (
+                    f"signal {result['action']} → fire {exec_action} (inverted)"
+                    if INVERT_AUTO_TRADE_FIRE and exec_action != result["action"]
+                    else str(result["action"])
+                )
                 system_log.push_agent_chat(
-                    f"Liquidity sweep on {agent.active_pair} ({', '.join(sweep_ev)}) "
-                    f"— watching next 1–2 candles for displacement…",
-                    status="scanning",
+                    f"Pattern detected on {agent.active_pair}: {result.get('pattern', 'signal')} "
+                    f"→ {fire_hint} (1:{RR_RATIO:.0f} R:R)"
+                    + (" — ORDER FIRED" if fired_trade else " — evaluating entry…"),
+                    status="match",
                     details={"decision": result, "pair": agent.active_pair, "timeframe": timeframe_key},
                 )
-            else:
-                system_log.push_agent_chat(
-                    f"No entry signal on {agent.active_pair} this bar. {result.get('reason', '')}",
-                    status="no_match",
-                    details={"decision": result, "pair": agent.active_pair, "timeframe": timeframe_key},
+            elif result["action"] not in ("BUY", "SELL"):
+                sweep_ev = result.get("sweep_events") or []
+                if sweep_ev:
+                    system_log.push_agent_chat(
+                        f"Liquidity sweep on {agent.active_pair} ({', '.join(sweep_ev)}) "
+                        f"— watching next 1–2 candles for displacement…",
+                        status="scanning",
+                        details={"decision": result, "pair": agent.active_pair, "timeframe": timeframe_key},
+                    )
+                else:
+                    system_log.push_agent_chat(
+                        f"No entry signal on {agent.active_pair} this bar. {result.get('reason', '')}",
+                        status="no_match",
+                        details={"decision": result, "pair": agent.active_pair, "timeframe": timeframe_key},
+                    )
+                print(f"[AUTO BUY LOOP] {result['action']}: {result['reason']}")
+
+            if cost_aware and cost_aware.get("would_block") and cost_aware.get("dry_run"):
+                print(
+                    f"[AUTO BUY LOOP] Cost-aware DRY-RUN would block {result['action']} "
+                    f"{result.get('pattern')}: {cost_aware.get('block_reason')}"
                 )
 
-        if result["action"] not in ("BUY", "SELL"):
-            print(f"[AUTO BUY LOOP] {result['action']}: {result['reason']}")
-            continue
-
-        if cost_aware and cost_aware.get("would_block") and not cost_aware.get("dry_run"):
-            reason = cost_aware.get("block_reason") or "Cost-aware entry gate blocked weak signal."
-            _log_trade_skip(result["action"], bybit_symbol, result.get("pattern"), reason, cost_aware=cost_aware)
-            continue
-
-        if cost_aware and cost_aware.get("would_block") and cost_aware.get("dry_run"):
-            print(
-                f"[AUTO BUY LOOP] Cost-aware DRY-RUN would block {result['action']} "
-                f"{result.get('pattern')}: {cost_aware.get('block_reason')}"
-            )
-
-        balance = agent.get_available_capital()
-        if balance is None or balance <= 0:
-            _log_trade_skip(
-                result["action"], bybit_symbol, result.get("pattern"),
-                f"Insufficient available capital (balance=${balance}).",
-            )
-            continue
-
-        entry_px = result.get("entry") or agent.current_price
-        plan = compute_auto_trade_plan(agent, float(entry_px))
-        if plan is None:
-            _log_trade_skip(
-                result["action"], bybit_symbol, result.get("pattern"),
-                f"Could not size 10% trade (available=${balance}, entry=${entry_px}).",
-            )
-            continue
-
-        position_size_usd = plan["position_usd"]
-        qty = plan["qty"]
-        sl_px = result.get("sl")
-        tp_px = result.get("tp")
-        if sl_px is None:
-            _log_trade_skip(
-                result["action"], bybit_symbol, result.get("pattern"),
-                "Signal missing stop-loss level.",
-            )
-            continue
-
-        log_trade_execution(
-            taapi_action_to_trade_side(execution_action_for_fire(result["action"])),
-            float(entry_px),
-            float(sl_px),
-            float(tp_px) if tp_px else float(entry_px),
-            float(qty),
-            float(balance),
-            result.get("pattern", "signal"),
-        )
-        signal_action = result["action"]
-        fire_payload = {**result, "action": execution_action_for_fire(signal_action)}
-        fire_payload["symbol"] = bybit_symbol
-        fire_payload["signal_candle_time"] = close_time
-        if not is_bybit_testnet_configured() and bybit_api.mode != "PAPER_TRADING":
-            global _bybit_testnet_keys_warned
-            err = (
-                "BYBIT_TESTNET_API_KEY / BYBIT_TESTNET_API_SECRET not set — "
-                "add keys from https://testnet.bybit.com to backend/.env"
-            )
-            if not _bybit_testnet_keys_warned:
-                _bybit_testnet_keys_warned = True
-                system_log.push("bybit", err, {"symbol": bybit_symbol})
-                notifications.push(
-                    "Bybit TESTNET keys missing — TAAPI signals fire but orders cannot execute.",
-                    "error",
-                )
-            _log_trade_skip(result["action"], bybit_symbol, result.get("pattern"), err)
-            continue
-
-        await fire_taapi_auto_trade(
-            fire_payload,
-            bybit_symbol,
-            plan,
-            position_size_usd,
-            qty,
-            candle_close_time=close_time,
-            timeframe_key=timeframe_key,
-            signal_action=signal_action,
-        )
+            await asyncio.sleep(_AUTO_BUY_BURST_POLL if fired_trade else poll)
 
 async def market_simulator():
     """ Synthetic random-walk price - runs whenever the active pair has no
@@ -2107,12 +2183,12 @@ async def market_simulator():
         await asyncio.sleep(0.5)
 
 async def bybit_price_feed():
-    """ Keeps agent.current_price tracking REAL Bybit linear lastPrice every ~1.5s.
+    """ Keeps agent.current_price tracking REAL Bybit linear lastPrice every ~0.35s.
     ALWAYS calls process_tick on each successful poll so trailing profit
     booking never freezes when recent-trade has no new prints between polls.
-    (Volume is unused for entries; TAAPI candle scans drive entries.) """
+    (Volume is unused for entries; UVSS closed-candle scans drive entries.) """
     global _last_real_feed_update
-    print("[MARKET FEED] Background task starting (Bybit linear ticker poll, ~1.5s).")
+    print(f"[MARKET FEED] Background task starting (Bybit linear ticker poll, ~{_AUTO_BUY_TICKER_POLL}s).")
     current_symbol = None
 
     async with httpx.AsyncClient(timeout=6.0) as client:
@@ -2136,7 +2212,7 @@ async def bybit_price_feed():
             except Exception as exc:
                 print(f"[MARKET FEED] Ticker poll error for {target_symbol}: {exc}")
 
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(_AUTO_BUY_TICKER_POLL)
 
 async def bybit_balance_refresher():
     """ Keeps bybit_api.last_known_balance fresh while LIVE_TRADING, so
@@ -2221,7 +2297,12 @@ async def start_bot():
         notifications.push(f"AI Agent STARTED - now monitoring {agent.active_pair} live.", "success")
     return {
         "status": "success",
-        "message": "Bot active & stepped profit-lock (+0.15% / +0.02% steps) initialized.",
+        "message": (
+            f"Bot active — Strict Exit Logic "
+            f"(+{agent.STRICT_EXIT_HARD_TARGET_PCT:.1f}% target, "
+            f"+{agent.STRICT_EXIT_MIN_LOCK_PCT:.2f}% min lock, "
+            f"{agent.STRICT_EXIT_TRAIL_MULTIPLIER}× trail)."
+        ),
         "open_positions": open_count,
         "trade_history_count": len(agent.trade_history),
     }
@@ -2513,7 +2594,7 @@ async def get_system_logs():
         },
         "chart": {
             "history_hint": "5M: backend /chart/24h snapshot, else Bybit public linear klines, then mock",
-            "live_hint": "Bybit public linear WebSocket (chart) + backend ticker poll (~1.5s) for bot PnL",
+            "live_hint": f"Bybit public linear WebSocket (chart) + backend ticker poll (~{_AUTO_BUY_TICKER_POLL}s) for bot PnL",
             "market_data": "bybit_public_linear",
             "api_key_required": False,
         },
