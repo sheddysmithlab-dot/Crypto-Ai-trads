@@ -133,7 +133,9 @@ export default function AgentInstructionsModal({ open, onClose, onStart }) {
           {/* Inputs */}
           <div className="space-y-3">
             <div className="flex items-center justify-between bg-[#161A1E] border border-gray-700 rounded-lg px-4 py-3">
-              <span className="text-xs font-semibold text-gray-300">Risk level <span className="text-gray-500">(max trades)</span></span>
+              <span className="text-xs font-semibold text-gray-300">
+                Stop loss of total capital
+              </span>
               <div className="flex items-center gap-1">
                 <input
                   type="number"
@@ -166,7 +168,9 @@ export default function AgentInstructionsModal({ open, onClose, onStart }) {
 
           {/* Trades info */}
           <p className="text-center text-xs text-gray-400">
-            Ai bot can do <span className={`font-black ${isRed ? 'text-red-400' : 'text-green-400'}`}>{trades}</span> trades at a time based on your risk level.
+            Ai bot can do{' '}
+            <span className={`font-black ${isRed ? 'text-red-400' : 'text-green-400'}`}>{trades}</span>{' '}
+            trades at a time based on your stop loss of total capital.
           </p>
 
           {/* Big action button - opens the Emergency Exit & Continue safety check next */}
