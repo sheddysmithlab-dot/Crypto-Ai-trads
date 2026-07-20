@@ -1,5 +1,5 @@
--- Hostinger phpMyAdmin / MySQL: create DB then run this schema.
--- Example: CREATE DATABASE ai_trads CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+# Hostinger phpMyAdmin OR VPS Docker MySQL init (docker-entrypoint-initdb.d).
+# DB name is created by MySQL container / Hostinger — this only creates `trades`.
 
 CREATE TABLE IF NOT EXISTS trades (
   id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

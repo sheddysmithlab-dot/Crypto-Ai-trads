@@ -2,13 +2,36 @@
 # Add api.aitrads.in to that main reverse proxy → host port 8000 (see upload/BUILD.txt).
 #
 #   docker compose -f docker-compose.backend-only.yml up -d --build
+#
+# MySQL runs on this VPS (no Hostinger Remote MySQL needed).
 
 services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: AiTrads_Root_2026
+      MYSQL_DATABASE: aitrads
+      MYSQL_USER: aitrads
+      MYSQL_PASSWORD: AiTrads_Db_2026
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./backend/sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pAiTrads_Root_2026"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 45s
+
   backend:
     image: crypto-ai-trads-backend:latest
     build:
       context: ./backend
     restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
     env_file:
       - ./backend/.env
     ports:
@@ -24,6 +47,13 @@ services:
       BYBIT_TESTNET_API_SECRET: ${BYBIT_TESTNET_API_SECRET:-}
       AUTH_USERNAME: ${AUTH_USERNAME:-}
       AUTH_PASSWORD: ${AUTH_PASSWORD:-}
+      # Override Hostinger remote DB — use VPS MySQL on docker network
+      MYSQL_ENABLED: "true"
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: aitrads
+      MYSQL_PASSWORD: AiTrads_Db_2026
+      MYSQL_DATABASE: aitrads
     healthcheck:
       test:
         [
@@ -36,3 +66,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+volumes:
+  mysql_data:
