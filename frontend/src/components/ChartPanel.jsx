@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import PairSelectorDropdown from './PairSelectorDropdown';
 import { fmtNum } from '../data/pairs';
 import { formatTradeFireTime } from '../utils/time';
+import { TIMEFRAME_PROFILES, getTimeframeProfile } from '../data/timeframeProfiles';
 
 const TIMEFRAMES = ['1M', '5M', '15M', '1H', '1D'];
 
@@ -13,10 +15,15 @@ export default function ChartPanel({
   readouts,
   botIsActive,
 }) {
+  const [hoverTf, setHoverTf] = useState(null);
+  const activeProfile = getTimeframeProfile(timeframe);
+  const displayTf = hoverTf || timeframe;
+  const displayProfile = getTimeframeProfile(displayTf);
+
   return (
     <div className="bg-lightCard dark:bg-darkCard rounded-xl shadow border border-gray-200 dark:border-gray-800 overflow-hidden shrink-0">
       {/* Chart Header */}
-      <div className="flex justify-between items-center px-3 py-2 border-b border-gray-200 dark:border-gray-800">
+      <div className="flex justify-between items-center px-3 py-2 border-b border-gray-200 dark:border-gray-800 gap-2">
         <PairSelectorDropdown
           pairs={pairSelector.pairs}
           activePair={pairSelector.activePair}
@@ -63,18 +70,52 @@ export default function ChartPanel({
               </span>
             ) : null}
           </div>
-          {TIMEFRAMES.map((tf) => (
-            <button
-              key={tf}
-              className={`px-2.5 py-1 rounded ${
-                tf === timeframe ? 'bg-blue-600 text-white' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
-              }`}
-              onClick={() => switchTimeframe(tf)}
-            >
-              {tf}
-            </button>
-          ))}
+          {TIMEFRAMES.map((tf) => {
+            const p = TIMEFRAME_PROFILES[tf];
+            return (
+              <button
+                key={tf}
+                type="button"
+                className={`px-2.5 py-1 rounded ${
+                  tf === timeframe
+                    ? 'bg-blue-600 text-white'
+                    : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+                }`}
+                onClick={() => switchTimeframe(tf)}
+                onMouseEnter={() => setHoverTf(tf)}
+                onMouseLeave={() => setHoverTf(null)}
+                title={`${tf}: Win ${p.winRate}% / Lose ${p.loseRate}% · Trade ${p.capitalPct}% of capital`}
+              >
+                {tf}
+              </button>
+            );
+          })}
         </div>
+      </div>
+
+      {/* TF profile strip — updates on hover/select */}
+      <div className="px-3 py-1.5 border-b border-gray-200 dark:border-gray-800 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] font-semibold uppercase tracking-wide">
+        <span className="text-gray-500 dark:text-gray-400 normal-case tracking-normal">
+          {displayTf} profile
+          {hoverTf && hoverTf !== timeframe ? (
+            <span className="text-blue-400 ml-1">(hover)</span>
+          ) : null}
+        </span>
+        <span className="text-green-500">
+          Win <span className="font-black">{displayProfile.winRate}%</span>
+        </span>
+        <span className="text-red-500">
+          Lose <span className="font-black">{displayProfile.loseRate}%</span>
+        </span>
+        <span className="text-amber-500">
+          Trade value <span className="font-black">{displayProfile.capitalPct}%</span>
+          <span className="text-gray-500 dark:text-gray-400 font-normal normal-case tracking-normal ml-1">
+            of capital
+          </span>
+        </span>
+        <span className="text-gray-500 dark:text-gray-400 font-normal normal-case tracking-normal ml-auto">
+          Active {timeframe}: {activeProfile.capitalPct}% size · W{activeProfile.winRate}/L{activeProfile.loseRate}
+        </span>
       </div>
 
       {/* Candlestick Chart - default zoom shows the last 40 candles */}

@@ -4,13 +4,20 @@ import { authFetch, backendWsUrl } from '../config/api';
 import {
   BYBIT_PUBLIC_WS_LINEAR,
   bybitKlineUrl,
+  bybitPublicKlineTopic,
   bybitPublicTradeTopic,
   bybitRecentTradeUrl,
 } from '../config/bybitPublic';
 import { debugLog } from '../config/debug';
 import { fmtNum, getBybitSymbol } from '../data/pairs';
 import { formatChartAxisTime, formatLiveClock } from '../utils/time';
-import { decorateCandlestickSeries, computeTradeFireMarkers } from '../utils/chartCandles';
+import {
+  decorateCandlestickSeries,
+  computeTradeFireMarkers,
+  sanitizeCandleData,
+  normalizeChartCandleTime,
+  snapToChartInterval,
+} from '../utils/chartCandles';
 import {
   buildTradeFireLookup,
   renderTradeFireOverlay,
@@ -89,6 +96,19 @@ async function fetchBybitHistory(bybitSymbol, klineInterval, limit = 200) {
     .reverse();
 }
 
+function mapBybitKlineWsBar(row) {
+  const time = Math.floor(Number(row.start) / 1000);
+  return {
+    time,
+    open: parseFloat(row.open),
+    high: parseFloat(row.high),
+    low: parseFloat(row.low),
+    close: parseFloat(row.close),
+    volume: parseFloat(row.volume || 0),
+    confirm: row.confirm === true,
+  };
+}
+
 async function fetchBybitRecentTradesAsCandles(bybitSymbol, intervalSeconds, limit = 1000) {
   const url = bybitRecentTradeUrl(bybitSymbol, limit);
   const res = await fetch(url);
@@ -139,15 +159,15 @@ async function loadHistoricalData(pairLabelArg, tfKey, basePrice) {
   try {
     if (tfKey === '5M') {
       try {
-        const data = await fetchBackend24hCandles(pairLabelArg);
+        const data = sanitizeCandleData(await fetchBackend24hCandles(pairLabelArg), intervalSecs);
         return { data, source: 'backend /chart/24h (Bybit 5m persisted)' };
       } catch (backendErr) {
         console.warn(`[CHART] Backend 24h snapshot unavailable for ${pairLabelArg}:`, backendErr);
       }
     }
     const data = bybitKline
-      ? await fetchBybitHistory(bybitSymbol, bybitKline)
-      : await fetchBybitRecentTradesAsCandles(bybitSymbol, intervalSecs);
+      ? sanitizeCandleData(await fetchBybitHistory(bybitSymbol, bybitKline, 300), intervalSecs)
+      : sanitizeCandleData(await fetchBybitRecentTradesAsCandles(bybitSymbol, intervalSecs), intervalSecs);
     return {
       data,
       source: bybitKline ? `Bybit linear klines (${bybitKline})` : 'Bybit linear trades (bucketed)',
@@ -214,10 +234,15 @@ const darkThemeConfig = {
 };
 
 function buildTimeScaleOptions(intervalSeconds) {
+  // Keep 1m bars readable — auto spacing with gappy data stretches candles into blocks.
+  const barSpacing = intervalSeconds <= 60 ? 7 : intervalSeconds <= 300 ? 8 : 10;
   return {
     borderColor: '#1E2329',
     timeVisible: true,
-    secondsVisible: intervalSeconds <= 60,
+    secondsVisible: false,
+    barSpacing,
+    minBarSpacing: 3,
+    rightOffset: 4,
     tickMarkFormatter: (time) => formatChartAxisTime(time, intervalSeconds),
   };
 }
@@ -263,6 +288,7 @@ export function useTradingChart({
   // real-history fetch can't clobber a newer switch when it finally resolves.
   const loadGenerationRef = useRef(0);
   const zoomTimeoutRef = useRef(null);
+  const overlayThrottleRef = useRef(0);
   pairLabelRef.current = pairLabel;
 
   const [timeframe, setTimeframe] = useState(initialTimeframe);
@@ -422,11 +448,12 @@ export function useTradingChart({
   // Pushes a full dataset (synthetic or real) into every series + the readouts.
   const applyDataset = useCallback(
     (data, { zoomToRecent = false } = {}) => {
-      mockDataRef.current = data;
-      applyAllOverlays(data);
+      const cleaned = sanitizeCandleData(data, currentIntervalRef.current);
+      mockDataRef.current = cleaned;
+      applyAllOverlays(cleaned);
       resetPriceScale();
-      if (zoomToRecent) zoomToRecentCandles(data.length);
-      if (data.length > 0) updateReadouts(data[data.length - 1], data);
+      if (zoomToRecent) zoomToRecentCandles(cleaned.length);
+      if (cleaned.length > 0) updateReadouts(cleaned[cleaned.length - 1], cleaned);
       redrawBlueBoxOverlay();
     },
     [updateReadouts, applyAllOverlays, zoomToRecentCandles, resetPriceScale, redrawBlueBoxOverlay]
@@ -465,53 +492,97 @@ export function useTradingChart({
     }
   }, []);
 
-  const applyLivePriceTick = useCallback(
-    (newClose) => {
+  const applyLiveCandleBar = useCallback(
+    (bar, { fromKline = false } = {}) => {
       const mockData = mockDataRef.current;
-      if (!mockData || mockData.length === 0) {
-        console.warn('[CHART] No candle data available yet, skipping price tick');
-        return;
-      }
-      const lastCandle = mockData[mockData.length - 1];
-      if (!lastCandle || !lastCandle.time) {
-        console.warn('[CHART] Last candle is invalid, regenerating chart data');
-        return;
-      }
+      if (!mockData) return;
+      const interval = currentIntervalRef.current || 60;
+      const time = snapToChartInterval(
+        normalizeChartCandleTime(bar.time) ?? 0,
+        interval,
+      );
+      if (!time) return;
 
-      // Ignore ticks from the wrong pair (e.g. stale BTC feed after switching to ETH).
-      if (lastCandle.close > 0) {
-        const ratio = newClose / lastCandle.close;
-        if (ratio > 2.5 || ratio < 0.4) {
-          console.warn(`[CHART] Ignoring out-of-range tick ${newClose} vs last close ${lastCandle.close}`);
+      const open = Number(bar.open);
+      const high = Number(bar.high);
+      const low = Number(bar.low);
+      const close = Number(bar.close);
+      if (![open, high, low, close].every(Number.isFinite)) return;
+
+      const candle = {
+        time,
+        open,
+        high: Math.max(high, open, close),
+        low: Math.min(low, open, close),
+        close,
+        volume: Number(bar.volume) || 0,
+      };
+
+      let newCandle = false;
+      if (mockData.length === 0) {
+        mockData.push(candle);
+        newCandle = true;
+      } else {
+        const last = mockData[mockData.length - 1];
+        if (candle.time === last.time) {
+          // Same bucket: kline replaces OHLC; trade tick only amends close/hi/lo.
+          mockData[mockData.length - 1] = fromKline
+            ? candle
+            : {
+                ...last,
+                close: candle.close,
+                high: Math.max(last.high, candle.close),
+                low: Math.min(last.low, candle.close),
+                volume: last.volume + (candle.volume || 0),
+              };
+        } else if (candle.time > last.time) {
+          // Fill skipped minutes so the 1m axis stays even.
+          let cursor = last.time + interval;
+          let guard = 0;
+          while (cursor < candle.time && guard < 120) {
+            const bridge = last.close;
+            mockData.push({
+              time: cursor,
+              open: bridge,
+              high: bridge,
+              low: bridge,
+              close: bridge,
+              volume: 0,
+            });
+            cursor += interval;
+            guard += 1;
+          }
+          mockData.push(candle);
+          newCandle = true;
+          while (mockData.length > 400) mockData.shift();
+        } else {
+          // Older bar — ignore (stale WS / race).
           return;
         }
       }
 
-      const bucketTime = Math.floor(Date.now() / 1000 / currentIntervalRef.current) * currentIntervalRef.current;
+      const updated = mockData[mockData.length - 1];
+      try {
+        candleSeriesRef.current?.update(decorateCandlestickSeries([updated])[0]);
+      } catch {
+        pushCandlesToChart(mockData);
+      }
+      updateReadouts(updated, mockData);
 
-      let updated;
-      let newCandle = false;
-      if (bucketTime > lastCandle.time) {
-        newCandle = true;
-        updated = { time: bucketTime, open: lastCandle.close, high: newClose, low: newClose, close: newClose, volume: Math.random() * 2 };
-        mockData.push(updated);
-        if (mockData.length > 200) mockData.shift();
-      } else {
-        updated = {
-          ...lastCandle,
-          close: newClose,
-          high: Math.max(lastCandle.high, newClose),
-          low: Math.min(lastCandle.low, newClose),
-          volume: lastCandle.volume + Math.random() * 0.3,
-        };
-        mockData[mockData.length - 1] = updated;
+      // Throttle heavy MA/volume redraws — every tick setData was warping 1m bars.
+      const now = performance.now();
+      if (newCandle || now - overlayThrottleRef.current > 400) {
+        overlayThrottleRef.current = now;
+        MA_PERIODS.forEach((period) => {
+          maSeriesRef.current[period]?.setData(calcSMA(mockData, period));
+        });
+        volumeSeriesRef.current?.setData(toVolumeBars(mockData));
+        volumeMaSeriesRef.current?.setData(calcVolumeSMA(mockData, VOLUME_MA_PERIOD));
       }
 
-      candleSeriesRef.current.update(decorateCandlestickSeries([updated])[0]);
-      updateReadouts(updated, mockData);
-      applyAllOverlays(mockData);
       if (newCandle) {
         zoomToRecentCandles(mockData.length);
+        redrawTradeFireOverlay();
       } else {
         try {
           chartRef.current?.timeScale().scrollToRealTime();
@@ -520,16 +591,54 @@ export function useTradingChart({
           /* chart may be mid-reset */
         }
       }
-      redrawBlueBoxOverlay();
-      redrawTradeFireOverlay();
     },
-    [updateReadouts, applyAllOverlays, zoomToRecentCandles, redrawBlueBoxOverlay, redrawTradeFireOverlay]
+    [updateReadouts, zoomToRecentCandles, pushCandlesToChart, redrawTradeFireOverlay]
+  );
+
+  const applyLivePriceTick = useCallback(
+    (newClose) => {
+      const mockData = mockDataRef.current;
+      if (!mockData || mockData.length === 0) {
+        console.warn('[CHART] No candle data available yet, skipping price tick');
+        return;
+      }
+      const lastCandle = mockData[mockData.length - 1];
+      if (!lastCandle || !lastCandle.time) return;
+
+      if (lastCandle.close > 0) {
+        const ratio = newClose / lastCandle.close;
+        if (ratio > 2.5 || ratio < 0.4) {
+          console.warn(`[CHART] Ignoring out-of-range tick ${newClose} vs last close ${lastCandle.close}`);
+          return;
+        }
+      }
+
+      const bucketTime =
+        Math.floor(Date.now() / 1000 / currentIntervalRef.current) * currentIntervalRef.current;
+
+      applyLiveCandleBar(
+        {
+          time: bucketTime,
+          open: bucketTime > lastCandle.time ? lastCandle.close : lastCandle.open,
+          high: newClose,
+          low: newClose,
+          close: newClose,
+          volume: 0,
+        },
+        { fromKline: false },
+      );
+    },
+    [applyLiveCandleBar]
   );
 
   const connectFreeSource = useCallback(
     (pairLabelArg) => {
       disconnectFreeSource();
       const bybitSymbol = getBybitSymbol(pairLabelArg);
+      const tfKey = Object.entries(TIMEFRAME_SECONDS).find(
+        ([, secs]) => secs === currentIntervalRef.current,
+      )?.[0];
+      const klineInterval = BYBIT_KLINE_INTERVAL[tfKey] || BYBIT_KLINE_INTERVAL['1M'];
 
       const scheduleRetry = () => {
         setTimeout(() => connectFreeSource(pairLabelArg), 2000);
@@ -541,25 +650,43 @@ export function useTradingChart({
         return;
       }
 
-      setChartLiveSource(`Bybit public WebSocket (linear: ${bybitSymbol})`);
+      setChartLiveSource(`Bybit kline WS (${bybitSymbol} ${klineInterval}m)`);
       const ws = new WebSocket(BYBIT_PUBLIC_WS_LINEAR);
       freeSourceWsRef.current = ws;
 
       ws.onopen = () => {
-        ws.send(JSON.stringify({ op: 'subscribe', args: [bybitPublicTradeTopic(bybitSymbol)] }));
-        debugLog(`[BYBIT PUBLIC] Subscribed to ${bybitSymbol} trades.`);
+        const args = [bybitPublicKlineTopic(bybitSymbol, klineInterval)];
+        // Trade stream only as fallback price pulse if kline is quiet.
+        args.push(bybitPublicTradeTopic(bybitSymbol));
+        ws.send(JSON.stringify({ op: 'subscribe', args }));
+        debugLog(`[BYBIT PUBLIC] Subscribed to kline+trades ${bybitSymbol} @ ${klineInterval}`);
       };
 
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (!msg.topic?.startsWith('publicTrade.')) return;
-          const trades = msg.data;
-          if (!Array.isArray(trades) || trades.length === 0) return;
-          const price = parseFloat(trades[trades.length - 1].p);
-          if (!isNaN(price)) applyLivePriceTick(price);
+          if (msg.topic?.startsWith('kline.')) {
+            const rows = msg.data;
+            if (!Array.isArray(rows) || rows.length === 0) return;
+            const mapped = mapBybitKlineWsBar(rows[rows.length - 1]);
+            if (mapped) applyLiveCandleBar(mapped, { fromKline: true });
+            return;
+          }
+          // Ignore trade ticks when kline is feeding — trades were causing gappy fat bars.
+          if (msg.topic?.startsWith('publicTrade.')) {
+            const hasCandles = mockDataRef.current.length > 0;
+            const last = hasCandles ? mockDataRef.current[mockDataRef.current.length - 1] : null;
+            const bucketNow =
+              Math.floor(Date.now() / 1000 / currentIntervalRef.current) * currentIntervalRef.current;
+            // Only use trades if we somehow have no current-minute candle yet.
+            if (last && last.time === bucketNow) return;
+            const trades = msg.data;
+            if (!Array.isArray(trades) || trades.length === 0) return;
+            const price = parseFloat(trades[trades.length - 1].p);
+            if (!isNaN(price)) applyLivePriceTick(price);
+          }
         } catch (err) {
-          console.error('[BYBIT PUBLIC] Error parsing trade stream:', err);
+          console.error('[BYBIT PUBLIC] Error parsing stream:', err);
         }
       };
 
@@ -572,7 +699,7 @@ export function useTradingChart({
         scheduleRetry();
       };
     },
-    [applyLivePriceTick, disconnectFreeSource]
+    [applyLiveCandleBar, applyLivePriceTick, disconnectFreeSource]
   );
 
   const setChartDataSourceMode = useCallback((mode) => {
@@ -604,17 +731,23 @@ export function useTradingChart({
       // Clear the chart rather than showing a fake synthetic placeholder.
       applyDataset([]);
       loadRealHistoryInBackground(pairLabelRef.current, tf, entryPriceRef.current);
+      // Re-subscribe kline stream for the new interval (1m vs 5m etc.).
+      connectFreeSource(pairLabelRef.current);
 
-      // Chart timeframe is display-only — do NOT call /set-timeframe here.
-      // Backend trading engine keeps its own candle interval so open trades
-      // and Blue Box state are unaffected by viewing a different chart zoom.
+      // Sync trading engine TF so auto-size % matches chart (1m=3% … 1D=20%).
+      authFetch('/set-timeframe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seconds: TIMEFRAME_SECONDS[tf] || 60 }),
+      }).catch((err) => console.warn('set-timeframe sync failed:', err));
+
       try {
         localStorage.setItem(CHART_TIMEFRAME_STORAGE_KEY, tf);
       } catch {
         /* storage blocked */
       }
     },
-    [applyDataset, loadRealHistoryInBackground]
+    [applyDataset, loadRealHistoryInBackground, connectFreeSource]
   );
 
   // Init chart once on mount
@@ -630,11 +763,15 @@ export function useTradingChart({
     const chart = createChart(chartContainer, {
       width: chartContainer.clientWidth,
       height: chartContainer.clientHeight,
-      timeScale: { ...darkThemeConfig.timeScale, ...buildTimeScaleOptions(currentIntervalRef.current), visible: false },
+      ...darkThemeConfig,
+      timeScale: {
+        ...darkThemeConfig.timeScale,
+        ...buildTimeScaleOptions(currentIntervalRef.current),
+        visible: false,
+      },
       localization: {
         timeFormatter: (time) => formatChartAxisTime(time, currentIntervalRef.current),
       },
-      ...darkThemeConfig,
     });
     chartRef.current = chart;
 
@@ -676,11 +813,11 @@ export function useTradingChart({
     const volumeChart = createChart(volumeContainer, {
       width: volumeContainer.clientWidth,
       height: volumeContainer.clientHeight,
+      ...darkThemeConfig,
       timeScale: buildTimeScaleOptions(currentIntervalRef.current),
       localization: {
         timeFormatter: (time) => formatChartAxisTime(time, currentIntervalRef.current),
       },
-      ...darkThemeConfig,
     });
     volumeChartRef.current = volumeChart;
     const volumeSeries = volumeChart.addHistogramSeries({ priceFormat: { type: 'volume' }, lastValueVisible: false });
@@ -708,6 +845,12 @@ export function useTradingChart({
 
     // Fetch real history for the initial pair using the persisted chart timeframe.
     loadRealHistoryInBackground(pairLabelRef.current, initialTimeframe, entryPrice);
+    // Sync backend sizing/scan TF to stored chart TF on load.
+    authFetch('/set-timeframe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seconds: TIMEFRAME_SECONDS[initialTimeframe] || 60 }),
+    }).catch((err) => console.warn('initial set-timeframe sync failed:', err));
 
     chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
       redrawBlueBoxOverlay();

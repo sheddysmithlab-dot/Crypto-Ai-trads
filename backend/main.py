@@ -29,6 +29,7 @@ from bybit_public import (
     sanitize_price as _sanitize_market_price,
 )
 from session_schedule import schedule_store
+from timeframe_profiles import capital_pct_fraction, get_timeframe_profile
 import trade_db
 from api_secrets import (
     get_taapi_exchange,
@@ -1149,7 +1150,8 @@ class AITradingAgent:
               f"(margin=${margin}, position=${position_size}, qty={qty}, entry_fee=${entry_fee_usd}, source={source})")
         qty_note = f" | {qty} coins" if qty is not None else ""
         if source == "auto" and position_size_usd is not None:
-            risk_note = f"{AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of available capital{qty_note}"
+            cap_pct = auto_trade_capital_pct_for_agent(self) * 100
+            risk_note = f"{cap_pct:.0f}% of available capital{qty_note}"
             fill_msg = (
                 f"Order Filled: {self.active_pair} {side} @ {filled_price:,.4f} "
                 f"(${position_size:,.2f} notional, {risk_note})"
@@ -1678,8 +1680,16 @@ async def fetch_closed_candle_ohlc(bybit_symbol, timeframe_key):
     # startTime doubles as a unique, strictly-increasing per-candle id.
     return {"high": float(closed[2]), "low": float(closed[3]), "close_time": int(closed[0])}
 
-# Auto-order sizing: 10% of available capital per fired trade.
-AUTO_TRADE_CAPITAL_PCT = 0.10
+# Auto-order sizing: % of available capital depends on active timeframe
+# (see timeframe_profiles.py — 1m=3%, 5m=7%, 15m=10%, 1h=15%, 1D=20%).
+AUTO_TRADE_CAPITAL_PCT = float(os.environ.get("AUTO_TRADE_CAPITAL_PCT", "0.10"))  # legacy fallback
+
+
+def auto_trade_capital_pct_for_agent(agent) -> float:
+    """Fraction of available capital for one auto fire, from chart/engine TF."""
+    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(getattr(agent, "timeframe_seconds", 60), "1m")
+    return capital_pct_fraction(tf_key)
+
 
 # Fire discipline — stop "every candle / every pattern" spam.
 # Mid strictness: between spam-every-candle (low) and hard filter (0.7 / 3 bars).
@@ -1708,7 +1718,7 @@ def qty_decimals_for_price(price: float) -> int:
 
 
 def compute_auto_trade_plan(agent, price: float | None = None, size_mult: float = 1.0) -> dict | None:
-    """Auto sizing: 10% of available capital per fire; next fire uses what remains."""
+    """Auto sizing: timeframe capital % of available capital per fire."""
     entry_price = _sanitize_market_price(price if price is not None else agent.current_price)
     if entry_price is None:
         return None
@@ -1716,7 +1726,8 @@ def compute_auto_trade_plan(agent, price: float | None = None, size_mult: float 
     if available is None or available <= 0:
         return None
     mult = max(1.0, float(size_mult))
-    position_usd = round(available * AUTO_TRADE_CAPITAL_PCT * mult, 2)
+    cap_frac = auto_trade_capital_pct_for_agent(agent)
+    position_usd = round(available * cap_frac * mult, 2)
     if position_usd <= 0:
         return None
     decimals = qty_decimals_for_price(entry_price)
@@ -1724,16 +1735,22 @@ def compute_auto_trade_plan(agent, price: float | None = None, size_mult: float 
     if qty <= 0:
         return None
     margin = round(position_usd / agent.leverage, 4)
+    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+    profile = get_timeframe_profile(tf_key)
     return {
         "total_capital": round(available, 2),
         "available_capital": round(available, 2),
         "position_usd": position_usd,
-        "capital_pct": AUTO_TRADE_CAPITAL_PCT * 100 * mult,
+        "capital_pct": cap_frac * 100 * mult,
         "size_mult": mult,
         "qty": qty,
         "qty_decimals": decimals,
+        "timeframe": tf_key,
+        "win_rate": profile["win_rate"],
+        "lose_rate": profile["lose_rate"],
         "margin": margin,
         "price": entry_price,
+        "entry_price": entry_price,
     }
 
 
@@ -1903,7 +1920,7 @@ def agent_policy_summary() -> str:
         )
         return (
             f"Candle patterns + Bible + ML cost-aware{whale_note} | BUY→LONG SELL→SHORT | {exit_note}, no SL exit | "
-            f"risk {AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of available capital per auto fire | {exec_mode}"
+            f"risk by timeframe (1m=3% … 1D=20%) of available capital per auto fire | {exec_mode}"
         )
     return "Auto trade policies not active."
 
@@ -2150,7 +2167,7 @@ async def fire_taapi_auto_trade(
             )
             notifications.push(
                 f"{venue} {side} opened ({pattern or 'signal'} {signal_note}): {agent.active_pair} | {qty} @ ~${plan['price']:,.0f} | "
-                f"${position_size_usd} ({AUTO_TRADE_CAPITAL_PCT * 100:.0f}% of ${plan['total_capital']:,.0f} available) | "
+                f"${position_size_usd} ({plan.get('capital_pct', 0):.0f}% of ${plan['total_capital']:,.0f} available) | "
                 f"TP={result.get('tp')} SL={result.get('sl')} | pattern={pattern} #{trade['id']}",
                 "success",
             )
@@ -2908,7 +2925,28 @@ async def set_timeframe(payload: SetTimeframePayload):
     """ RULE 2: Dynamic Timeframe Syncing - the frontend tells the backend exactly
     which candle interval to read volume/price data on. """
     agent.set_timeframe(payload.seconds)
-    return {"status": "success", "message": f"Backend now synced to {payload.seconds}s candles.", "seconds": agent.timeframe_seconds}
+    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+    profile = get_timeframe_profile(tf_key)
+    return {
+        "status": "success",
+        "message": (
+            f"Backend synced to {payload.seconds}s ({tf_key}) — "
+            f"trade size {profile['capital_pct']:.0f}% capital, "
+            f"win/lose {profile['win_rate']}/{profile['lose_rate']}."
+        ),
+        "seconds": agent.timeframe_seconds,
+        "timeframe": tf_key,
+        "profile": profile,
+    }
+
+
+@app.get("/timeframe-profiles")
+async def timeframe_profiles():
+    """UI reference: win/lose rates + capital % per chart TF."""
+    return {
+        "profiles": {k: get_timeframe_profile(k) for k in ("1m", "5m", "15m", "1h", "1D")},
+        "active": get_timeframe_profile(SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")),
+    }
 
 # ==========================================
 # PAPER TRADING CAPITAL WIRING
@@ -3362,6 +3400,10 @@ async def portfolio_feed(websocket: WebSocket):
                 "ai_season_active": agent.ai_season_start_capital is not None and agent.is_active,
                 "portfolio_drop_pct": round(portfolio_drop, 2),
                 "is_active": agent.is_active,
+                "timeframe_seconds": agent.timeframe_seconds,
+                "timeframe_profile": get_timeframe_profile(
+                    SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+                ),
                 "session_schedule": schedule_store.status_dict(),
                 "emergency": False,
                 "risk_level_pct": agent.risk_level_pct,

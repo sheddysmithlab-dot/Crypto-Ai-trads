@@ -26,4 +26,6 @@ Mon–Fri IST auto on/off (no browser needed): Morning 05:30–08:30 · Peak Ove
 Closed/open trades persist to Hostinger MySQL (`backend/sql/schema.sql`). Profile → Trading Statement. Setup: `upload/HOSTINGER_MYSQL.md`.
 
 ## Size
-Auto fire uses ~10% of available capital (see `AUTO_TRADE_CAPITAL_PCT` in `main.py`).
+Auto fire size = chart timeframe capital % of available capital:
+1m **3%** · 5m **7%** · 15m **10%** · 1h **15%** · 1D **20%** (`timeframe_profiles.py`).
+UI shows expected win/lose rates per TF (display guide) on chart hover/select.
