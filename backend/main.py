@@ -650,8 +650,11 @@ class AITradingAgent:
         # halted (existing positions keep being managed by strict exit logic).
         self.daily_profit_target_pct = 0.0
         self.daily_target_reached = False
-        # AI Season: profit tracked from START until STOP.
+        # AI Season: profit tracked from START until STOP (persisted to MySQL).
         self.ai_season_start_capital = None
+        self.ai_season_id: int | None = None
+        self.ai_season_started_at: float | None = None
+        self.ai_season_end_reason: str | None = None
 
         # RULE 1: Position Sizing & Leverage (The "100/1" Rule)
         self.leverage = 100
@@ -947,6 +950,7 @@ class AITradingAgent:
             "pattern": trade.get("pattern"),
             "opened_at": trade.get("opened_at"),
             "exchange": trade.get("exchange"),
+            "season_id": trade.get("season_id") or self.ai_season_id,
         })
         try:
             trade_db.upsert_open_trade(trade)
@@ -1066,6 +1070,8 @@ class AITradingAgent:
         self.current_capital = equity
         self.starting_capital = equity
         self.ai_season_start_capital = None
+        self.ai_season_id = None
+        self.ai_season_started_at = None
         self.is_active = False
         self.daily_target_reached = False
         self.is_lock_active = False
@@ -1098,15 +1104,62 @@ class AITradingAgent:
         return self.starting_capital
 
     def begin_ai_season(self):
-        """ Called when START AI AUTOMATION fires — resets season P&L and kill-switch baseline. """
+        """ Called when START AI AUTOMATION fires — new season baseline + DB row. """
+        # Close any leftover open season row, then start fresh live table.
+        if self.ai_season_id is not None:
+            self.end_ai_season(clear_live_table=False, reason="restarted")
+        self.trade_history = []
         self.ai_season_start_capital = self.get_total_portfolio_value()
-        print(f"[AI SEASON] Started. Baseline ${self.ai_season_start_capital:,.2f} (season profit + stop-loss tracking).")
+        self.ai_season_started_at = time.time()
+        self.ai_season_end_reason = None
+        try:
+            self.ai_season_id = trade_db.create_season(
+                start_capital=float(self.ai_season_start_capital),
+                started_at=self.ai_season_started_at,
+            )
+        except Exception as exc:
+            print(f"[MYSQL] begin_ai_season persist skipped: {exc}")
+            self.ai_season_id = None
+        print(
+            f"[AI SEASON] Started #{self.ai_season_id or 'mem'} "
+            f"baseline ${self.ai_season_start_capital:,.2f}."
+        )
 
-    def end_ai_season(self):
-        """ Called on STOP / Emergency Exit — clears season profit and kill-switch baseline. """
-        if self.ai_season_start_capital is not None:
-            print("[AI SEASON] Ended. Season profit tracking reset.")
+    def end_ai_season(self, *, clear_live_table: bool = False, reason: str | None = None):
+        """ Called on STOP / Emergency Exit — persist season totals, optionally clear live table. """
+        end_reason = reason or self.ai_season_end_reason or "stopped"
+        if self.ai_season_start_capital is not None or self.ai_season_id is not None:
+            fee_book = self.get_session_gross_and_fees_usd()
+            end_cap = self.get_total_portfolio_value()
+            sold = [r for r in self.trade_history if r.get("status") == "sold"]
+            wins = sum(1 for r in sold if float(r.get("net_pnl_usd") or 0) > 0)
+            losses = sum(1 for r in sold if float(r.get("net_pnl_usd") or 0) < 0)
+            try:
+                trade_db.close_season(
+                    self.ai_season_id,
+                    end_capital=float(end_cap),
+                    gross_pnl_usd=float(fee_book.get("gross_usd") or 0),
+                    net_pnl_usd=float(fee_book.get("net_usd") or 0),
+                    broker_fee_usd=float(fee_book.get("broker_fee_usd") or 0),
+                    trade_count=len(sold),
+                    win_count=wins,
+                    loss_count=losses,
+                    end_reason=end_reason,
+                )
+            except Exception as exc:
+                print(f"[MYSQL] end_ai_season persist skipped: {exc}")
+            print(
+                f"[AI SEASON] Ended #{self.ai_season_id or 'mem'} "
+                f"net ${float(fee_book.get('net_usd') or 0):,.2f} — {end_reason}."
+            )
         self.ai_season_start_capital = None
+        self.ai_season_id = None
+        self.ai_season_started_at = None
+        self.ai_season_end_reason = None
+        if clear_live_table:
+            self.trades = []
+            self.trade_history = []
+            print("[AI SEASON] Live trades table cleared.")
 
     def clear_emergency_state(self):
         """ Fully clears RULE 8 emergency flags so the popup cannot re-fire on the next start. """
@@ -1291,6 +1344,7 @@ class AITradingAgent:
             "tp_price": round(float(tp_price), 4) if tp_price is not None else None,
             "target_mult": target_mult,
             "capital_reserved": capital_reserved,
+            "season_id": self.ai_season_id,
         }
         self.trades.append(trade)
         self.set_pair_mark(trade_pair, filled_price)
@@ -1653,7 +1707,7 @@ class AITradingAgent:
         self._close_all_positions("EMERGENCY SELL ALL TRIGGERED | RULE 8 confirmed by user")
         self.is_active = False
         self.clear_emergency_state()
-        self.end_ai_season()
+        self.end_ai_season(clear_live_table=True, reason="emergency_exit")
         self.peak_net_pct = 0.0
         self.is_lock_active = False
 
@@ -1662,7 +1716,7 @@ class AITradingAgent:
         print(f"[PILLAR 2: BACKEND] {reason}")
         self._close_all_positions(reason)
         self.is_active = False
-        self.end_ai_season()
+        self.end_ai_season(clear_live_table=True, reason="manual_stop")
         self.peak_net_pct = 0.0
         self.is_lock_active = False
         system_log.push("ai", "AI automation STOPPED — emergency exit, all positions closed.", {"reason": reason})
@@ -1674,7 +1728,8 @@ class AITradingAgent:
             return
         print(f"[SESSION SCHEDULE] Soft stop — {reason}")
         self.is_active = False
-        self.end_ai_season()
+        # Persist season totals but keep live table so open positions remain visible.
+        self.end_ai_season(clear_live_table=False, reason=f"schedule_soft_stop:{reason}")
         system_log.push("ai", f"Session schedule paused AI automation — {reason}", {"open_positions": len(self.trades)})
         notifications.push(
             f"Session schedule OFF-window — automation paused ({len(self.trades)} open position(s) still managed).",
@@ -3462,16 +3517,24 @@ async def trades_statement(
     offset: int = Query(0, ge=0),
     status: str | None = Query(None),
     pair: str | None = Query(None),
+    season_id: int | None = Query(None),
 ):
-    """Full trading statement from MySQL (Hostinger). Falls back to empty if DB off."""
+    """Full trading statement from MySQL. Optional season_id filters one AI season."""
     data = await asyncio.to_thread(
         trade_db.fetch_statement,
         limit=limit,
         offset=offset,
         status=status,
         pair=pair,
+        season_id=season_id,
     )
     return data
+
+
+@app.get("/trades/seasons")
+async def trades_seasons(limit: int = Query(50, ge=1, le=200)):
+    """Season-wise AI automation summaries (MySQL)."""
+    return await asyncio.to_thread(trade_db.fetch_seasons, limit=limit)
 
 
 @app.get("/settings/mysql-status")

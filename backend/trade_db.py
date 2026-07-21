@@ -87,13 +87,31 @@ def init_db() -> dict:
                 # Keep CREATE TABLE block (ignore leading comment-only chunks already filtered)
                 if stmt.upper().startswith("CREATE"):
                     cur.execute(stmt)
+        _migrate_schema(conn)
         print(
-            f"[MYSQL] Connected { _env('MYSQL_HOST') }/{ _env('MYSQL_DATABASE') } — trades table ready."
+            f"[MYSQL] Connected { _env('MYSQL_HOST') }/{ _env('MYSQL_DATABASE') } — trades + seasons ready."
         )
         return {"enabled": True, "ok": True, "message": "connected"}
     except Exception as exc:
         print(f"[MYSQL] init failed: {exc}")
         return {"enabled": True, "ok": False, "message": str(exc)}
+
+
+def _migrate_schema(conn) -> None:
+    """Add season support on older DBs that already have `trades` without season_id."""
+    alters = [
+        "ALTER TABLE trades ADD COLUMN season_id BIGINT UNSIGNED NULL AFTER bot_trade_id",
+        "ALTER TABLE trades ADD KEY idx_season (season_id)",
+    ]
+    with conn.cursor() as cur:
+        for stmt in alters:
+            try:
+                cur.execute(stmt)
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "duplicate" in msg or "exists" in msg:
+                    continue
+                print(f"[MYSQL] migrate skip: {exc}")
 
 
 def max_bot_trade_id() -> int:
@@ -125,18 +143,19 @@ def upsert_open_trade(trade: dict, username: str | None = None) -> None:
         uid = _trade_uid(trade)
         sql = """
         INSERT INTO trades (
-          trade_uid, bot_trade_id, username, pair, side, status, source, protected,
+          trade_uid, bot_trade_id, season_id, username, pair, side, status, source, protected,
           entry_price, margin, position_size, qty, capital_reserved,
           entry_fee_pct, entry_fee_usd, exchange, bybit_symbol, pattern,
           signal_candle_time, opened_at
         ) VALUES (
-          %(trade_uid)s, %(bot_trade_id)s, %(username)s, %(pair)s, %(side)s, 'active', %(source)s, %(protected)s,
+          %(trade_uid)s, %(bot_trade_id)s, %(season_id)s, %(username)s, %(pair)s, %(side)s, 'active', %(source)s, %(protected)s,
           %(entry_price)s, %(margin)s, %(position_size)s, %(qty)s, %(capital_reserved)s,
           %(entry_fee_pct)s, %(entry_fee_usd)s, %(exchange)s, %(bybit_symbol)s, %(pattern)s,
           %(signal_candle_time)s, %(opened_at)s
         )
         ON DUPLICATE KEY UPDATE
           status='active',
+          season_id=COALESCE(VALUES(season_id), season_id),
           margin=VALUES(margin),
           position_size=VALUES(position_size),
           pattern=VALUES(pattern)
@@ -144,6 +163,7 @@ def upsert_open_trade(trade: dict, username: str | None = None) -> None:
         params = {
             "trade_uid": uid,
             "bot_trade_id": int(trade["id"]),
+            "season_id": trade.get("season_id"),
             "username": username,
             "pair": trade.get("pair") or "",
             "side": trade.get("side") or "LONG",
@@ -166,6 +186,125 @@ def upsert_open_trade(trade: dict, username: str | None = None) -> None:
             cur.execute(sql, params)
     except Exception as exc:
         print(f"[MYSQL] upsert_open_trade failed: {exc}")
+
+
+def create_season(*, start_capital: float, started_at: float | None = None) -> int | None:
+    """Insert a new AI season row; returns DB id."""
+    if not mysql_enabled():
+        return None
+    try:
+        conn = _get_conn()
+        ts = float(started_at or time.time())
+        uid = f"season-{int(ts * 1000)}"
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO ai_seasons (season_uid, status, start_capital, started_at)
+                VALUES (%s, 'active', %s, %s)
+                """,
+                (uid, float(start_capital), ts),
+            )
+            season_id = int(cur.lastrowid)
+        print(f"[MYSQL] AI season #{season_id} started (baseline ${start_capital:,.2f}).")
+        return season_id
+    except Exception as exc:
+        print(f"[MYSQL] create_season failed: {exc}")
+        return None
+
+
+def close_season(
+    season_id: int | None,
+    *,
+    end_capital: float,
+    gross_pnl_usd: float,
+    net_pnl_usd: float,
+    broker_fee_usd: float,
+    trade_count: int,
+    win_count: int,
+    loss_count: int,
+    end_reason: str | None = None,
+    ended_at: float | None = None,
+) -> None:
+    """Finalize season totals when AI automation stops."""
+    if not mysql_enabled() or not season_id:
+        return
+    try:
+        conn = _get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ai_seasons SET
+                  status='closed',
+                  end_capital=%s,
+                  gross_pnl_usd=%s,
+                  net_pnl_usd=%s,
+                  broker_fee_usd=%s,
+                  trade_count=%s,
+                  win_count=%s,
+                  loss_count=%s,
+                  ended_at=%s,
+                  end_reason=%s
+                WHERE id=%s
+                """,
+                (
+                    float(end_capital),
+                    float(gross_pnl_usd),
+                    float(net_pnl_usd),
+                    float(broker_fee_usd),
+                    int(trade_count),
+                    int(win_count),
+                    int(loss_count),
+                    float(ended_at or time.time()),
+                    (end_reason or "")[:256],
+                    int(season_id),
+                ),
+            )
+        print(
+            f"[MYSQL] AI season #{season_id} closed — "
+            f"net ${net_pnl_usd:,.2f} ({trade_count} trades)."
+        )
+    except Exception as exc:
+        print(f"[MYSQL] close_season failed: {exc}")
+
+
+def fetch_seasons(*, limit: int = 50) -> dict[str, Any]:
+    empty = {"enabled": mysql_enabled(), "ok": False, "seasons": [], "message": "MySQL not configured"}
+    if not mysql_enabled():
+        return empty
+    try:
+        conn = _get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  id, season_uid, status, start_capital, end_capital,
+                  gross_pnl_usd, net_pnl_usd, broker_fee_usd,
+                  trade_count, win_count, loss_count,
+                  started_at, ended_at, end_reason
+                FROM ai_seasons
+                ORDER BY started_at DESC
+                LIMIT %s
+                """,
+                (int(limit),),
+            )
+            rows = cur.fetchall() or []
+
+        def _f(v):
+            if v is None:
+                return None
+            if hasattr(v, "as_tuple"):
+                return float(v)
+            return v
+
+        seasons = []
+        for r in rows:
+            seasons.append({k: _f(v) if k.endswith(("_usd", "_capital", "_at")) else v for k, v in r.items()})
+        return {"enabled": True, "ok": True, "seasons": seasons, "message": "ok"}
+    except Exception as exc:
+        print(f"[MYSQL] fetch_seasons failed: {exc}")
+        empty["enabled"] = True
+        empty["message"] = str(exc)
+        return empty
 
 
 def finalize_trade(
@@ -231,6 +370,7 @@ def fetch_statement(
     offset: int = 0,
     status: str | None = None,
     pair: str | None = None,
+    season_id: int | None = None,
 ) -> dict[str, Any]:
     """Return rows + summary totals for the Trading Statement UI."""
     empty = {
@@ -261,6 +401,9 @@ def fetch_statement(
         if pair:
             where.append("pair=%s")
             params.append(pair)
+        if season_id:
+            where.append("season_id=%s")
+            params.append(int(season_id))
         wh = " AND ".join(where)
 
         with conn.cursor() as cur:
@@ -284,7 +427,7 @@ def fetch_statement(
             cur.execute(
                 f"""
                 SELECT
-                  id, bot_trade_id, username, pair, side, status, source, protected,
+                  id, bot_trade_id, season_id, username, pair, side, status, source, protected,
                   entry_price, exit_price, margin, position_size, qty,
                   entry_fee_usd, exit_fee_usd, gross_pnl_pct, gross_pnl_usd, net_pnl_usd,
                   exchange, pattern, closed_reason, opened_at, closed_at, created_at
@@ -324,6 +467,7 @@ def fetch_statement(
             "summary": summary,
             "limit": limit,
             "offset": offset,
+            "season_id": season_id,
             "message": "ok",
         }
     except Exception as exc:
