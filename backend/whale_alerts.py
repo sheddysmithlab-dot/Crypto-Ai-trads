@@ -285,15 +285,26 @@ async def fetch_whale_alerts(client: httpx.AsyncClient | None = None) -> dict[st
             await client.aclose()
 
 
-def seed_seen_from_snapshot(signals: list[dict[str, Any]]) -> int:
-    """Mark current page alerts as already-seen (avoid firing history on first poll)."""
+def seed_seen_from_snapshot(signals: list[dict[str, Any]], keep_newest: int = 1) -> int:
+    """Mark current page alerts as already-seen, except the newest N.
+
+    Leaving the newest eligible means whale can fire soon after bot start
+    instead of waiting hours for a brand-new Telegram post. Older page
+    history stays suppressed so we don't stack every historical alert.
+    """
     global _seeded_once
+    keep: set[str] = set()
+    for sig in signals[: max(0, keep_newest)]:
+        sid = sig.get("id")
+        if sid:
+            keep.add(sid)
     n = 0
     for sig in signals:
         sid = sig.get("id")
-        if sid and sid not in _seen_ids:
-            _seen_ids.add(sid)
-            n += 1
+        if not sid or sid in keep or sid in _seen_ids:
+            continue
+        _seen_ids.add(sid)
+        n += 1
     _seeded_once = True
     return n
 

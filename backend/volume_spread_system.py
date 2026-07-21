@@ -1,10 +1,11 @@
-"""Candlestick pattern entry engine — merged 38-pattern + Bible + ML fire path.
+"""Candlestick pattern entry engine — Bible patterns + volume-first fire path.
 
 Pipeline (closed bar only):
   1) Detect pattern on last candle(s)
-  2) Attach Bible section id for microsecond fetch
-  3) Score signal strength for ML cost-aware gate (main.py)
-  4) Return BUY/SELL with entry/SL/TP
+  2) Volume gate (Vol MA + expanding vs previous) — ALL patterns
+  3) Volume boosts strength score
+  4) Attach Bible section id + ML cost-aware gate (main.py)
+  5) Return BUY/SELL with entry/SL/TP
 
 Legacy Blue Box / VSA rule codes are retired. Helpers for klines, sizing,
 and chart overlay stay for main.py compatibility.
@@ -21,6 +22,27 @@ UVSS_SL_EXIT_ENABLED = False
 EMA_FAST = 50
 EMA_SLOW = 200
 BODY_AVG_PERIOD = 20
+VOLUME_MA_PERIOD = 20
+# Every pattern must clear Vol MA × this floor (volume is a first-class gate).
+VOLUME_CONFIRM_MULT = float(__import__("os").environ.get("VOLUME_CONFIRM_MULT", "1.15"))
+# Extra multiplier by setup family — all patterns use volume; weak shapes need more.
+VOLUME_SETUP_MULT: dict[str, float] = {
+    "pin_bar": 1.25,
+    "doji": 1.25,
+    "harami": 1.3,
+    "tweezer": 1.2,
+    "inside_bar": 1.2,
+    # Engulfing needs real participation — weak mid-trend "engulfs" are traps.
+    "engulfing": 1.25,
+    "star": 1.2,
+    "pierce": 1.2,
+    "belt": 1.15,
+    "marubozu": 1.1,
+    "soldiers": 1.15,
+    "crows": 1.15,
+}
+# Also require signal vol ≥ previous bar × this (participation expanding).
+VOLUME_VS_PREV_MULT = float(__import__("os").environ.get("VOLUME_VS_PREV_MULT", "1.05"))
 TREND_LOOKBACK = 5
 MIN_CANDLES = max(EMA_SLOW + BODY_AVG_PERIOD + 5, 60)
 RISK_PCT_PER_TRADE = 0.01
@@ -208,13 +230,14 @@ def _midpoint(c: dict) -> float:
 
 
 def _is_pin_bull(c: dict) -> bool:
+    # Mildly stricter than before — need a real rejection wick, not every tiny hammer.
     body, upper, lower, rng = _body(c), _upper_wick(c), _lower_wick(c), _range(c)
-    return lower >= body * 1.3 and lower >= rng * 0.4 and upper <= body * 1.4
+    return lower >= body * 1.6 and lower >= rng * 0.5 and upper <= body * 1.1
 
 
 def _is_pin_bear(c: dict) -> bool:
     body, upper, lower, rng = _body(c), _upper_wick(c), _lower_wick(c), _range(c)
-    return upper >= body * 1.3 and upper >= rng * 0.4 and lower <= body * 1.4
+    return upper >= body * 1.6 and upper >= rng * 0.5 and lower <= body * 1.1
 
 
 def _is_marubozu(c: dict, candles: list[dict]) -> bool:
@@ -226,16 +249,140 @@ def _is_marubozu(c: dict, candles: list[dict]) -> bool:
 
 
 def _engulfs(outer: dict, inner: dict) -> bool:
-    """Outer body covers inner body (near-engulf allowed — 95% cover)."""
+    """Bible / Nison: second real body must ENTIRELY cover the first real body.
+
+    Previous loose 95% cover let tiny red bars 'engulf' larger greens mid-trend
+    and fire false BEAR_ENGULF shorts (classic impulse trap).
+    """
     o_hi = max(outer["open"], outer["close"])
     o_lo = min(outer["open"], outer["close"])
     i_hi = max(inner["open"], inner["close"])
     i_lo = min(inner["open"], inner["close"])
-    inner_body = max(i_hi - i_lo, 1e-12)
-    cover = min(o_hi, i_hi) - max(o_lo, i_lo)
-    return cover >= inner_body * 0.95 and _body(outer) >= _body(inner) * 0.9
+    if _body(outer) <= _body(inner):
+        return False
+    # Full body enclosure (no near-miss).
+    return o_hi >= i_hi and o_lo <= i_lo
 
 
+def _engulf_close_conviction(action: str, candle: dict) -> bool:
+    """Sellers/buyers must finish in control of the bar (Bible psychology)."""
+    r = _range(candle)
+    if r <= 0:
+        return False
+    if action == "SELL":
+        # Close in lower 45% of the range — not a weak mid-bar fade.
+        return candle["close"] <= candle["low"] + r * 0.45
+    # BUY: close in upper 45%
+    return candle["close"] >= candle["high"] - r * 0.45
+
+
+def _engulf_trend_gate(
+    action: str,
+    trend: str | None,
+    local: str | None,
+    candles: list[dict],
+    signal: dict,
+) -> tuple[bool, str]:
+    """Bible: 'the trend should be your best friend' + MA pullback strategy.
+
+    With-trend engulfing (continuation / pullback) is preferred.
+    Counter-trend reversal only as exhaustion — never mid-impulse above
+    stacked MAs (the trap in the BEAR_ENGULF screenshot).
+    """
+    avg = max(_avg_body(candles), 1e-12)
+    body = _body(signal)
+    closes = [c["close"] for c in candles]
+    ema8 = compute_ema(closes, 8)
+    ema21 = compute_ema(closes, 21)
+
+    if action == "SELL":
+        # With-trend short — PDF: sell in downtrend / on MA resistance.
+        if trend == "downtrend":
+            if _is_impulse_chase("SELL", candles):
+                return False, "downtrend_chase_blocked"
+            return True, "with_trend_down"
+        if trend == "range" and local in ("down", "flat", None):
+            if body >= avg * 1.0 and _engulf_close_conviction("SELL", signal):
+                return True, "range_bear"
+            return False, "weak_range_bear_engulf"
+        # Counter-trend short into uptrend — ONLY exhaustion.
+        if trend == "uptrend" or local == "up":
+            # Must be a decisive engulf (large body) that breaks the fast MA.
+            body_ok = body >= avg * 1.4
+            broke_ema8 = ema8 is not None and signal["close"] < ema8
+            # Prefer rejection near extended stretch above ema21, then reclaim.
+            was_extended = (
+                ema21 is not None
+                and len(candles) >= 2
+                and candles[-2]["high"] >= ema21 * 1.006
+            )
+            close_ok = _engulf_close_conviction("SELL", signal)
+            if body_ok and broke_ema8 and close_ok and was_extended:
+                return True, "exhaustion_bear_reversal"
+            return False, "counter_trend_bear_trap_blocked"
+        return False, "bear_engulf_no_context"
+
+    # BUY / bull engulf
+    if trend == "uptrend":
+        if _is_impulse_chase("BUY", candles):
+            return False, "uptrend_chase_blocked"
+        return True, "with_trend_up"
+    if trend == "range" and local in ("up", "flat", None):
+        if body >= avg * 1.0 and _engulf_close_conviction("BUY", signal):
+            return True, "range_bull"
+        return False, "weak_range_bull_engulf"
+    if trend == "downtrend" or local == "down":
+        body_ok = body >= avg * 1.4
+        broke_ema8 = ema8 is not None and signal["close"] > ema8
+        was_extended = (
+            ema21 is not None
+            and len(candles) >= 2
+            and candles[-2]["low"] <= ema21 * 0.994
+        )
+        close_ok = _engulf_close_conviction("BUY", signal)
+        if body_ok and broke_ema8 and close_ok and was_extended:
+            return True, "exhaustion_bull_reversal"
+        return False, "counter_trend_bull_trap_blocked"
+    return False, "bull_engulf_no_context"
+
+
+def _is_impulse_chase(action: str, candles: list[dict]) -> bool:
+    """Bible (trending_markets + engulfing_ma): price far from MA = overbought/oversold.
+
+    Buying THREE_WHITE / marubozu after a vertical spike = buying the END of the
+    impulsive move (professionals take profit there — classic bull trap).
+    """
+    closes = [c["close"] for c in candles]
+    ema8 = compute_ema(closes, 8)
+    ema21 = compute_ema(closes, 21)
+    if ema8 is None or ema21 is None:
+        return False
+    close = float(candles[-1]["close"])
+    if action == "BUY":
+        # Stretched above both fast + mid MA → chase / end-of-impulse.
+        return close >= ema21 * 1.003 and close >= ema8 * 1.0015
+    if action == "SELL":
+        return close <= ema21 * 0.997 and close <= ema8 * 0.9985
+    return False
+
+
+def _soldiers_after_pullback(candles: list[dict], avg: float) -> bool:
+    """Three White/Black only valid near start of impulse (after pullback / at MA).
+
+    PDF: buy beginning of impulsive move — not after 3 greens already mid-air.
+    """
+    if len(candles) < 5:
+        return False
+    first = candles[-3]  # first of the three soldiers
+    pre = candles[-4]
+    closes = [c["close"] for c in candles]
+    ema21 = compute_ema(closes, 21)
+    pullback_bar = _is_red(pre) or _body(pre) <= avg * 0.65
+    near_ma = (
+        ema21 is not None
+        and abs(float(first["open"]) - ema21) / max(ema21, 1e-12) <= 0.0045
+    )
+    return bool(pullback_bar or near_ma)
 def compute_ema(closes: list[float], length: int) -> float | None:
     if len(closes) < length:
         return None
@@ -251,6 +398,83 @@ def _avg_body(candles: list[dict], period: int = BODY_AVG_PERIOD) -> float:
     if not window:
         return 0.0
     return sum(_body(c) for c in window) / len(window)
+
+
+def _volume_ma(candles: list[dict], period: int = VOLUME_MA_PERIOD) -> float | None:
+    """SMA of volume on the bars *before* the signal candle (matches chart Vol MA feel)."""
+    if len(candles) < period + 1:
+        return None
+    window = candles[-(period + 1) : -1]
+    if not window:
+        return None
+    return sum(float(c.get("volume") or 0.0) for c in window) / len(window)
+
+
+def volume_confirm(
+    candles: list[dict],
+    *,
+    setup: str | None = None,
+) -> tuple[bool, dict]:
+    """Volume is required for EVERY pattern — Vol MA + vs previous bar.
+
+    Quiet bars (below MA / shrinking volume) never fire, regardless of shape.
+    """
+    signal = candles[-1]
+    prev = candles[-2] if len(candles) >= 2 else None
+    vol = float(signal.get("volume") or 0.0)
+    prev_vol = float(prev.get("volume") or 0.0) if prev else 0.0
+    vol_ma = _volume_ma(candles)
+    setup_key = (setup or "").strip() or "default"
+    setup_mult = float(VOLUME_SETUP_MULT.get(setup_key, VOLUME_CONFIRM_MULT))
+    # Never softer than the global floor.
+    mult = max(VOLUME_CONFIRM_MULT, setup_mult)
+    ratio = (vol / vol_ma) if vol_ma and vol_ma > 0 else None
+    vs_prev = (vol / prev_vol) if prev_vol > 0 else None
+    info = {
+        "volume": round(vol, 4),
+        "volume_ma": round(vol_ma, 4) if vol_ma is not None else None,
+        "volume_prev": round(prev_vol, 4),
+        "volume_mult_required": mult,
+        "volume_vs_prev_required": VOLUME_VS_PREV_MULT,
+        "volume_ratio": round(ratio, 4) if ratio is not None else None,
+        "volume_vs_prev": round(vs_prev, 4) if vs_prev is not None else None,
+        "setup": setup_key,
+    }
+    if vol_ma is None or vol_ma <= 0:
+        return False, {**info, "ok": False, "reason": "Volume MA unavailable — no trade without volume context"}
+    if vol <= 0:
+        return False, {**info, "ok": False, "reason": "Zero volume bar — pattern ignored"}
+    if vol < vol_ma * mult:
+        return False, {
+            **info,
+            "ok": False,
+            "reason": (
+                f"Volume {vol:.2f} < MA{VOLUME_MA_PERIOD}×{mult:.2f} "
+                f"({vol_ma * mult:.2f}) — {setup_key or 'pattern'} needs participation"
+            ),
+        }
+    if prev_vol > 0 and vol < prev_vol * VOLUME_VS_PREV_MULT:
+        return False, {
+            **info,
+            "ok": False,
+            "reason": (
+                f"Volume {vol:.2f} < prev×{VOLUME_VS_PREV_MULT:.2f} "
+                f"({prev_vol * VOLUME_VS_PREV_MULT:.2f}) — shrinking volume, skip"
+            ),
+        }
+    return True, {**info, "ok": True, "reason": "Volume confirmed (MA + expanding)"}
+
+
+def volume_strength_boost(vol_info: dict) -> float:
+    """Map volume quality into extra pattern strength (all setups)."""
+    ratio = float(vol_info.get("volume_ratio") or 0.0)
+    vs_prev = float(vol_info.get("volume_vs_prev") or 0.0)
+    if ratio <= 0:
+        return 0.0
+    # 1.15×MA → ~0, 2×MA → ~0.55, cap 1.0
+    boost_ma = max(0.0, min((ratio - 1.0) * 0.65, 1.0))
+    boost_prev = max(0.0, min((vs_prev - 1.0) * 0.35, 0.4)) if vs_prev else 0.0
+    return round(boost_ma + boost_prev, 4)
 
 
 def _trend_state(candles: list[dict], close: float) -> tuple[str | None, float | None, float | None]:
@@ -382,28 +606,43 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
     avg = max(_avg_body(candles), 1e-12)
     strength_base = min(_body(c0) / avg, 3.0)
     hits: list[dict] = []
-    # Reversal context: prefer counter-trend, but still allow flat / unknown.
-    # Against-local setups still fire at slightly lower strength (looser mode).
-    bull_ctx = local in ("down", "flat", None)
-    bear_ctx = local in ("up", "flat", None)
+    # Bible: with-trend setups are highest quality ("trend is your friend").
+    bull_with_trend = trend == "uptrend" or local == "up"
+    bear_with_trend = trend == "downtrend" or local == "down"
 
-    # --- Engulfing (Bible core) ---
-    if _is_red(c1) and _is_green(c0) and _engulfs(c0, c1):
-        s = strength_base + (0.5 if bull_ctx else 0.25)
-        hits.append(_hit("BULL_ENGULF", "BUY", c0, strength=s, setup="engulfing"))
-    if _is_green(c1) and _is_red(c0) and _engulfs(c0, c1):
-        s = strength_base + (0.5 if bear_ctx else 0.25)
-        hits.append(_hit("BEAR_ENGULF", "SELL", c0, strength=s, setup="engulfing"))
+    # --- Engulfing (Bible core) — strict body + trend gate (anti mid-impulse trap) ---
+    if _is_red(c1) and _is_green(c0) and _engulfs(c0, c1) and _engulf_close_conviction("BUY", c0):
+        ok, why = _engulf_trend_gate("BUY", trend, local, candles, c0)
+        if ok:
+            s = strength_base + (0.55 if bull_with_trend else 0.2)
+            if why.startswith("exhaustion"):
+                s += 0.15
+            hits.append(_hit("BULL_ENGULF", "BUY", c0, strength=s, setup="engulfing"))
+    if _is_green(c1) and _is_red(c0) and _engulfs(c0, c1) and _engulf_close_conviction("SELL", c0):
+        ok, why = _engulf_trend_gate("SELL", trend, local, candles, c0)
+        if ok:
+            s = strength_base + (0.55 if bear_with_trend else 0.2)
+            if why.startswith("exhaustion"):
+                s += 0.15
+            hits.append(_hit("BEAR_ENGULF", "SELL", c0, strength=s, setup="engulfing"))
 
     # --- Pin / Hammer / Shooting Star ---
     if _is_pin_bull(c0):
         code = "HAMMER" if _is_green(c0) or _body(c0) <= _range(c0) * 0.4 else "PIN_BULL"
-        s = strength_base + (0.4 if bull_ctx else 0.2)
-        hits.append(_hit(code, "BUY", c0, strength=s, setup="pin_bar"))
+        s = strength_base + (0.4 if (trend == "downtrend" or local == "down") else 0.15)
+        # Pin reversals against a strong with-trend impulse get reduced priority later via strength.
+        if not (trend == "uptrend" and local == "up"):
+            hits.append(_hit(code, "BUY", c0, strength=s, setup="pin_bar"))
+        elif _body(c0) >= avg * 0.5:
+            hits.append(_hit(code, "BUY", c0, strength=s * 0.7, setup="pin_bar"))
     if _is_pin_bear(c0):
         code = "SHOOTING_STAR" if _is_red(c0) or _body(c0) <= _range(c0) * 0.4 else "PIN_BEAR"
-        s = strength_base + (0.4 if bear_ctx else 0.2)
-        hits.append(_hit(code, "SELL", c0, strength=s, setup="pin_bar"))
+        s = strength_base + (0.4 if (trend == "uptrend" or local == "up") else 0.15)
+        # Block weak shooting stars mid strong uptrend (same trap family as false bear engulf).
+        if trend == "uptrend" and local == "up" and _body(c0) < avg * 1.1:
+            pass  # skip — fade into impulse
+        else:
+            hits.append(_hit(code, "SELL", c0, strength=s, setup="pin_bar"))
 
     # --- Morning / Evening Star ---
     if (
@@ -412,7 +651,7 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
         and _is_green(c0)
         and c0["close"] > _midpoint(c2)
     ):
-        s = strength_base + (0.6 if bull_ctx else 0.3)
+        s = strength_base + (0.6 if (trend != "uptrend") else 0.25)
         hits.append(_hit("MORNING_STAR", "BUY", c0, strength=s, setup="star"))
     if (
         _is_green(c2)
@@ -420,8 +659,12 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
         and _is_red(c0)
         and c0["close"] < _midpoint(c2)
     ):
-        s = strength_base + (0.6 if bear_ctx else 0.3)
-        hits.append(_hit("EVENING_STAR", "SELL", c0, strength=s, setup="star"))
+        # Evening star into strong uptrend without size = trap — require body.
+        if trend == "uptrend" and local == "up" and _body(c0) < avg * 1.2:
+            pass
+        else:
+            s = strength_base + (0.6 if bear_with_trend else 0.25)
+            hits.append(_hit("EVENING_STAR", "SELL", c0, strength=s, setup="star"))
 
     # --- Piercing / Dark Cloud ---
     if (
@@ -439,13 +682,17 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
         and c0["close"] < _midpoint(c1)
         and c0["close"] > c1["open"]
     ):
-        hits.append(_hit("DARK_CLOUD", "SELL", c0, strength=strength_base + 0.3, setup="pierce"))
+        if not (trend == "uptrend" and local == "up" and _body(c0) < avg * 1.15):
+            hits.append(_hit("DARK_CLOUD", "SELL", c0, strength=strength_base + 0.3, setup="pierce"))
 
     # --- Harami ---
     if _is_red(c1) and _is_green(c0) and _engulfs(c1, c0) and _body(c0) < _body(c1) * 0.75:
-        hits.append(_hit("BULL_HARAMI", "BUY", c0, strength=strength_base, setup="harami"))
+        if trend != "downtrend" or local != "up":
+            hits.append(_hit("BULL_HARAMI", "BUY", c0, strength=strength_base, setup="harami"))
     if _is_green(c1) and _is_red(c0) and _engulfs(c1, c0) and _body(c0) < _body(c1) * 0.75:
-        hits.append(_hit("BEAR_HARAMI", "SELL", c0, strength=strength_base, setup="harami"))
+        # Harami is weak — never fade a clear uptrend with it (trap family).
+        if trend != "uptrend":
+            hits.append(_hit("BEAR_HARAMI", "SELL", c0, strength=strength_base, setup="harami"))
 
     # --- Inside bar break (Bible strategy) ---
     # Mother = c2, inside = c1, break = c0
@@ -465,27 +712,34 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
     if abs(c0["low"] - c1["low"]) <= low_tol and _is_red(c1) and _is_green(c0):
         hits.append(_hit("TWEEZER_BOT", "BUY", c0, strength=strength_base + 0.2, setup="tweezer"))
     if abs(c0["high"] - c1["high"]) <= high_tol and _is_green(c1) and _is_red(c0):
-        hits.append(_hit("TWEEZER_TOP", "SELL", c0, strength=strength_base + 0.2, setup="tweezer"))
+        if trend != "uptrend":
+            hits.append(_hit("TWEEZER_TOP", "SELL", c0, strength=strength_base + 0.2, setup="tweezer"))
 
     # --- Doji extremes ---
     if _is_doji(c0) and _lower_wick(c0) >= _range(c0) * 0.55 and _upper_wick(c0) <= _range(c0) * 0.15:
         hits.append(_hit("DRAGONFLY", "BUY", c0, strength=max(strength_base, 0.8), setup="doji"))
     if _is_doji(c0) and _upper_wick(c0) >= _range(c0) * 0.55 and _lower_wick(c0) <= _range(c0) * 0.15:
-        hits.append(_hit("GRAVESTONE", "SELL", c0, strength=max(strength_base, 0.8), setup="doji"))
+        if not (trend == "uptrend" and local == "up"):
+            hits.append(_hit("GRAVESTONE", "SELL", c0, strength=max(strength_base, 0.8), setup="doji"))
 
     # --- Three soldiers / crows ---
-    if len(candles) >= 4:
+    # PDF: enter at START of impulse. Mid-spike THREE_WHITE = bull trap (buy the top).
+    if len(candles) >= 5:
         a, b, d = candles[-3], candles[-2], candles[-1]
         if (
             _is_green(a) and _is_green(b) and _is_green(d)
             and d["close"] > b["close"] > a["close"]
             and _body(a) > avg * 0.55 and _body(b) > avg * 0.55 and _body(d) > avg * 0.55
+            and _soldiers_after_pullback(candles, avg)
+            and not _is_impulse_chase("BUY", candles)
         ):
             hits.append(_hit("THREE_WHITE", "BUY", d, strength=strength_base + 0.35, setup="soldiers"))
         if (
             _is_red(a) and _is_red(b) and _is_red(d)
             and d["close"] < b["close"] < a["close"]
             and _body(a) > avg * 0.55 and _body(b) > avg * 0.55 and _body(d) > avg * 0.55
+            and _soldiers_after_pullback(candles, avg)
+            and not _is_impulse_chase("SELL", candles)
         ):
             hits.append(_hit("THREE_BLACK", "SELL", d, strength=strength_base + 0.35, setup="crows"))
 
@@ -495,6 +749,7 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
         and _lower_wick(c0) <= _body(c0) * 0.08
         and _body(c0) >= avg * 1.0
         and local == "down"
+        and not _is_impulse_chase("BUY", candles)
     ):
         hits.append(_hit("BULL_BELT", "BUY", c0, strength=strength_base + 0.2, setup="belt"))
     if (
@@ -502,14 +757,16 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
         and _upper_wick(c0) <= _body(c0) * 0.08
         and _body(c0) >= avg * 1.0
         and local == "up"
+        and not _is_impulse_chase("SELL", candles)
     ):
         hits.append(_hit("BEAR_BELT", "SELL", c0, strength=strength_base + 0.2, setup="belt"))
 
     # --- Marubozu continuation (with clear trend only) ---
+    # Block when already stretched from MA — chasing the end of the impulse.
     if _is_marubozu(c0, candles):
-        if trend == "uptrend" and _is_green(c0):
+        if trend == "uptrend" and _is_green(c0) and not _is_impulse_chase("BUY", candles):
             hits.append(_hit("MBZ_L", "BUY", c0, strength=strength_base + 0.3, setup="marubozu"))
-        if trend == "downtrend" and _is_red(c0):
+        if trend == "downtrend" and _is_red(c0) and not _is_impulse_chase("SELL", candles):
             hits.append(_hit("MBZ_S", "SELL", c0, strength=strength_base + 0.3, setup="marubozu"))
 
     return hits
@@ -582,8 +839,44 @@ def evaluate_uvss(
         for h in hits
     ]
 
-    best = _pick_best(hits)
+    # Volume is mandatory for every pattern candidate — quiet bars never compete.
+    volume_passed: list[dict] = []
+    volume_rejects: list[dict] = []
+    for h in hits:
+        ok, vinfo = volume_confirm(candles, setup=h.get("setup"))
+        if ok:
+            boost = volume_strength_boost(vinfo)
+            volume_passed.append({
+                **h,
+                "strength": round(float(h["strength"]) + boost, 4),
+                "volume_boost": boost,
+                "vol_info": vinfo,
+            })
+        else:
+            volume_rejects.append({
+                "pattern": h["pattern"],
+                "setup": h.get("setup"),
+                "reason": vinfo.get("reason"),
+                "volume_ratio": vinfo.get("volume_ratio"),
+            })
+    diagnostics["volume_rejects"] = volume_rejects[:8]
+
+    best = _pick_best(volume_passed)
     if best is None:
+        if hits and not volume_passed:
+            top = hits[0]
+            _, vinfo = volume_confirm(candles, setup=top.get("setup"))
+            diagnostics["volume_gate"] = vinfo
+            diagnostics["volume"] = vinfo.get("volume", diagnostics["volume"])
+            diagnostics["volume_ma"] = vinfo.get("volume_ma")
+            return {
+                "action": "NO_TRADE",
+                "reason": vinfo.get("reason") or "All patterns failed volume gate",
+                "pattern": top.get("pattern"),
+                "setup": top.get("setup"),
+                "strength": top.get("strength"),
+                **diagnostics,
+            }
         if hits:
             return {
                 "action": "NO_TRADE",
@@ -609,17 +902,27 @@ def evaluate_uvss(
 
     entry_px, sl, tp = prices
     risk_dist = abs(entry_px - sl)
-    # ML magnitude proxy: pattern strength × candle range (paper: |forecast| vs cost)
-    signal_magnitude = round(float(best["strength"]) * max(candle_range_pct, 0.01), 4)
+    vol_info = best.get("vol_info") or {}
+    vol_boost = float(best.get("volume_boost") or 0.0)
+    strength = float(best["strength"])
+    # ML magnitude proxy: volume-boosted strength × candle range
+    signal_magnitude = round(strength * max(candle_range_pct, 0.01), 4)
 
     diagnostics["long_rules"] = [pattern] if action == "BUY" else []
     diagnostics["short_rules"] = [pattern] if action == "SELL" else []
     diagnostics["rules_fired"] = [pattern]
+    diagnostics["volume_gate"] = vol_info
+    diagnostics["volume"] = vol_info.get("volume", diagnostics["volume"])
+    diagnostics["volume_ma"] = vol_info.get("volume_ma")
 
     return {
         "action": action,
         "pattern": pattern,
-        "reason": f"{best['label']} · trend={trend} · local={local} · strength={best['strength']}",
+        "reason": (
+            f"{best['label']} · trend={trend} · local={local} · "
+            f"strength={strength} · vol={vol_info.get('volume_ratio')}×MA "
+            f"(+{vol_boost} vol) · vsPrev={vol_info.get('volume_vs_prev')}"
+        ),
         "setup": best.get("setup"),
         "size_mult": rr,
         "target_mult": rr,
@@ -627,7 +930,8 @@ def evaluate_uvss(
         "sl": sl,
         "tp": tp,
         "risk_distance": round(risk_dist, 6),
-        "strength": best["strength"],
+        "strength": strength,
+        "volume_boost": vol_boost,
         "signal_magnitude": signal_magnitude,
         "bible_key": best.get("bible_key"),
         "ml_gate": "cost_aware",

@@ -5,10 +5,10 @@ import os
 
 from timeframe_rules import TIMEFRAME_RULES
 
-# Mid strictness: between loose spam (λ~0.25, abs~0) and tight (λ=1.0, abs=0.02).
-_DEFAULT_LAMBDA = 0.55
-_DEFAULT_MIN_CANDLE_RANGE = 0.15
-_DEFAULT_ABS_MIN_RANGE_PCT = 0.01
+# Mildly stricter than ultra-loose: filters flat noise while still allowing 1m trades.
+_DEFAULT_LAMBDA = 0.7
+_DEFAULT_MIN_CANDLE_RANGE = 0.2
+_DEFAULT_ABS_MIN_RANGE_PCT = 0.015
 
 
 def _env_bool(name: str, default: bool) -> bool:
