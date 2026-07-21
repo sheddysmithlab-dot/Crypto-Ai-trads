@@ -665,7 +665,7 @@ class AITradingAgent:
         # Active chart/engine focus pair (UI). Auto-scan uses `watchlist` (minimized
         # launcher coins). Each trade is marked with its OWN pair price.
         self.active_pair = "BTC/USDT"
-        self.watchlist: list[str] = []  # max 5 — launcher minimized coins
+        self.watchlist: list[str] = []  # launcher minimized coins (all mapped pairs allowed)
         self.pair_prices: dict[str, float] = {"BTC/USDT": self.current_price}
         self.trade_seq = 0
         self.trades = []  # list of {id, pair, side, entry, margin, position_size, entry_fee_usd}
@@ -674,7 +674,8 @@ class AITradingAgent:
         # Chart timeframe — shared by all watchlist pairs in auto_buy_loop().
         self.timeframe_seconds = 60
 
-    MAX_WATCHLIST = 5
+    # Cap = every mapped Bybit pair (frontend TRADING_PAIRS / BYBIT_SYMBOL_MAP).
+    MAX_WATCHLIST = 32
 
     def get_scan_pairs(self) -> list[str]:
         """Pairs the AI scans for patterns + fires on. Watchlist first; else chart pair."""
@@ -693,7 +694,7 @@ class AITradingAgent:
         return []
 
     def set_watchlist(self, pairs: list[str] | None) -> list[str]:
-        """Replace scan watchlist (launcher minimized coins). Max 5 valid Bybit pairs."""
+        """Replace scan watchlist (launcher minimized coins). All mapped Bybit pairs allowed."""
         cleaned: list[str] = []
         seen: set[str] = set()
         for raw in pairs or []:
@@ -3274,7 +3275,7 @@ class SetWatchlistPayload(BaseModel):
 
 @app.post("/set-watchlist")
 async def set_watchlist(payload: SetWatchlistPayload):
-    """Set AI multi-pair scan list (launcher minimized coins, max 5).
+    """Set AI multi-pair scan list (launcher minimized coins — all mapped pairs).
 
     When empty, the engine falls back to the active chart pair only.
     """

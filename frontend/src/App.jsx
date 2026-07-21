@@ -10,6 +10,7 @@ import { usePortfolio } from './hooks/usePortfolio';
 import { useTradingChart } from './hooks/useTradingChart';
 import { useUptime } from './hooks/useUptime';
 import { useDayStats } from './hooks/useDayStats';
+import { useTfMoveStats } from './hooks/useTfMoveStats';
 
 import Header from './components/Header';
 import MobilePortfolioCard from './components/MobilePortfolioCard';
@@ -25,6 +26,36 @@ import TradeExitConfirmModal from './components/TradeExitConfirmModal';
 import SystemLogModal from './components/SystemLogModal';
 import AgentChatStrip from './components/AgentChatStrip';
 import TradingStatementModal from './components/TradingStatementModal';
+import { MAX_LAUNCHER_SLOTS } from './components/TradeLauncherPopup';
+
+const LAUNCHER_SLOTS_KEY = 'ai_trading_bot_launcher_slots';
+
+function readSavedLauncherSlots() {
+  try {
+    const raw = localStorage.getItem(LAUNCHER_SLOTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((s) => s && typeof s.symbol === 'string' && s.symbol.trim())
+      .slice(0, MAX_LAUNCHER_SLOTS)
+      .map((s, i) => ({
+        id: String(s.id || `${s.symbol}-${i}`),
+        symbol: String(s.symbol).trim().toUpperCase(),
+        timeframe: String(s.timeframe || '1M').toUpperCase(),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function persistLauncherSlots(slots) {
+  try {
+    localStorage.setItem(LAUNCHER_SLOTS_KEY, JSON.stringify(slots || []));
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
 
 export default function App() {
   const { logout, username } = useAuth();
@@ -45,6 +76,9 @@ export default function App() {
   const [systemLogs, setSystemLogs] = useState(null);
   const [actionLogs, setActionLogs] = useState([]);
   const [exitConfirm, setExitConfirm] = useState({ open: false, type: null, tradeId: null });
+  const [launcherSlots, setLauncherSlots] = useState(() => readSavedLauncherSlots());
+  const [launcherEditorOpen, setLauncherEditorOpen] = useState(false);
+  const [launcherEditingId, setLauncherEditingId] = useState(null);
 
   const portfolio = usePortfolio(setConnected);
 
@@ -93,6 +127,47 @@ export default function App() {
     blueBoxOverlay: portfolio.blueBoxOverlay,
     entryCandles,
   });
+  const tfMoveStats = useTfMoveStats(pairSelector.activePairLabel, timeframe);
+
+  // Persist docked launcher chips across reloads.
+  useEffect(() => {
+    persistLauncherSlots(launcherSlots);
+  }, [launcherSlots]);
+
+  // On load: restore chips + re-sync backend watchlist (backend is in-memory).
+  useEffect(() => {
+    let cancelled = false;
+
+    async function hydrateLauncher() {
+      const saved = readSavedLauncherSlots();
+      if (saved.length) {
+        if (!cancelled) setLauncherSlots(saved);
+        await syncWatchlist(saved);
+        return;
+      }
+      try {
+        const res = await authFetch('/watchlist');
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        const pairs = Array.isArray(data.watchlist) ? data.watchlist : [];
+        if (!pairs.length || cancelled) return;
+        const slots = pairs.slice(0, MAX_LAUNCHER_SLOTS).map((pair, i) => {
+          const symbol = String(pair).split('/')[0].toUpperCase();
+          return { id: `${symbol}-restored-${i}`, symbol, timeframe: '1M' };
+        });
+        setLauncherSlots(slots);
+        persistLauncherSlots(slots);
+      } catch (err) {
+        console.warn('Launcher hydrate from watchlist failed:', err);
+      }
+    }
+
+    hydrateLauncher();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function pushActionLog(message) {
     setActionLogs((prev) => [
@@ -178,6 +253,7 @@ export default function App() {
         return;
       }
       pushActionLog(`Agent config applied. max_concurrent_trades=${configData.max_concurrent_trades}`);
+      await syncWatchlist(launcherSlots);
       const res = await authFetch('/start-bot', { method: 'POST' });
       const data = await res.json();
       debugLog('Bot started successfully:', data.message);
@@ -209,6 +285,50 @@ export default function App() {
     } catch (err) {
       console.error('Force close failed:', err);
     }
+  }
+
+  async function syncWatchlist(slots) {
+    const pairs = (slots || []).map((s) => `${s.symbol}/USDT`);
+    try {
+      const res = await authFetch('/set-watchlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pairs }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.status === 'success') {
+        pushActionLog(
+          `AI watchlist synced: ${(data.scan_pairs || pairs).join(', ') || 'chart pair only'}`,
+        );
+        debugLog('Watchlist synced →', data.scan_pairs || pairs);
+      } else {
+        console.warn('Watchlist sync failed:', data.message || data);
+      }
+    } catch (err) {
+      console.warn('Watchlist sync error:', err);
+    }
+  }
+
+  function handleLauncherMinimizeToSlot({ id, symbol, timeframe: tf }) {
+    if (portfolio.isActive) return;
+    let nextSlots = null;
+    setLauncherSlots((prev) => {
+      const sameSymbol = prev.find((s) => s.symbol === symbol);
+      if (id && prev.some((s) => s.id === id)) {
+        nextSlots = prev.map((s) => (s.id === id ? { ...s, symbol, timeframe: tf } : s));
+      } else if (sameSymbol) {
+        nextSlots = prev.map((s) => (s.symbol === symbol ? { ...s, timeframe: tf } : s));
+      } else if (prev.length >= MAX_LAUNCHER_SLOTS) {
+        window.alert(`Maximum ${MAX_LAUNCHER_SLOTS} coins in the minimize list.`);
+        nextSlots = prev;
+      } else {
+        nextSlots = [...prev, { id: `${symbol}-${Date.now()}`, symbol, timeframe: tf }];
+      }
+      return nextSlots;
+    });
+    setLauncherEditorOpen(false);
+    setLauncherEditingId(null);
+    if (nextSlots) syncWatchlist(nextSlots);
   }
 
   async function handleManualBuy() {
@@ -304,6 +424,9 @@ export default function App() {
         tradingMode={portfolio.tradingMode}
         dayHigh={dayStats.high}
         dayLow={dayStats.low}
+        tfMovePct={tfMoveStats.avgPct}
+        tfMoveLabel={tfMoveStats.windowLabel}
+        chartTimeframe={timeframe}
         notifications={notifications}
         unreadCount={unreadCount}
         markAllRead={markAllRead}
@@ -337,8 +460,45 @@ export default function App() {
           switchTimeframe={switchTimeframe}
           readouts={readouts}
           botIsActive={portfolio.isActive}
+          tfMovePct={tfMoveStats.avgPct}
+          tfMoveLabel={tfMoveStats.windowLabel}
+          launcher={{
+            slots: launcherSlots,
+            editorOpen: launcherEditorOpen,
+            editingId: launcherEditingId,
+            onOpenNew: () => {
+              if (portfolio.isActive) return;
+              if (launcherSlots.length >= MAX_LAUNCHER_SLOTS) {
+                window.alert(`Maximum ${MAX_LAUNCHER_SLOTS} coins in the minimize list.`);
+                return;
+              }
+              setLauncherEditingId(null);
+              setLauncherEditorOpen(true);
+            },
+            onCloseEditor: () => {
+              setLauncherEditorOpen(false);
+              setLauncherEditingId(null);
+            },
+            onMinimizeToSlot: handleLauncherMinimizeToSlot,
+            onRestoreSlot: (id) => {
+              if (portfolio.isActive) return;
+              setLauncherEditingId(id);
+              setLauncherEditorOpen(true);
+            },
+            onRemoveSlot: (id) => {
+              if (portfolio.isActive) return;
+              setLauncherSlots((prev) => {
+                const next = prev.filter((s) => s.id !== id);
+                syncWatchlist(next);
+                return next;
+              });
+              if (launcherEditingId === id) {
+                setLauncherEditorOpen(false);
+                setLauncherEditingId(null);
+              }
+            },
+          }}
         />
-
         <AgentChatStrip isActive={portfolio.isActive} lines={portfolio.agentChat} />
 
         <LiveTradesPanel
