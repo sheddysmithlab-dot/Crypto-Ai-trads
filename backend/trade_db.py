@@ -18,7 +18,11 @@ _pool = None  # lazy pymysql connection (single; Hostinger shared plans are fine
 
 
 def _env(name: str, default: str = "") -> str:
-    return (os.environ.get(name) or default).strip()
+    raw = (os.environ.get(name) or default).strip()
+    # Docker/.env sometimes keeps wrapping quotes around values with # / spaces.
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        return raw[1:-1]
+    return raw
 
 
 def mysql_enabled() -> bool:
