@@ -6,12 +6,14 @@ There is **no** MySQL container on the VPS.
 ## backend/.env
 ```
 MYSQL_ENABLED=true
-MYSQL_HOST=auth-db1688.hstgr.io
+MYSQL_HOST=srv1668.hstgr.io
 MYSQL_PORT=3306
 MYSQL_USER=u808821982_aitrads
 MYSQL_PASSWORD=<from hPanel>
 MYSQL_DATABASE=u808821982_aitrads
 ```
+
+Hostname can also be IP `193.203.184.165`. Do **not** use `auth-db1688.hstgr.io` (wrong host → access denied).
 
 ## Required once in hPanel
 Databases → Remote MySQL → allow the VPS public IP (e.g. `200.97.171.119`).
