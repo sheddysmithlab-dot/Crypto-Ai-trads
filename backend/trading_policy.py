@@ -1,14 +1,14 @@
-"""Cost-aware entry/exit helpers — ON by default, loosened for flat 1m BTC."""
+"""Cost-aware entry/exit helpers — ON by default (PDF / AGENT_STRATEGY discipline)."""
 from __future__ import annotations
 
 import os
 
 from timeframe_rules import TIMEFRAME_RULES
 
-# Mildly stricter than ultra-loose: filters flat noise while still allowing 1m trades.
-_DEFAULT_LAMBDA = 0.7
-_DEFAULT_MIN_CANDLE_RANGE = 0.2
-_DEFAULT_ABS_MIN_RANGE_PCT = 0.015
+# Harder cost gate (no bars-gap cooldown — quality filters do the work).
+_DEFAULT_LAMBDA = 1.5
+_DEFAULT_MIN_CANDLE_RANGE = 0.35
+_DEFAULT_ABS_MIN_RANGE_PCT = 0.03
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -92,7 +92,7 @@ def evaluate_cost_aware_entry(
     timeframe_key: str,
     taker_fee_pct: float,
 ) -> dict:
-    """Cost-aware gate ON with moderate λ + absolute range floor (blocks flat spam)."""
+    """Cost-aware gate ON — PDF discipline: λ×fee hurdle + absolute range floor."""
     lam = cost_aware_lambda()
     rt_cost = round_trip_cost_pct(taker_fee_pct)
     hurdle = entry_hurdle_pct(taker_fee_pct, lam)

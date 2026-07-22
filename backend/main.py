@@ -1998,10 +1998,9 @@ def auto_trade_capital_pct_for_agent(agent) -> float:
     return capital_pct_fraction(tf_key)
 
 
-# Fire discipline — mild strict: fewer weak hammers + volume gate in UVSS.
-MIN_PATTERN_STRENGTH = float(os.environ.get("MIN_PATTERN_STRENGTH", "0.6"))
-# Default 3 bars — stops chasing every consecutive green (bull-trap stacking).
-MIN_BARS_BETWEEN_AUTO_ENTRIES = int(os.environ.get("MIN_BARS_BETWEEN_AUTO_ENTRIES", "3"))
+# Fire discipline — high strength floor; candle gap OFF (0).
+MIN_PATTERN_STRENGTH = float(os.environ.get("MIN_PATTERN_STRENGTH", "0.85"))
+MIN_BARS_BETWEEN_AUTO_ENTRIES = int(os.environ.get("MIN_BARS_BETWEEN_AUTO_ENTRIES", "0"))
 BLOCK_OPPOSITE_AUTO_SIDE = os.environ.get("BLOCK_OPPOSITE_AUTO_SIDE", "true").strip().lower() in (
     "1", "true", "yes", "on",
 )

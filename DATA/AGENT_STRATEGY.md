@@ -28,9 +28,9 @@ Each pattern maps to a Bible section id (`PATTERN_BIBLE_KEY`). On signal, agent
 fetches that section in microseconds and logs it in System Log / AI confirm.
 
 ## ML fire discipline (cost-aware ON + entry rules)
-- Gate **ON** — λ=1.0, abs candle range ≥ 0.02%
-- Min pattern strength ≥ 0.7
-- **One auto fire per candle**; ≥3 bars between entries
+- Gate **ON** — λ=1.5, abs candle range ≥ 0.03%
+- Min pattern strength ≥ 0.85
+- **One auto fire per candle**; candle gap OFF (0 bars)
 - Block opposite side while an auto position is open
 - Whale: ≥100 BTC, poll **60s**
 

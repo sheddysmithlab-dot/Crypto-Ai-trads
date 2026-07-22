@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 UVSS_POLICIES_ENABLED = True
-# Cost-aware stays ON — loosened in trading_policy (low λ, range floor optional).
+# Cost-aware ON — high bar; no bars-gap cooldown.
 UVSS_COST_AWARE_ENTRY = True
 UVSS_SL_EXIT_ENABLED = False
 
@@ -24,32 +24,32 @@ EMA_SLOW = 200
 BODY_AVG_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 # Every pattern must clear Vol MA × this floor (volume is a first-class gate).
-VOLUME_CONFIRM_MULT = float(__import__("os").environ.get("VOLUME_CONFIRM_MULT", "1.15"))
+VOLUME_CONFIRM_MULT = float(__import__("os").environ.get("VOLUME_CONFIRM_MULT", "1.4"))
 # Extra multiplier by setup family — all patterns use volume; weak shapes need more.
 VOLUME_SETUP_MULT: dict[str, float] = {
-    "pin_bar": 1.25,
-    "doji": 1.25,
-    "harami": 1.3,
-    "tweezer": 1.2,
-    "inside_bar": 1.2,
+    "pin_bar": 1.5,
+    "doji": 1.5,
+    "harami": 1.55,
+    "tweezer": 1.45,
+    "inside_bar": 1.45,
     # Engulfing needs real participation — weak mid-trend "engulfs" are traps.
-    "engulfing": 1.25,
-    "star": 1.2,
-    "pierce": 1.2,
-    "belt": 1.15,
-    "marubozu": 1.1,
-    "soldiers": 1.15,
-    "crows": 1.15,
+    "engulfing": 1.5,
+    "star": 1.45,
+    "pierce": 1.45,
+    "belt": 1.35,
+    "marubozu": 1.3,
+    "soldiers": 1.4,
+    "crows": 1.4,
 }
 # Also require signal vol ≥ previous bar × this (participation expanding).
-VOLUME_VS_PREV_MULT = float(__import__("os").environ.get("VOLUME_VS_PREV_MULT", "1.05"))
+VOLUME_VS_PREV_MULT = float(__import__("os").environ.get("VOLUME_VS_PREV_MULT", "1.15"))
 TREND_LOOKBACK = 5
 MIN_CANDLES = max(EMA_SLOW + BODY_AVG_PERIOD + 5, 60)
 RISK_PCT_PER_TRADE = 0.01
 RR_RATIO = 2.0
 SL_BUFFER_PCT = 0.001
-# Looser local slope so more bars count as "flat" (more reversal setups).
-LOCAL_SLOPE_PCT = 0.002  # mid: between tight 0.0015 and loose 0.003
+# Tight local slope — clear trend context only.
+LOCAL_SLOPE_PCT = 0.0012
 
 # code → human label
 PATTERN_LABELS: dict[str, str] = {
@@ -230,14 +230,14 @@ def _midpoint(c: dict) -> float:
 
 
 def _is_pin_bull(c: dict) -> bool:
-    # Mildly stricter than before — need a real rejection wick, not every tiny hammer.
+    # Strict pin: long rejection wick, tiny opposite wick.
     body, upper, lower, rng = _body(c), _upper_wick(c), _lower_wick(c), _range(c)
-    return lower >= body * 1.6 and lower >= rng * 0.5 and upper <= body * 1.1
+    return lower >= body * 2.0 and lower >= rng * 0.6 and upper <= body * 0.8
 
 
 def _is_pin_bear(c: dict) -> bool:
     body, upper, lower, rng = _body(c), _upper_wick(c), _lower_wick(c), _range(c)
-    return upper >= body * 1.6 and upper >= rng * 0.5 and lower <= body * 1.1
+    return upper >= body * 2.0 and upper >= rng * 0.6 and lower <= body * 0.8
 
 
 def _is_marubozu(c: dict, candles: list[dict]) -> bool:
@@ -270,10 +270,10 @@ def _engulf_close_conviction(action: str, candle: dict) -> bool:
     if r <= 0:
         return False
     if action == "SELL":
-        # Close in lower 45% of the range — not a weak mid-bar fade.
-        return candle["close"] <= candle["low"] + r * 0.45
-    # BUY: close in upper 45%
-    return candle["close"] >= candle["high"] - r * 0.45
+        # Close in lower 35% — decisive control of the bar.
+        return candle["close"] <= candle["low"] + r * 0.35
+    # BUY: close in upper 35%
+    return candle["close"] >= candle["high"] - r * 0.35
 
 
 def _engulf_trend_gate(
@@ -302,19 +302,19 @@ def _engulf_trend_gate(
                 return False, "downtrend_chase_blocked"
             return True, "with_trend_down"
         if trend == "range" and local in ("down", "flat", None):
-            if body >= avg * 1.0 and _engulf_close_conviction("SELL", signal):
+            if body >= avg * 1.2 and _engulf_close_conviction("SELL", signal):
                 return True, "range_bear"
             return False, "weak_range_bear_engulf"
         # Counter-trend short into uptrend — ONLY exhaustion.
         if trend == "uptrend" or local == "up":
             # Must be a decisive engulf (large body) that breaks the fast MA.
-            body_ok = body >= avg * 1.4
+            body_ok = body >= avg * 1.7
             broke_ema8 = ema8 is not None and signal["close"] < ema8
             # Prefer rejection near extended stretch above ema21, then reclaim.
             was_extended = (
                 ema21 is not None
                 and len(candles) >= 2
-                and candles[-2]["high"] >= ema21 * 1.006
+                and candles[-2]["high"] >= ema21 * 1.01
             )
             close_ok = _engulf_close_conviction("SELL", signal)
             if body_ok and broke_ema8 and close_ok and was_extended:
@@ -328,16 +328,16 @@ def _engulf_trend_gate(
             return False, "uptrend_chase_blocked"
         return True, "with_trend_up"
     if trend == "range" and local in ("up", "flat", None):
-        if body >= avg * 1.0 and _engulf_close_conviction("BUY", signal):
+        if body >= avg * 1.2 and _engulf_close_conviction("BUY", signal):
             return True, "range_bull"
         return False, "weak_range_bull_engulf"
     if trend == "downtrend" or local == "down":
-        body_ok = body >= avg * 1.4
+        body_ok = body >= avg * 1.7
         broke_ema8 = ema8 is not None and signal["close"] > ema8
         was_extended = (
             ema21 is not None
             and len(candles) >= 2
-            and candles[-2]["low"] <= ema21 * 0.994
+            and candles[-2]["low"] <= ema21 * 0.99
         )
         close_ok = _engulf_close_conviction("BUY", signal)
         if body_ok and broke_ema8 and close_ok and was_extended:
@@ -359,10 +359,10 @@ def _is_impulse_chase(action: str, candles: list[dict]) -> bool:
         return False
     close = float(candles[-1]["close"])
     if action == "BUY":
-        # Stretched above both fast + mid MA → chase / end-of-impulse.
-        return close >= ema21 * 1.003 and close >= ema8 * 1.0015
+        # Any stretch above fast+mid MA → chase / end-of-impulse.
+        return close >= ema21 * 1.0015 and close >= ema8 * 1.0008
     if action == "SELL":
-        return close <= ema21 * 0.997 and close <= ema8 * 0.9985
+        return close <= ema21 * 0.9985 and close <= ema8 * 0.9992
     return False
 
 
@@ -377,10 +377,10 @@ def _soldiers_after_pullback(candles: list[dict], avg: float) -> bool:
     pre = candles[-4]
     closes = [c["close"] for c in candles]
     ema21 = compute_ema(closes, 21)
-    pullback_bar = _is_red(pre) or _body(pre) <= avg * 0.65
+    pullback_bar = _is_red(pre) or _body(pre) <= avg * 0.45
     near_ma = (
         ema21 is not None
-        and abs(float(first["open"]) - ema21) / max(ema21, 1e-12) <= 0.0045
+        and abs(float(first["open"]) - ema21) / max(ema21, 1e-12) <= 0.0025
     )
     return bool(pullback_bar or near_ma)
 def compute_ema(closes: list[float], length: int) -> float | None:
@@ -471,7 +471,7 @@ def volume_strength_boost(vol_info: dict) -> float:
     vs_prev = float(vol_info.get("volume_vs_prev") or 0.0)
     if ratio <= 0:
         return 0.0
-    # 1.15×MA → ~0, 2×MA → ~0.55, cap 1.0
+    # 1.4×MA → ~0.26, 2×MA → ~0.65, cap 1.0
     boost_ma = max(0.0, min((ratio - 1.0) * 0.65, 1.0))
     boost_prev = max(0.0, min((vs_prev - 1.0) * 0.35, 0.4)) if vs_prev else 0.0
     return round(boost_ma + boost_prev, 4)

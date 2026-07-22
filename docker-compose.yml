@@ -1,11 +1,12 @@
-# Backend API only (no frontend container).
+# Backend API only (no frontend container, no VPS MySQL).
 # Frontend: Hostinger File Manager → aitrads.in/public_html
+# DB: Hostinger website MySQL (set MYSQL_* in backend/.env)
 # API URL: https://api.aitrads.in  (NOT the raw VPS hostname)
 #
 # VPS:
 #   cp .env.example .env
-#   cp backend/.env.example backend/.env   # keys
-#   docker compose down -v --remove-orphans
+#   cp backend/.env.example backend/.env   # keys + Hostinger MySQL
+#   docker compose down --remove-orphans
 #   docker compose up -d --build
 
 services:
