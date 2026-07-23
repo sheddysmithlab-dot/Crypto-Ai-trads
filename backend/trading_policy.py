@@ -5,10 +5,10 @@ import os
 
 from timeframe_rules import TIMEFRAME_RULES
 
-# Harder cost gate (no bars-gap cooldown — quality filters do the work).
-_DEFAULT_LAMBDA = 1.5
-_DEFAULT_MIN_CANDLE_RANGE = 0.35
-_DEFAULT_ABS_MIN_RANGE_PCT = 0.03
+# 2× stricter cost gate — volume/pattern quality filters do the work (no bars gap).
+_DEFAULT_LAMBDA = 3.0
+_DEFAULT_MIN_CANDLE_RANGE = 0.7
+_DEFAULT_ABS_MIN_RANGE_PCT = 0.06
 
 
 def _env_bool(name: str, default: bool) -> bool:

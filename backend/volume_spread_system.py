@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 UVSS_POLICIES_ENABLED = True
-# Cost-aware ON — high bar; no bars-gap cooldown.
+# Cost-aware ON — volume-first fire; no bars-gap cooldown.
 UVSS_COST_AWARE_ENTRY = True
 UVSS_SL_EXIT_ENABLED = False
 
@@ -23,33 +23,34 @@ EMA_FAST = 50
 EMA_SLOW = 200
 BODY_AVG_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-# Every pattern must clear Vol MA × this floor (volume is a first-class gate).
-VOLUME_CONFIRM_MULT = float(__import__("os").environ.get("VOLUME_CONFIRM_MULT", "1.4"))
-# Extra multiplier by setup family — all patterns use volume; weak shapes need more.
+# HARD RULE: signal volume must be ≥ 3× Vol MA or NO TRADE (candle needs 3× volume).
+VOLUME_CONFIRM_MULT = float(__import__("os").environ.get("VOLUME_CONFIRM_MULT", "3.0"))
+# Setup floors never go below the global 3× rule.
 VOLUME_SETUP_MULT: dict[str, float] = {
-    "pin_bar": 1.5,
-    "doji": 1.5,
-    "harami": 1.55,
-    "tweezer": 1.45,
-    "inside_bar": 1.45,
-    # Engulfing needs real participation — weak mid-trend "engulfs" are traps.
-    "engulfing": 1.5,
-    "star": 1.45,
-    "pierce": 1.45,
-    "belt": 1.35,
-    "marubozu": 1.3,
-    "soldiers": 1.4,
-    "crows": 1.4,
+    "pin_bar": 3.2,
+    "doji": 3.2,
+    "harami": 3.4,
+    "tweezer": 3.2,
+    "inside_bar": 3.2,
+    "engulfing": 3.2,
+    "star": 3.2,
+    "pierce": 3.2,
+    "belt": 3.1,
+    "marubozu": 3.1,
+    "soldiers": 3.2,
+    "crows": 3.2,
 }
-# Also require signal vol ≥ previous bar × this (participation expanding).
-VOLUME_VS_PREV_MULT = float(__import__("os").environ.get("VOLUME_VS_PREV_MULT", "1.15"))
+# Participation must expand vs previous bar (2× stricter than before).
+VOLUME_VS_PREV_MULT = float(__import__("os").environ.get("VOLUME_VS_PREV_MULT", "2.0"))
+# Relative volume must also clear 3× relative candle size (range / avg range).
+CANDLE_TO_VOLUME_MULT = float(__import__("os").environ.get("CANDLE_TO_VOLUME_MULT", "3.0"))
 TREND_LOOKBACK = 5
 MIN_CANDLES = max(EMA_SLOW + BODY_AVG_PERIOD + 5, 60)
 RISK_PCT_PER_TRADE = 0.01
 RR_RATIO = 2.0
 SL_BUFFER_PCT = 0.001
 # Tight local slope — clear trend context only.
-LOCAL_SLOPE_PCT = 0.0012
+LOCAL_SLOPE_PCT = 0.001
 
 # code → human label
 PATTERN_LABELS: dict[str, str] = {
@@ -415,9 +416,13 @@ def volume_confirm(
     *,
     setup: str | None = None,
 ) -> tuple[bool, dict]:
-    """Volume is required for EVERY pattern — Vol MA + vs previous bar.
+    """Volume-first gate — EVERY pattern.
 
-    Quiet bars (below MA / shrinking volume) never fire, regardless of shape.
+    Hard rules (otherwise NO TRADE):
+      1) vol ≥ VOLUME_CONFIRM_MULT × Vol MA  (default 3×)
+      2) rel_vol ≥ CANDLE_TO_VOLUME_MULT × rel_candle
+         (candle size needs 3× volume size in relative terms)
+      3) vol ≥ VOLUME_VS_PREV_MULT × previous bar volume
     """
     signal = candles[-1]
     prev = candles[-2] if len(candles) >= 2 else None
@@ -426,10 +431,24 @@ def volume_confirm(
     vol_ma = _volume_ma(candles)
     setup_key = (setup or "").strip() or "default"
     setup_mult = float(VOLUME_SETUP_MULT.get(setup_key, VOLUME_CONFIRM_MULT))
-    # Never softer than the global floor.
+    # Never softer than the global 3× floor.
     mult = max(VOLUME_CONFIRM_MULT, setup_mult)
     ratio = (vol / vol_ma) if vol_ma and vol_ma > 0 else None
     vs_prev = (vol / prev_vol) if prev_vol > 0 else None
+
+    # Relative candle size = this bar range / average range (body-avg period).
+    avg_range = 0.0
+    window = candles[-BODY_AVG_PERIOD:] if len(candles) >= 2 else candles
+    ranges = [_range(c) for c in window[:-1]] if len(window) >= 2 else [_range(c) for c in window]
+    if ranges:
+        avg_range = sum(ranges) / len(ranges)
+    candle_range = _range(signal)
+    rel_candle = (candle_range / avg_range) if avg_range > 0 else None
+    # Need relative volume ≥ 3× relative candle size.
+    candle_vol_need = (
+        CANDLE_TO_VOLUME_MULT * max(rel_candle, 0.25) if rel_candle is not None else CANDLE_TO_VOLUME_MULT
+    )
+
     info = {
         "volume": round(vol, 4),
         "volume_ma": round(vol_ma, 4) if vol_ma is not None else None,
@@ -438,6 +457,11 @@ def volume_confirm(
         "volume_vs_prev_required": VOLUME_VS_PREV_MULT,
         "volume_ratio": round(ratio, 4) if ratio is not None else None,
         "volume_vs_prev": round(vs_prev, 4) if vs_prev is not None else None,
+        "candle_range": round(candle_range, 8),
+        "avg_range": round(avg_range, 8) if avg_range else None,
+        "rel_candle": round(rel_candle, 4) if rel_candle is not None else None,
+        "candle_to_volume_mult": CANDLE_TO_VOLUME_MULT,
+        "candle_vol_need": round(candle_vol_need, 4),
         "setup": setup_key,
     }
     if vol_ma is None or vol_ma <= 0:
@@ -450,7 +474,16 @@ def volume_confirm(
             "ok": False,
             "reason": (
                 f"Volume {vol:.2f} < MA{VOLUME_MA_PERIOD}×{mult:.2f} "
-                f"({vol_ma * mult:.2f}) — {setup_key or 'pattern'} needs participation"
+                f"({vol_ma * mult:.2f}) — need ≥{mult:.0f}× volume for fire"
+            ),
+        }
+    if ratio is not None and ratio < candle_vol_need:
+        return False, {
+            **info,
+            "ok": False,
+            "reason": (
+                f"Candle/volume mismatch: rel_vol {ratio:.2f}× < "
+                f"{CANDLE_TO_VOLUME_MULT:.0f}× rel_candle need {candle_vol_need:.2f}× — no fire"
             ),
         }
     if prev_vol > 0 and vol < prev_vol * VOLUME_VS_PREV_MULT:
@@ -462,7 +495,7 @@ def volume_confirm(
                 f"({prev_vol * VOLUME_VS_PREV_MULT:.2f}) — shrinking volume, skip"
             ),
         }
-    return True, {**info, "ok": True, "reason": "Volume confirmed (MA + expanding)"}
+    return True, {**info, "ok": True, "reason": "Volume confirmed (≥3× MA + 3× candle size + expanding)"}
 
 
 def volume_strength_boost(vol_info: dict) -> float:
@@ -471,9 +504,9 @@ def volume_strength_boost(vol_info: dict) -> float:
     vs_prev = float(vol_info.get("volume_vs_prev") or 0.0)
     if ratio <= 0:
         return 0.0
-    # 1.4×MA → ~0.26, 2×MA → ~0.65, cap 1.0
-    boost_ma = max(0.0, min((ratio - 1.0) * 0.65, 1.0))
-    boost_prev = max(0.0, min((vs_prev - 1.0) * 0.35, 0.4)) if vs_prev else 0.0
+    # 3×MA → ~0.65 base, 5×MA → cap 1.0
+    boost_ma = max(0.0, min((ratio - 2.0) * 0.35, 1.0))
+    boost_prev = max(0.0, min((vs_prev - 1.0) * 0.25, 0.5)) if vs_prev else 0.0
     return round(boost_ma + boost_prev, 4)
 
 

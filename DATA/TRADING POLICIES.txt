@@ -12,16 +12,16 @@ Pipeline: Detect → Bible (RAM) → ML cost-aware → Fire
 7. Belt hold / Marubozu continuation
 
 ## Filters
-- EMA50 / EMA200 trend + local slope (tight 0.12%)
+- EMA50 / EMA200 trend + local slope (tight 0.10%)
 - Engulfing: full body cover (Nison) + with-trend preferred; counter-trend only on exhaustion
 - No impulse chase: block BUY/SELL when price stretched far above/below EMA8+EMA21 (PDF overbought)
 - THREE_WHITE/BLACK only after pullback / near MA (buy start of impulse, not tip)
 - Max 1 same-side auto position per pair (no stacking into a spike)
 - Candle gap OFF (0 bars between entries)
-- Volume ≥ 1.4× Vol MA and expanding vs previous bar (≥1.15×)
-- Min pattern strength ≥ 0.85
+- HARD: volume ≥ 3× Vol MA + rel_vol ≥ 3× rel_candle size + vs prev ≥ 2× — else NO TRADE
+- Min pattern strength ≥ 1.5
 - Same-bar bull+bear conflict = NO_TRADE
-- ML cost-aware: λ=1.5 × fee hurdle + abs candle range ≥ 0.03%
+- ML cost-aware: λ=3.0 × fee hurdle + abs candle range ≥ 0.06%
 
 ## Exits
 Profit lock +0.20% floor / 1.5× trail from peak / hard +1.2%.
