@@ -1191,6 +1191,7 @@ class AITradingAgent:
             return
         self.timeframe_seconds = seconds
         LAST_CANDLE_TIMESTAMPS.clear()
+        PENDING_ENTRY_SIGNALS.clear()
         _recent_signal_fire_keys.clear()
         reset_blue_box_state()
         _invalidate_kline_cache()
@@ -1717,6 +1718,7 @@ class AITradingAgent:
         print(f"[PILLAR 2: BACKEND] {reason}")
         self._close_all_positions(reason)
         self.is_active = False
+        PENDING_ENTRY_SIGNALS.clear()
         self.end_ai_season(clear_live_table=True, reason="manual_stop")
         self.peak_net_pct = 0.0
         self.is_lock_active = False
@@ -1729,6 +1731,7 @@ class AITradingAgent:
             return
         print(f"[SESSION SCHEDULE] Soft stop — {reason}")
         self.is_active = False
+        PENDING_ENTRY_SIGNALS.clear()
         # Persist season totals but keep live table so open positions remain visible.
         self.end_ai_season(clear_live_table=False, reason=f"schedule_soft_stop:{reason}")
         system_log.push("ai", f"Session schedule paused AI automation — {reason}", {"open_positions": len(self.trades)})
@@ -1867,6 +1870,13 @@ TIMEFRAME_KEY_TO_BYBIT_KLINE = {
 # set_timeframe below) since a candle's close_time isn't comparable across
 # different candle granularities.
 LAST_CANDLE_TIMESTAMPS = {}
+
+# 3-candle entry: pattern (bar1) → confirm direction (bar2) → fire at bar3 open.
+# Keyed by pair label. Cleared on timeframe change / AI stop.
+PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
+THREE_CANDLE_ENTRY = os.environ.get("THREE_CANDLE_ENTRY", "true").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 
 # Cached OHLCV windows for UVSS — avoids refetching 200+ klines on every poll.
 _KLINE_HISTORY_CACHE: dict[str, dict] = {}
@@ -2587,11 +2597,150 @@ _last_real_feed_update = 0.0
 REAL_FEED_STALE_AFTER_SECONDS = 10
 
 # ==========================================
-# ENTRY POLICY: Candle patterns → Bible → ML cost-aware → fire
+# ENTRY POLICY: Candle patterns → Bible → ML cost-aware → 3-candle confirm → fire
 # ==========================================
 
+def _timeframe_interval_ms(timeframe_key: str) -> int:
+    """Bybit candle startTime step in ms for this TF key."""
+    seconds = {
+        "30s": 30,
+        "1m": 60,
+        "3m": 180,
+        "5m": 300,
+        "10m": 600,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "1D": 86400,
+    }.get(timeframe_key, 60)
+    return int(seconds * 1000)
+
+
+def _confirm_entry_direction(action: str, signal: dict, confirm: dict) -> tuple[bool, str]:
+    """Bar-2 must continue the pattern direction (Bible conservative entry).
+
+    BUY: confirm closes above signal close and finishes green.
+    SELL: confirm closes below signal close and finishes red.
+    """
+    s_close = float(signal.get("close") or 0)
+    c_open = float(confirm.get("open") or 0)
+    c_close = float(confirm.get("close") or 0)
+    if s_close <= 0 or c_close <= 0:
+        return False, "invalid_ohlc"
+    if action == "BUY":
+        if c_close <= s_close:
+            return False, f"confirm close {c_close} ≤ signal close {s_close}"
+        if c_close < c_open:
+            return False, "confirm candle red (need green continuation)"
+        return True, "buy_confirm_green_above_signal"
+    if action == "SELL":
+        if c_close >= s_close:
+            return False, f"confirm close {c_close} ≥ signal close {s_close}"
+        if c_close > c_open:
+            return False, "confirm candle green (need red continuation)"
+        return True, "sell_confirm_red_below_signal"
+    return False, f"unknown_action_{action}"
+
+
+async def _execute_pattern_auto_fire(
+    *,
+    result: dict,
+    bybit_symbol: str,
+    pair: str,
+    timeframe_key: str,
+    candle_close_time: int,
+    mark_px: float,
+    t_detect: float,
+    cost_aware: dict | None,
+) -> bool:
+    """Shared fire path after gates pass (used by immediate or 3-candle confirm)."""
+    if cost_aware and cost_aware.get("would_block") and not cost_aware.get("dry_run"):
+        reason = cost_aware.get("block_reason") or "Cost-aware entry gate blocked weak signal."
+        _log_trade_skip(result["action"], bybit_symbol, result.get("pattern"), reason, cost_aware=cost_aware)
+        return False
+
+    balance = agent.get_available_capital()
+    if balance is None or balance <= 0:
+        _log_trade_skip(
+            result["action"], bybit_symbol, result.get("pattern"),
+            f"Insufficient available capital (balance=${balance}).",
+        )
+        return False
+
+    entry_px = result.get("entry") or mark_px
+    plan = compute_auto_trade_plan(agent, float(entry_px), pair=pair)
+    if plan is None:
+        tf_pct = auto_trade_capital_pct_for_agent(agent) * 100
+        _log_trade_skip(
+            result["action"], bybit_symbol, result.get("pattern"),
+            f"Could not size {tf_pct:.0f}% trade (available=${balance}, entry=${entry_px}).",
+        )
+        return False
+    if result.get("sl") is None:
+        _log_trade_skip(
+            result["action"], bybit_symbol, result.get("pattern"),
+            "Signal missing stop-loss level.",
+        )
+        return False
+
+    position_size_usd = plan["position_usd"]
+    qty = plan["qty"]
+    sl_px = result.get("sl")
+    tp_px = result.get("tp")
+    signal_action = result["action"]
+    fire_payload = {**result, "action": execution_action_for_fire(signal_action)}
+    fire_payload["symbol"] = bybit_symbol
+    fire_payload["signal_candle_time"] = result.get("signal_candle_time") or candle_close_time
+    fire_payload["entry"] = float(entry_px)
+
+    if is_bybit_testnet_configured() or bybit_api.mode == "PAPER_TRADING":
+        log_trade_execution(
+            taapi_action_to_trade_side(execution_action_for_fire(result["action"])),
+            float(entry_px),
+            float(sl_px),
+            float(tp_px) if tp_px else float(entry_px),
+            float(qty),
+            float(balance),
+            result.get("pattern", "signal"),
+        )
+        await fire_taapi_auto_trade(
+            fire_payload,
+            bybit_symbol,
+            plan,
+            position_size_usd,
+            qty,
+            candle_close_time=candle_close_time,
+            timeframe_key=timeframe_key,
+            signal_action=signal_action,
+            pair=pair,
+        )
+        ms = (time.time() - t_detect) * 1000
+        print(f"[AUTO BUY LOOP] Trade fire completed in {ms:.0f}ms ({pair})")
+        return True
+
+    global _bybit_testnet_keys_warned
+    err = (
+        "BYBIT_TESTNET_API_KEY / BYBIT_TESTNET_API_SECRET not set — "
+        "add keys from https://testnet.bybit.com to backend/.env"
+    )
+    if not _bybit_testnet_keys_warned:
+        _bybit_testnet_keys_warned = True
+        system_log.push("bybit", err, {"symbol": bybit_symbol})
+        notifications.push(
+            "Bybit TESTNET keys missing — signals fire but orders cannot execute.",
+            "error",
+        )
+    _log_trade_skip(result["action"], bybit_symbol, result.get("pattern"), err)
+    return False
+
+
 async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
-    """Scan one watchlist pair for a new closed candle; fire if pattern + gates pass.
+    """Scan one watchlist pair for a new closed candle.
+
+    3-candle entry (default ON):
+      bar1 close → detect pattern (queue pending)
+      bar2 close → confirm direction
+      bar3 open  → fire (same moment as bar2 close)
 
     Returns True when an order fire was attempted successfully (for burst polling).
     """
@@ -2635,118 +2784,182 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return False
 
     mark_px = agent.mark_price_for(pair) or agent.current_price
-    signal_candle = history[-1]
-    result = evaluate_uvss(history, timeframe_key, pair=pair)
-    if result.get("action") in ("BUY", "SELL"):
-        result = enrich_signal(result)
+    interval_ms = _timeframe_interval_ms(timeframe_key)
+    confirm_candle = history[-1]
+    fired_trade = False
+    result: dict = {"action": "NO_TRADE", "reason": "scanning"}
+    cost_aware = None
     candle = {
-        "high": signal_candle["high"],
-        "low": signal_candle["low"],
-        "close": signal_candle["close"],
+        "high": confirm_candle["high"],
+        "low": confirm_candle["low"],
+        "close": confirm_candle["close"],
         "close_time": close_time,
     }
-    cost_aware = None
-    if UVSS_COST_AWARE_ENTRY:
-        fee_pct = bybit_api.get_taker_fee_pct()
-        cost_aware = evaluate_cost_aware_entry(
-            result,
-            candle,
-            mark_px,
-            timeframe_key,
-            fee_pct,
-        )
 
-    fired_trade = False
-    if result["action"] in ("BUY", "SELL"):
-        if not (cost_aware and cost_aware.get("would_block") and not cost_aware.get("dry_run")):
-            balance = agent.get_available_capital()
-            if balance is not None and balance > 0:
-                entry_px = result.get("entry") or mark_px
-                plan = compute_auto_trade_plan(agent, float(entry_px), pair=pair)
-                if plan is not None and result.get("sl") is not None:
-                    position_size_usd = plan["position_usd"]
-                    qty = plan["qty"]
-                    sl_px = result.get("sl")
-                    tp_px = result.get("tp")
-                    signal_action = result["action"]
-                    fire_payload = {**result, "action": execution_action_for_fire(signal_action)}
-                    fire_payload["symbol"] = bybit_symbol
-                    fire_payload["signal_candle_time"] = close_time
-
-                    if is_bybit_testnet_configured() or bybit_api.mode == "PAPER_TRADING":
-                        log_trade_execution(
-                            taapi_action_to_trade_side(execution_action_for_fire(result["action"])),
-                            float(entry_px),
-                            float(sl_px),
-                            float(tp_px) if tp_px else float(entry_px),
-                            float(qty),
-                            float(balance),
-                            result.get("pattern", "signal"),
-                        )
-                        await fire_taapi_auto_trade(
-                            fire_payload,
-                            bybit_symbol,
-                            plan,
-                            position_size_usd,
-                            qty,
-                            candle_close_time=close_time,
-                            timeframe_key=timeframe_key,
-                            signal_action=signal_action,
-                            pair=pair,
-                        )
-                        fired_trade = True
-                        ms = (time.time() - t_detect) * 1000
-                        print(f"[AUTO BUY LOOP] Trade fire completed in {ms:.0f}ms after bar close ({pair})")
-                    else:
-                        global _bybit_testnet_keys_warned
-                        err = (
-                            "BYBIT_TESTNET_API_KEY / BYBIT_TESTNET_API_SECRET not set — "
-                            "add keys from https://testnet.bybit.com to backend/.env"
-                        )
-                        if not _bybit_testnet_keys_warned:
-                            _bybit_testnet_keys_warned = True
-                            system_log.push("bybit", err, {"symbol": bybit_symbol})
-                            notifications.push(
-                                "Bybit TESTNET keys missing — signals fire but orders cannot execute.",
-                                "error",
-                            )
-                        _log_trade_skip(result["action"], bybit_symbol, result.get("pattern"), err)
-                elif plan is None:
-                    tf_pct = auto_trade_capital_pct_for_agent(agent) * 100
-                    _log_trade_skip(
-                        result["action"], bybit_symbol, result.get("pattern"),
-                        f"Could not size {tf_pct:.0f}% trade (available=${balance}, entry=${entry_px}).",
-                    )
-                else:
-                    _log_trade_skip(
-                        result["action"], bybit_symbol, result.get("pattern"),
-                        "Signal missing stop-loss level.",
-                    )
-            else:
-                _log_trade_skip(
-                    result["action"], bybit_symbol, result.get("pattern"),
-                    f"Insufficient available capital (balance=${balance}).",
+    # --- Stage A: resolve pending confirm (bar2 close = bar3 open → fire) ---
+    pending = PENDING_ENTRY_SIGNALS.get(pair)
+    if pending and pending.get("timeframe_key") == timeframe_key:
+        expected_confirm_t = int(pending["signal_candle_time"]) + interval_ms
+        if close_time == expected_confirm_t:
+            signal_candle = history[-2] if len(history) >= 2 else pending.get("signal_ohlc", {})
+            ok, why = _confirm_entry_direction(
+                pending["action"],
+                pending.get("signal_ohlc") or signal_candle,
+                confirm_candle,
+            )
+            if ok:
+                fire_result = {**pending["result"]}
+                fire_result["entry"] = mark_px
+                fire_result["signal_candle_time"] = pending["signal_candle_time"]
+                fee_pct = bybit_api.get_taker_fee_pct()
+                cost_aware = evaluate_cost_aware_entry(
+                    fire_result,
+                    {
+                        "high": confirm_candle["high"],
+                        "low": confirm_candle["low"],
+                        "close": confirm_candle["close"],
+                    },
+                    mark_px,
+                    timeframe_key,
+                    fee_pct,
+                ) if UVSS_COST_AWARE_ENTRY else None
+                print(
+                    f"[3-CANDLE] {pair} CONFIRM OK ({why}) — firing at candle-3 open "
+                    f"(pattern={pending.get('pattern')} {pending['action']})"
                 )
+                system_log.push_agent_chat(
+                    f"3-candle confirm OK on {pair}: {pending.get('pattern')} {pending['action']} "
+                    f"→ fire at bar-3 open ({why})",
+                    status="match",
+                    details={"pair": pair, "pending": pending, "confirm": why},
+                )
+                fired_trade = await _execute_pattern_auto_fire(
+                    result=fire_result,
+                    bybit_symbol=bybit_symbol,
+                    pair=pair,
+                    timeframe_key=timeframe_key,
+                    candle_close_time=close_time,
+                    mark_px=mark_px,
+                    t_detect=t_detect,
+                    cost_aware=cost_aware,
+                )
+                result = {**fire_result, "reason": f"3-candle confirmed ({why})"}
+            else:
+                print(f"[3-CANDLE] {pair} CONFIRM FAIL — {why} (drop {pending.get('pattern')})")
+                system_log.push_agent_chat(
+                    f"3-candle confirm FAIL on {pair}: {pending.get('pattern')} — {why}",
+                    status="no_match",
+                    details={"pair": pair, "why": why},
+                )
+                result = {
+                    "action": "NO_TRADE",
+                    "reason": f"Confirm failed: {why}",
+                    "pattern": pending.get("pattern"),
+                }
+            PENDING_ENTRY_SIGNALS.pop(pair, None)
+        elif close_time > expected_confirm_t:
+            print(
+                f"[3-CANDLE] {pair} pending expired (expected confirm @ {expected_confirm_t}, got {close_time})"
+            )
+            PENDING_ENTRY_SIGNALS.pop(pair, None)
+
+    # --- Stage B: detect pattern on this closed bar → queue (don't fire yet) ---
+    detect = evaluate_uvss(history, timeframe_key, pair=pair)
+    if detect.get("action") in ("BUY", "SELL"):
+        detect = enrich_signal(detect)
+
+    if detect.get("action") in ("BUY", "SELL"):
+        fee_pct = bybit_api.get_taker_fee_pct()
+        detect_candle = {
+            "high": confirm_candle["high"],
+            "low": confirm_candle["low"],
+            "close": confirm_candle["close"],
+        }
+        detect_cost = (
+            evaluate_cost_aware_entry(
+                detect, detect_candle, mark_px, timeframe_key, fee_pct,
+            )
+            if UVSS_COST_AWARE_ENTRY
+            else None
+        )
+        blocked = bool(detect_cost and detect_cost.get("would_block") and not detect_cost.get("dry_run"))
+
+        if THREE_CANDLE_ENTRY and not blocked:
+            PENDING_ENTRY_SIGNALS[pair] = {
+                "action": detect["action"],
+                "pattern": detect.get("pattern"),
+                "result": detect,
+                "signal_candle_time": close_time,
+                "timeframe_key": timeframe_key,
+                "signal_ohlc": {
+                    "open": confirm_candle.get("open"),
+                    "high": confirm_candle["high"],
+                    "low": confirm_candle["low"],
+                    "close": confirm_candle["close"],
+                },
+                "queued_at": time.time(),
+            }
+            result = {
+                **detect,
+                "reason": (
+                    f"Queued for 3-candle entry — await confirm bar, "
+                    f"then fire at next open (pattern={detect.get('pattern')})"
+                ),
+            }
+            cost_aware = detect_cost
+            print(
+                f"[3-CANDLE] {pair} QUEUE {detect['action']} {detect.get('pattern')} "
+                f"@ {close_time} — waiting confirm candle"
+            )
+            system_log.push_agent_chat(
+                f"Pattern {detect.get('pattern')} on {pair} queued — "
+                f"await direction confirm on next candle, fire at 3rd open.",
+                status="match",
+                details={"pair": pair, "decision": detect, "stage": "queued"},
+            )
+        elif not THREE_CANDLE_ENTRY and not blocked:
+            # Legacy immediate fire (env THREE_CANDLE_ENTRY=false)
+            detect["signal_candle_time"] = close_time
+            detect["entry"] = mark_px
+            cost_aware = detect_cost
+            result = detect
+            fired_trade = await _execute_pattern_auto_fire(
+                result=detect,
+                bybit_symbol=bybit_symbol,
+                pair=pair,
+                timeframe_key=timeframe_key,
+                candle_close_time=close_time,
+                mark_px=mark_px,
+                t_detect=t_detect,
+                cost_aware=cost_aware,
+            )
         else:
-            reason = cost_aware.get("block_reason") or "Cost-aware entry gate blocked weak signal."
-            _log_trade_skip(result["action"], bybit_symbol, result.get("pattern"), reason, cost_aware=cost_aware)
+            result = detect
+            cost_aware = detect_cost
+            reason = (detect_cost or {}).get("block_reason") or "Cost-aware entry gate blocked weak signal."
+            _log_trade_skip(detect["action"], bybit_symbol, detect.get("pattern"), reason, cost_aware=detect_cost)
+    elif not fired_trade and result.get("action") == "NO_TRADE" and result.get("reason") == "scanning":
+        result = detect
 
     system_log.set_last_uvss_scan(
         pair, timeframe_key, result, candle, cost_aware=cost_aware
     )
     system_log.push_agent_chat(
         f"AI brain scanned closed {timeframe_key} candle on {pair} "
-        f"— detect → Bible → ML gate…",
+        f"— detect → Bible → ML gate → 3-candle…",
         status="scanning",
         details={
             "pair": pair,
             "timeframe": timeframe_key,
             "close_time": close_time,
             "fire_ms": round((time.time() - t_detect) * 1000, 1),
+            "pending": pair in PENDING_ENTRY_SIGNALS,
         },
     )
 
-    if result["action"] in ("BUY", "SELL"):
+    if result.get("action") in ("BUY", "SELL") and "Queued" in str(result.get("reason", "")):
+        pass  # already logged queue message
+    elif result.get("action") in ("BUY", "SELL"):
         exec_action = execution_action_for_fire(result["action"])
         fire_hint = (
             f"signal {result['action']} → fire {exec_action} (inverted)"
@@ -2760,17 +2973,17 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             status="match",
             details={"decision": result, "pair": pair, "timeframe": timeframe_key},
         )
-    elif result["action"] not in ("BUY", "SELL"):
+    elif result.get("action") not in ("BUY", "SELL"):
         system_log.push_agent_chat(
             f"No entry signal on {pair} this bar. {result.get('reason', '')}",
             status="no_match",
             details={"decision": result, "pair": pair, "timeframe": timeframe_key},
         )
-        print(f"[AUTO BUY LOOP] {pair} {result['action']}: {result['reason']}")
+        print(f"[AUTO BUY LOOP] {pair} {result.get('action')}: {result.get('reason')}")
 
     if cost_aware and cost_aware.get("would_block") and cost_aware.get("dry_run"):
         print(
-            f"[AUTO BUY LOOP] Cost-aware DRY-RUN would block {result['action']} "
+            f"[AUTO BUY LOOP] Cost-aware DRY-RUN would block {result.get('action')} "
             f"{result.get('pattern')} on {pair}: {cost_aware.get('block_reason')}"
         )
 
@@ -2779,8 +2992,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
 async def auto_buy_loop():
     print(
-        "[AUTO BUY LOOP] Multi-pair candle pattern → Bible → ML cost-aware — closed-candle scan "
-        f"(burst poll {_AUTO_BUY_BURST_POLL}s after each bar close)."
+        "[AUTO BUY LOOP] Multi-pair candle pattern → Bible → ML cost-aware → 3-candle confirm — "
+        f"closed-candle scan (burst poll {_AUTO_BUY_BURST_POLL}s after each bar close)."
     )
     async with httpx.AsyncClient(timeout=5.0) as client:
         while True:

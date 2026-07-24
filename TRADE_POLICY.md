@@ -6,8 +6,8 @@
 ## Live pipeline (normal pairs)
 1. Detect candle pattern (`backend/volume_spread_system.py`)
 2. Bible RAM fetch (`candlestick_bible_memory`)
-3. Cost-aware gate **ON** (PDF: λ=1.2, abs range ≥0.02%) + strength≥0.75 / **3 bars** gap / one-per-candle / volume≥1.6×MA / Bible allowlist only
-4. Fire BUY→LONG / SELL→SHORT (`main.py` auto_buy_loop)
+3. Cost-aware gate **ON** (PDF: λ=1.2, abs range ≥0.02%) + strength≥0.75 / **3 bars** gap / **3-candle confirm entry** / volume≥1.6×MA / Bible allowlist only
+4. Fire BUY→LONG / SELL→SHORT at **bar-3 open** after bar-2 direction confirm (`main.py` auto_buy_loop)
 
 ## Whale flow (merged into BTC/USDT)
 - Source: [WhaleBotAlerts](https://t.me/s/WhaleBotAlerts)

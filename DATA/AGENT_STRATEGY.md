@@ -28,6 +28,7 @@ fetches that section in microseconds and logs it in System Log / AI confirm.
 ## ML fire discipline (cost-aware ON + entry rules)
 - Gate **ON** — λ=1.2, abs candle range ≥ 0.02%
 - Min pattern strength ≥ 0.75
+- **3-candle entry:** detect on bar1 close → confirm direction on bar2 → fire at bar3 open
 - **One auto fire per candle**; ≥3 bars between entries
 - Volume ≥ 1.6× Vol MA, vs prev ≥ 1.15×
 - Block opposite side while an auto position is open

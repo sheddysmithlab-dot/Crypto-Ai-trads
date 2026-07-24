@@ -16,6 +16,7 @@ Pipeline: Detect → Bible (RAM) → ML cost-aware → Fire
 - No impulse chase: block when stretched far above/below EMA8+EMA21
 - Max 1 same-side auto position per pair
 - Min 3 bars between auto entries
+- **3-candle entry:** bar1 pattern → bar2 direction confirm → fire at bar3 open
 - Volume ≥ 1.6× Vol MA and expanding vs previous (≥1.15×)
 - Min pattern strength ≥ 0.75
 - Same-bar bull+bear conflict = NO_TRADE
