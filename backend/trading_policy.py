@@ -5,10 +5,10 @@ import os
 
 from timeframe_rules import TIMEFRAME_RULES
 
-# 2× stricter cost gate — volume/pattern quality filters do the work (no bars gap).
-_DEFAULT_LAMBDA = 3.0
-_DEFAULT_MIN_CANDLE_RANGE = 0.7
-_DEFAULT_ABS_MIN_RANGE_PCT = 0.06
+# PDF merge: λ≈1.2, abs range ≥0.02% — fee hurdle without over-filtering.
+_DEFAULT_LAMBDA = 1.2
+_DEFAULT_MIN_CANDLE_RANGE = 0.25
+_DEFAULT_ABS_MIN_RANGE_PCT = 0.02
 
 
 def _env_bool(name: str, default: bool) -> bool:

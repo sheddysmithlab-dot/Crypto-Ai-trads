@@ -623,7 +623,8 @@ bybit_api = BybitAPIWrapper()
 class AITradingAgent:
     # Strict Exit Logic (replaces all prior profit-lock / trailing / target exit rules).
     STRICT_EXIT_HARD_TARGET_PCT = float(os.environ.get("STRICT_EXIT_HARD_TARGET", "1.2"))
-    STRICT_EXIT_MIN_LOCK_PCT = float(os.environ.get("STRICT_EXIT_MIN_LOCK", "0.20"))
+    # Fee-aware floor: 0.40% gross (0.20% was too thin vs round-trip costs).
+    STRICT_EXIT_MIN_LOCK_PCT = float(os.environ.get("STRICT_EXIT_MIN_LOCK", "0.40"))
     STRICT_EXIT_FLUCTUATION_X_PCT = float(os.environ.get("STRICT_EXIT_FLUCTUATION_X", "0.10"))
     STRICT_EXIT_TRAIL_MULTIPLIER = float(os.environ.get("STRICT_EXIT_TRAIL_MULT", "1.5"))
 
@@ -725,7 +726,7 @@ class AITradingAgent:
         return any(is_btc_pair(p) for p in self.get_scan_pairs())
 
     def get_profit_floor_pct(self):
-        """Minimum profit lock floor (Rule 2) — 0.20% gross."""
+        """Minimum profit lock floor (Rule 2) — fee-aware gross %."""
         return self.STRICT_EXIT_MIN_LOCK_PCT
 
     def mark_price_for(self, pair: str | None) -> float | None:
@@ -1998,9 +1999,9 @@ def auto_trade_capital_pct_for_agent(agent) -> float:
     return capital_pct_fraction(tf_key)
 
 
-# Fire discipline — 2× stricter strength; candle gap OFF (0).
-MIN_PATTERN_STRENGTH = float(os.environ.get("MIN_PATTERN_STRENGTH", "1.5"))
-MIN_BARS_BETWEEN_AUTO_ENTRIES = int(os.environ.get("MIN_BARS_BETWEEN_AUTO_ENTRIES", "0"))
+# Fire discipline — PDF: strength floor + 3-bar gap (anti-spam).
+MIN_PATTERN_STRENGTH = float(os.environ.get("MIN_PATTERN_STRENGTH", "0.75"))
+MIN_BARS_BETWEEN_AUTO_ENTRIES = int(os.environ.get("MIN_BARS_BETWEEN_AUTO_ENTRIES", "3"))
 BLOCK_OPPOSITE_AUTO_SIDE = os.environ.get("BLOCK_OPPOSITE_AUTO_SIDE", "true").strip().lower() in (
     "1", "true", "yes", "on",
 )

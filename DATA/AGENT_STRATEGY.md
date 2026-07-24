@@ -13,13 +13,11 @@ closed candle → DETECT pattern → READ Bible section → ML cost-aware gate �
 | Gate | ML paper cost-aware filter | `trading_policy.py` + `ml_trading_memory.py` |
 | Fire | Bybit / paper | `main.py` `auto_buy_loop` |
 
-## Detection rules (active codes)
+## Detection → fire allowlist (Bible priority)
 
-**Reversal / pin family:** `HAMMER`, `PIN_BULL`, `SHOOTING_STAR`, `PIN_BEAR`, `DRAGONFLY`, `GRAVESTONE`  
-**Engulf family:** `BULL_ENGULF`, `BEAR_ENGULF`, `PIERCING`, `DARK_CLOUD`  
-**Multi-candle:** `MORNING_STAR`, `EVENING_STAR`, `THREE_WHITE`, `THREE_BLACK`  
-**Bible tactics:** `INSIDE_UP`, `INSIDE_DOWN`, `BULL_HARAMI`, `BEAR_HARAMI`, `TWEEZER_BOT`, `TWEEZER_TOP`  
-**Continuation:** `MBZ_L`, `MBZ_S`, `BULL_BELT`, `BEAR_BELT`
+**Fire:** `BULL_ENGULF`, `BEAR_ENGULF`, `HAMMER`, `PIN_BULL`, `SHOOTING_STAR`, `PIN_BEAR`, `MORNING_STAR`, `EVENING_STAR`, `INSIDE_UP`, `INSIDE_DOWN`, `PIERCING`, `DARK_CLOUD`
+
+**Detect but do not fire:** harami, tweezers, dragonfly/gravestone, three white/black, belt, marubozu
 
 Trend filters: EMA50/EMA200 + local slope. Same-bar bull+bear conflict → `NO_TRADE`.
 
@@ -28,16 +26,17 @@ Each pattern maps to a Bible section id (`PATTERN_BIBLE_KEY`). On signal, agent
 fetches that section in microseconds and logs it in System Log / AI confirm.
 
 ## ML fire discipline (cost-aware ON + entry rules)
-- Gate **ON** — λ=3.0, abs candle range ≥ 0.06%
-- Min pattern strength ≥ 1.5
-- **One auto fire per candle**; candle gap OFF (0 bars)
-- Volume hard rule: ≥3× Vol MA and rel_vol ≥ 3× rel_candle — else NO TRADE
+- Gate **ON** — λ=1.2, abs candle range ≥ 0.02%
+- Min pattern strength ≥ 0.75
+- **One auto fire per candle**; ≥3 bars between entries
+- Volume ≥ 1.6× Vol MA, vs prev ≥ 1.15×
 - Block opposite side while an auto position is open
 - Whale: ≥100 BTC, poll **60s**
+- Prefer chart **5m** (1m optional watch); PDF/Bible top-down favors higher TF
 
-## Exits (unchanged code)
-Profit lock: activate +0.15% gross, step +0.02% from peak, sell on retreat.
-No SL auto-exit (SL used for sizing / reference).
+## Exits
+Profit lock: activate +0.40% gross, 1.5× trail from peak, hard +1.2%.
+Stop mirror: arm −0.40% / 1.5× trail from trough / hard −1.2%.
 
 ## Whale flow (merged into BTC/USDT)
 - No separate UI pair — runs with BTC candle automation when active pair is BTC/USDT

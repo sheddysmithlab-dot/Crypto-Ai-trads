@@ -6,7 +6,7 @@
 ## Live pipeline (normal pairs)
 1. Detect candle pattern (`backend/volume_spread_system.py`)
 2. Bible RAM fetch (`candlestick_bible_memory`)
-3. Cost-aware gate **ON** (λ=3.0, abs range ≥0.06%) + strength≥1.5 / **no bars gap** / one-per-candle / **volume≥3×MA + 3× candle size**
+3. Cost-aware gate **ON** (PDF: λ=1.2, abs range ≥0.02%) + strength≥0.75 / **3 bars** gap / one-per-candle / volume≥1.6×MA / Bible allowlist only
 4. Fire BUY→LONG / SELL→SHORT (`main.py` auto_buy_loop)
 
 ## Whale flow (merged into BTC/USDT)
@@ -17,7 +17,7 @@
 - Runs alongside candle patterns when active pair is BTC/USDT (`whale_alert_loop`)
 
 ## Exits
-Strict Exit: +0.20% min lock, +1.2% hard target, trail peak − 1.5×0.10%. No SL auto-exit.
+Strict Exit: +0.40% min lock, +1.2% hard target, trail peak − 1.5×0.10%. Mirror stop on loss side.
 
 ## Session schedule (optional UI switch)
 Mon–Fri IST auto on/off (no browser needed): Morning 05:30–08:30 · Peak Overlap 18:30–23:30 · US Core 19:30–01:30.
