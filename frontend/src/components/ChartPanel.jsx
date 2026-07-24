@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import PairSelectorDropdown from './PairSelectorDropdown';
+import TradeLauncherPopup from './TradeLauncherPopup';
 import { fmtNum } from '../data/pairs';
 import { formatTradeFireTime } from '../utils/time';
 import { TIMEFRAME_PROFILES, getTimeframeProfile } from '../data/timeframeProfiles';
+import { formatTfMoveLabel } from '../hooks/useTfMoveStats';
 
 const TIMEFRAMES = ['1M', '5M', '15M', '1H', '1D'];
 
@@ -14,11 +16,15 @@ export default function ChartPanel({
   switchTimeframe,
   readouts,
   botIsActive,
+  tfMovePct = null,
+  tfMoveLabel = null,
+  launcher,
 }) {
   const [hoverTf, setHoverTf] = useState(null);
   const activeProfile = getTimeframeProfile(timeframe);
   const displayTf = hoverTf || timeframe;
   const displayProfile = getTimeframeProfile(displayTf);
+  const tfMoveUp = tfMovePct != null && tfMovePct >= 0;
 
   return (
     <div className="bg-lightCard dark:bg-darkCard rounded-xl shadow border border-gray-200 dark:border-gray-800 overflow-hidden shrink-0">
@@ -61,6 +67,20 @@ export default function ChartPanel({
               {readouts.blueBoxStatus}
             </div>
           ) : null}
+          <TradeLauncherPopup
+            slots={launcher?.slots || []}
+            editorOpen={Boolean(launcher?.editorOpen)}
+            editingId={launcher?.editingId || null}
+            onOpenNew={launcher?.onOpenNew}
+            onCloseEditor={launcher?.onCloseEditor}
+            onMinimizeToSlot={launcher?.onMinimizeToSlot}
+            onRestoreSlot={launcher?.onRestoreSlot}
+            onRemoveSlot={launcher?.onRemoveSlot}
+            pairs={pairSelector.pairs}
+            activeSymbol={pairSelector.activePair.symbol}
+            timeframe={timeframe}
+            botIsActive={botIsActive}
+          />
           <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-gray-100 dark:bg-gray-800/80 text-[10px] font-mono text-gray-600 dark:text-gray-300 tabular-nums">
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" title="Live clock" />
             <span title="Live local time">{readouts.liveClock}</span>
@@ -113,6 +133,17 @@ export default function ChartPanel({
             of capital
           </span>
         </span>
+        <span
+          className={`font-black normal-case tracking-normal ${
+            tfMovePct == null ? 'text-gray-400' : tfMoveUp ? 'text-green-500' : 'text-red-500'
+          }`}
+          title={`Avg % per ${timeframe} candle · ${formatTfMoveLabel(timeframe, tfMoveLabel)}`}
+        >
+          {tfMovePct != null ? `${tfMoveUp ? '+' : ''}${tfMovePct.toFixed(2)}%` : '--'}
+          <span className="text-gray-500 dark:text-gray-400 font-semibold ml-1">
+            {formatTfMoveLabel(timeframe, tfMoveLabel)}
+          </span>
+        </span>
         <span className="text-gray-500 dark:text-gray-400 font-normal normal-case tracking-normal ml-auto">
           Active {timeframe}: {activeProfile.capitalPct}% size · W{activeProfile.winRate}/L{activeProfile.loseRate}
         </span>
@@ -126,11 +157,15 @@ export default function ChartPanel({
               Candle Brain
             </div>
             <div className="text-[8px] text-cyan-300/80 font-mono text-right leading-tight">
-              detect → Bible → ML gate
+              <span className="text-cyan-300">◉ detect</span>
+              {' → '}
+              <span className="text-amber-300">◐ confirm</span>
+              {' → '}
+              <span className="text-lime-400">⚡ fire</span>
+              <span className="text-gray-500">/</span>
+              <span className="text-red-400">✕ skip</span>
               <br />
               <span className="text-yellow-400">—</span> EMA50 · <span className="text-purple-400">—</span> EMA200
-              <br />
-              <span className="text-lime-400">⚡</span> neon trade fire
             </div>
           </div>
         ) : null}

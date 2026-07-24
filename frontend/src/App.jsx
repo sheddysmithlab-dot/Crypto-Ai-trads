@@ -61,7 +61,7 @@ export default function App() {
   const { logout, username } = useAuth();
   const { status: apiStatus, setConnected } = useApiStatus();
   const pairSelector = usePairSelector();
-  const { trades, activeCount, activePair: activeTradesPair, closeTrade, entryCandles } = useTrades(setConnected);
+  const { trades, activeCount, activePair: activeTradesPair, closeTrade, entryCandles, patternNeon } = useTrades(setConnected);
   const { notifications, unreadCount, markAllRead } = useNotifications();
 
   const [alertOpen, setAlertOpen] = useState(false);
@@ -126,6 +126,7 @@ export default function App() {
     botIsActive: portfolio.isActive,
     blueBoxOverlay: portfolio.blueBoxOverlay,
     entryCandles,
+    patternNeon,
   });
   const tfMoveStats = useTfMoveStats(pairSelector.activePairLabel, timeframe);
 

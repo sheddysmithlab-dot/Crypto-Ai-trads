@@ -7,6 +7,8 @@ import {
   bybitPublicKlineTopic,
   bybitPublicTradeTopic,
   bybitRecentTradeUrl,
+  fetchBybitDayKlines,
+  barsForOneDay,
 } from '../config/bybitPublic';
 import { debugLog } from '../config/debug';
 import { fmtNum, getBybitSymbol } from '../data/pairs';
@@ -157,6 +159,20 @@ async function loadHistoricalData(pairLabelArg, tfKey, basePrice) {
   }
 
   try {
+    // Prefer a full ~1 day backbone on every reload (paginated for 1m ≈ 1440 bars).
+    if (bybitKline) {
+      try {
+        const dayNeed = barsForOneDay(intervalSecs, tfKey);
+        const raw = await fetchBybitDayKlines(bybitSymbol, bybitKline, intervalSecs, tfKey);
+        const data = sanitizeCandleData(raw, intervalSecs);
+        return {
+          data,
+          source: `Bybit linear ~1d (${data.length}/${dayNeed} bars, interval=${bybitKline})`,
+        };
+      } catch (dayErr) {
+        console.warn(`[CHART] Day fetch failed for ${pairLabelArg}, falling back:`, dayErr);
+      }
+    }
     if (tfKey === '5M') {
       try {
         const data = sanitizeCandleData(await fetchBackend24hCandles(pairLabelArg), intervalSecs);
@@ -166,7 +182,7 @@ async function loadHistoricalData(pairLabelArg, tfKey, basePrice) {
       }
     }
     const data = bybitKline
-      ? sanitizeCandleData(await fetchBybitHistory(bybitSymbol, bybitKline, 300), intervalSecs)
+      ? sanitizeCandleData(await fetchBybitHistory(bybitSymbol, bybitKline, 1000), intervalSecs)
       : sanitizeCandleData(await fetchBybitRecentTradesAsCandles(bybitSymbol, intervalSecs), intervalSecs);
     return {
       data,
@@ -259,6 +275,7 @@ export function useTradingChart({
   botIsActive = false,
   blueBoxOverlay = null,
   entryCandles = [],
+  patternNeon = [],
 }) {
   const chartRef = useRef(null);
   const volumeChartRef = useRef(null);
@@ -275,6 +292,7 @@ export function useTradingChart({
   const blueBoxLineRefsRef = useRef([]);
   const blueBoxOverlayDataRef = useRef(null);
   const entryCandlesRef = useRef([]);
+  const patternNeonRef = useRef([]);
   const botIsActiveRef = useRef(botIsActive);
   const mockDataRef = useRef([]);
   const entryPriceRef = useRef(pairPrice);
@@ -308,6 +326,7 @@ export function useTradingChart({
   botIsActiveRef.current = botIsActive;
   blueBoxOverlayDataRef.current = blueBoxOverlay;
   entryCandlesRef.current = entryCandles;
+  patternNeonRef.current = patternNeon;
 
   const redrawTradeFireOverlay = useCallback(() => {
     const chart = chartRef.current;
@@ -319,6 +338,8 @@ export function useTradingChart({
       entryCandlesRef.current,
       mockDataRef.current,
       currentIntervalRef.current,
+      pairLabelRef.current,
+      patternNeonRef.current,
     );
     tradeFireLookupRef.current = lookup;
 
@@ -343,7 +364,13 @@ export function useTradingChart({
       return;
     }
     series.setData(decorateCandlestickSeries(data));
-    const lookup = buildTradeFireLookup(entryCandlesRef.current, data, currentIntervalRef.current);
+    const lookup = buildTradeFireLookup(
+      entryCandlesRef.current,
+      data,
+      currentIntervalRef.current,
+      pairLabelRef.current,
+      patternNeonRef.current,
+    );
     tradeFireLookupRef.current = lookup;
     const fireMarkers = computeTradeFireMarkers();
     series.setMarkers(fireMarkers.length ? fireMarkers : computeExtremeMarkers(data));
@@ -711,9 +738,11 @@ export function useTradingChart({
   const switchSymbol = useCallback(
     (basePrice) => {
       entryPriceRef.current = basePrice;
-      // Clear the chart rather than showing a fake synthetic placeholder -
-      // everything displayed should be real, wired data or nothing at all.
+      // Clear candles + fire overlays so previous pair's neon pattern cannot linger.
       applyDataset([]);
+      clearTradeFireOverlay(tradeFireOverlayElRef.current);
+      tradeFireLookupRef.current = new Map();
+      setReadouts((prev) => ({ ...prev, tradeFireTooltip: null }));
       refreshTrailingLockLine(basePrice);
       resetPriceScale();
       loadRealHistoryInBackground(pairLabelRef.current, timeframe, basePrice);
@@ -996,11 +1025,12 @@ export function useTradingChart({
       return;
     }
     if (!candleSeriesRef.current) return;
-    debugLog(`[CHART] Regenerating candlestick data for ${pairLabel}`);
+    debugLog(`[CHART] Switching candlestick data → ${pairLabel}`);
     switchSymbolRef.current?.(pairPrice);
     connectFreeSourceRef.current?.(pairLabel);
+    // Only re-run when the pair label changes — price refresh alone must not wipe the chart.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pairLabel, pairPrice]);
+  }, [pairLabel]);
 
   // React to trading-mode changes reported by the portfolio WebSocket
   useEffect(() => {
@@ -1020,13 +1050,16 @@ export function useTradingChart({
   useEffect(() => {
     redrawBlueBoxOverlay();
     redrawTradeFireOverlay();
-  }, [botIsActive, blueBoxOverlay, timeframe, redrawBlueBoxOverlay, redrawTradeFireOverlay]);
+  }, [botIsActive, blueBoxOverlay, timeframe, pairLabel, redrawBlueBoxOverlay, redrawTradeFireOverlay]);
 
   useEffect(() => {
     if (mockDataRef.current.length > 0) {
       pushCandlesToChart(mockDataRef.current);
+    } else {
+      clearTradeFireOverlay(tradeFireOverlayElRef.current);
+      tradeFireLookupRef.current = new Map();
     }
-  }, [entryCandles, pushCandlesToChart]);
+  }, [entryCandles, patternNeon, pairLabel, pushCandlesToChart]);
 
   return { timeframe, switchTimeframe, readouts, chartSourceMode, chartHistorySource, chartLiveSource };
 }

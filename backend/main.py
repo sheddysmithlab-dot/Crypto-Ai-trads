@@ -1885,6 +1885,83 @@ THREE_CANDLE_ENTRY = os.environ.get("THREE_CANDLE_ENTRY", "true").strip().lower(
     "1", "true", "yes", "on",
 )
 
+# Chart neon stages: detected (cyan) → confirming (amber) → fired/skipped (lime|magenta / red).
+PATTERN_NEON_STAGES: list[dict] = []
+_MAX_PATTERN_NEON = 120
+
+
+def _chart_time_sec(candle_time_ms: int | float | None) -> int | None:
+    if candle_time_ms is None:
+        return None
+    raw = int(candle_time_ms)
+    return int(raw // 1000) if raw > 1_000_000_000_000 else raw
+
+
+def push_pattern_neon(
+    *,
+    pair: str,
+    stage: str,
+    action: str,
+    pattern: str | None,
+    candle_time_ms: int | float | None,
+    reason: str | None = None,
+    source: str | None = None,
+) -> dict | None:
+    """Record a 3-stage neon event for the chart overlay (one glow per pair+bar)."""
+    chart_time = _chart_time_sec(candle_time_ms)
+    if chart_time is None or not pair:
+        return None
+    side = "SHORT" if action == "SELL" else "LONG"
+    entry = {
+        "time": chart_time,
+        "pair": pair,
+        "stage": stage,  # detected | confirming | fired | skipped
+        "side": side,
+        "action": action,
+        "pattern": pattern,
+        "reason": reason,
+        "source": source or "pattern",
+        "opened_at": time.time(),
+    }
+    # Same bar evolves (confirming → fired/skipped); keep only latest stage.
+    PATTERN_NEON_STAGES[:] = [
+        e
+        for e in PATTERN_NEON_STAGES
+        if not (e.get("pair") == pair and e.get("time") == chart_time)
+    ]
+    PATTERN_NEON_STAGES.append(entry)
+    if len(PATTERN_NEON_STAGES) > _MAX_PATTERN_NEON:
+        del PATTERN_NEON_STAGES[:-_MAX_PATTERN_NEON]
+    return entry
+
+
+def queue_pattern_neon_stages(
+    *,
+    pair: str,
+    action: str,
+    pattern: str | None,
+    signal_candle_time_ms: int,
+    interval_ms: int,
+    source: str = "pattern",
+) -> None:
+    """Paint bar1=detected and bar2=confirming when a signal is queued."""
+    push_pattern_neon(
+        pair=pair,
+        stage="detected",
+        action=action,
+        pattern=pattern,
+        candle_time_ms=signal_candle_time_ms,
+        source=source,
+    )
+    push_pattern_neon(
+        pair=pair,
+        stage="confirming",
+        action=action,
+        pattern=pattern,
+        candle_time_ms=int(signal_candle_time_ms) + int(interval_ms),
+        source=source,
+    )
+
 # Cached OHLCV windows for UVSS — avoids refetching 200+ klines on every poll.
 _KLINE_HISTORY_CACHE: dict[str, dict] = {}
 
@@ -2903,6 +2980,15 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                     t_detect=t_detect,
                     cost_aware=cost_aware,
                 )
+                push_pattern_neon(
+                    pair=pair,
+                    stage="fired" if fired_trade else "skipped",
+                    action=pending["action"],
+                    pattern=pending.get("pattern"),
+                    candle_time_ms=close_time,
+                    reason=None if fired_trade else "fire blocked after confirm",
+                    source=pending.get("source", "pattern"),
+                )
                 result = {**fire_result, "reason": f"3-candle confirmed ({why})"}
             else:
                 print(f"[3-CANDLE] {pair} CONFIRM FAIL — {why} (drop {pending.get('pattern')})")
@@ -2910,6 +2996,15 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                     f"3-candle confirm FAIL on {pair}: {pending.get('pattern')} — {why}",
                     status="no_match",
                     details={"pair": pair, "why": why},
+                )
+                push_pattern_neon(
+                    pair=pair,
+                    stage="skipped",
+                    action=pending["action"],
+                    pattern=pending.get("pattern"),
+                    candle_time_ms=close_time,
+                    reason=why,
+                    source=pending.get("source", "pattern"),
                 )
                 result = {
                     "action": "NO_TRADE",
@@ -2920,6 +3015,15 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         elif close_time > expected_confirm_t:
             print(
                 f"[3-CANDLE] {pair} pending expired (expected confirm @ {expected_confirm_t}, got {close_time})"
+            )
+            push_pattern_neon(
+                pair=pair,
+                stage="skipped",
+                action=pending.get("action") or "BUY",
+                pattern=pending.get("pattern"),
+                candle_time_ms=expected_confirm_t,
+                reason="confirm window expired",
+                source=pending.get("source", "pattern"),
             )
             PENDING_ENTRY_SIGNALS.pop(pair, None)
 
@@ -2984,6 +3088,14 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                         f"[3-CANDLE] {pair} QUEUE {detect['action']} {detect.get('pattern')} "
                         f"@ {close_time} — waiting confirm candle"
                     )
+                    queue_pattern_neon_stages(
+                        pair=pair,
+                        action=detect["action"],
+                        pattern=detect.get("pattern"),
+                        signal_candle_time_ms=close_time,
+                        interval_ms=interval_ms,
+                        source="pattern",
+                    )
                     system_log.push_agent_chat(
                         f"Pattern {detect.get('pattern')} on {pair} queued — "
                         f"await direction confirm on next candle, fire at 3rd open.",
@@ -3018,6 +3130,14 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                     f"[3-CANDLE] {pair} QUEUE {detect['action']} {detect.get('pattern')} "
                     f"@ {close_time} — waiting confirm candle"
                 )
+                queue_pattern_neon_stages(
+                    pair=pair,
+                    action=detect["action"],
+                    pattern=detect.get("pattern"),
+                    signal_candle_time_ms=close_time,
+                    interval_ms=interval_ms,
+                    source="pattern",
+                )
                 system_log.push_agent_chat(
                     f"Pattern {detect.get('pattern')} on {pair} queued — "
                     f"await direction confirm on next candle, fire at 3rd open.",
@@ -3034,6 +3154,14 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 detect["sl"] = struct_sl
             cost_aware = detect_cost
             result = detect
+            push_pattern_neon(
+                pair=pair,
+                stage="detected",
+                action=detect["action"],
+                pattern=detect.get("pattern"),
+                candle_time_ms=close_time,
+                source="pattern",
+            )
             fired_trade = await _execute_pattern_auto_fire(
                 result=detect,
                 bybit_symbol=bybit_symbol,
@@ -3043,6 +3171,15 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 mark_px=mark_px,
                 t_detect=t_detect,
                 cost_aware=cost_aware,
+            )
+            push_pattern_neon(
+                pair=pair,
+                stage="fired" if fired_trade else "skipped",
+                action=detect["action"],
+                pattern=detect.get("pattern"),
+                candle_time_ms=close_time,
+                reason=None if fired_trade else "immediate fire blocked",
+                source="pattern",
             )
         else:
             result = detect
@@ -3266,6 +3403,15 @@ async def whale_alert_loop():
                 print(
                     f"[3-CANDLE/WHALE] QUEUE {result['action']} {result.get('pattern')} "
                     f"on {btc_pair} @ candle {close_time} — await confirm bar"
+                )
+                interval_ms = _timeframe_interval_ms(timeframe_key)
+                queue_pattern_neon_stages(
+                    pair=btc_pair,
+                    action=result["action"],
+                    pattern=result.get("pattern"),
+                    signal_candle_time_ms=close_time,
+                    interval_ms=interval_ms,
+                    source="whale",
                 )
                 system_log.push_agent_chat(
                     f"Whale {result.get('pattern')} queued on {btc_pair} — "
@@ -3991,6 +4137,7 @@ async def get_system_logs():
         },
         "last_taapi_scan": system_log.last_taapi_scan,
         "last_trade_fire": system_log.last_trade_fire,
+        "pattern_neon": PATTERN_NEON_STAGES[-40:],
         "entries": system_log.entries[-60:],
         "notifications": notifications.notifications[-20:],
         "agent_chat": system_log.agent_chat[-20:],
@@ -4266,6 +4413,7 @@ async def trades_feed(websocket: WebSocket):
                 "active_count": len(agent.trades),
                 "lock_active": agent.is_lock_active,
                 "entry_candles": agent.get_entry_candle_highlights(),
+                "pattern_neon": PATTERN_NEON_STAGES[-80:],
             }
             await websocket.send_json(payload)
             await asyncio.sleep(1)

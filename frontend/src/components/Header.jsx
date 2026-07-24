@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import NotificationsDropdown from './NotificationsDropdown';
 import BotHelpModal from './BotHelpModal';
 import { fmtNum } from '../data/pairs';
+import { formatTfMoveLabel } from '../hooks/useTfMoveStats';
 import { useClickOutside } from '../hooks/useClickOutside';
 
 const STATUS_COLOR = {
@@ -29,6 +30,9 @@ export default function Header({
   tradingMode,
   dayHigh,
   dayLow,
+  tfMovePct = null,
+  tfMoveLabel = null,
+  chartTimeframe = '1M',
   notifications,
   unreadCount,
   markAllRead,
@@ -61,6 +65,12 @@ export default function Header({
       })} (${isSeasonProfit ? '+' : ''}${seasonProfitPct.toFixed(2)}%)`
     : '$0.00 (0.00%)';
   const isLive = tradingMode === 'LIVE_TRADING';
+  const tfMoveUp = tfMovePct != null && tfMovePct >= 0;
+  const tfMoveStr =
+    tfMovePct != null
+      ? `${tfMoveUp ? '+' : ''}${tfMovePct.toFixed(2)}%`
+      : '--';
+  const tfMoveTitle = formatTfMoveLabel(chartTimeframe, tfMoveLabel);
 
   return (
     <header className="bg-lightCard dark:bg-darkCard shadow-md px-3 py-2 flex justify-between items-center sticky top-0 z-50 border-b border-gray-200 dark:border-gray-800">
@@ -137,6 +147,27 @@ export default function Header({
             ) : (
               <span className="text-gray-400 font-normal">--</span>
             )}
+          </span>
+        </div>
+        <div className="flex flex-col">
+          <span
+            className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider"
+            title={`Avg candle move over ${tfMoveTitle}`}
+          >
+            Market {chartTimeframe}
+          </span>
+          <span
+            className={`font-bold text-sm ${
+              tfMovePct == null ? 'text-gray-400' : tfMoveUp ? 'text-green-500' : 'text-red-500'
+            }`}
+            title={`${tfMoveTitle} — avg % per ${chartTimeframe} candle`}
+          >
+            {tfMoveStr}
+            {tfMoveLabel ? (
+              <span className="text-[10px] font-normal text-gray-400 ml-1">
+                {formatTfMoveLabel(chartTimeframe, tfMoveLabel).split('·')[1]?.trim() || tfMoveLabel}
+              </span>
+            ) : null}
           </span>
         </div>
         <div className="flex flex-col">

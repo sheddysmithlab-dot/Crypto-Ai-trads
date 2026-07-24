@@ -41,7 +41,25 @@ body.dark {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
 }
 
-/* Trade-fire neon glow on pattern-detected candles */
+/* 3-stage pipeline neon: detected → confirming → fired/skipped */
+@keyframes trade-fire-pulse-detected {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.55), 0 0 16px rgba(0, 229, 255, 0.35), inset 0 0 6px rgba(0, 229, 255, 0.15);
+  }
+  50% {
+    box-shadow: 0 0 14px rgba(0, 229, 255, 0.85), 0 0 28px rgba(0, 229, 255, 0.45), inset 0 0 10px rgba(0, 229, 255, 0.25);
+  }
+}
+
+@keyframes trade-fire-pulse-confirming {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(255, 176, 32, 0.55), 0 0 16px rgba(255, 176, 32, 0.35), inset 0 0 6px rgba(255, 176, 32, 0.15);
+  }
+  50% {
+    box-shadow: 0 0 14px rgba(255, 176, 32, 0.85), 0 0 28px rgba(255, 176, 32, 0.45), inset 0 0 10px rgba(255, 176, 32, 0.25);
+  }
+}
+
 @keyframes trade-fire-pulse-long {
   0%, 100% {
     box-shadow: 0 0 8px rgba(57, 255, 20, 0.55), 0 0 16px rgba(57, 255, 20, 0.35), inset 0 0 6px rgba(57, 255, 20, 0.15);
@@ -60,10 +78,27 @@ body.dark {
   }
 }
 
+@keyframes trade-fire-pulse-skipped {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(255, 77, 77, 0.5), 0 0 16px rgba(255, 77, 77, 0.3), inset 0 0 6px rgba(255, 77, 77, 0.12);
+  }
+  50% {
+    box-shadow: 0 0 14px rgba(255, 77, 77, 0.8), 0 0 26px rgba(255, 77, 77, 0.4), inset 0 0 10px rgba(255, 77, 77, 0.22);
+  }
+}
+
 .trade-fire-neon__glow {
   animation-duration: 1.8s;
   animation-timing-function: ease-in-out;
   animation-iteration-count: infinite;
+}
+
+.trade-fire-neon--detected .trade-fire-neon__glow {
+  animation-name: trade-fire-pulse-detected;
+}
+
+.trade-fire-neon--confirming .trade-fire-neon__glow {
+  animation-name: trade-fire-pulse-confirming;
 }
 
 .trade-fire-neon--long .trade-fire-neon__glow {
@@ -74,8 +109,20 @@ body.dark {
   animation-name: trade-fire-pulse-short;
 }
 
+.trade-fire-neon--skipped .trade-fire-neon__glow {
+  animation-name: trade-fire-pulse-skipped;
+}
+
 .trade-fire-neon--hover .trade-fire-neon__glow {
   animation: none;
+}
+
+.trade-fire-neon--hover.trade-fire-neon--detected .trade-fire-neon__glow {
+  box-shadow: 0 0 18px rgba(0, 229, 255, 0.9), 0 0 32px rgba(0, 229, 255, 0.5), inset 0 0 12px rgba(0, 229, 255, 0.3);
+}
+
+.trade-fire-neon--hover.trade-fire-neon--confirming .trade-fire-neon__glow {
+  box-shadow: 0 0 18px rgba(255, 176, 32, 0.9), 0 0 32px rgba(255, 176, 32, 0.5), inset 0 0 12px rgba(255, 176, 32, 0.3);
 }
 
 .trade-fire-neon--hover.trade-fire-neon--long .trade-fire-neon__glow {
@@ -84,6 +131,10 @@ body.dark {
 
 .trade-fire-neon--hover.trade-fire-neon--short .trade-fire-neon__glow {
   box-shadow: 0 0 18px rgba(255, 16, 240, 0.9), 0 0 32px rgba(255, 16, 240, 0.5), inset 0 0 12px rgba(255, 16, 240, 0.3);
+}
+
+.trade-fire-neon--hover.trade-fire-neon--skipped .trade-fire-neon__glow {
+  box-shadow: 0 0 18px rgba(255, 77, 77, 0.9), 0 0 32px rgba(255, 77, 77, 0.5), inset 0 0 12px rgba(255, 77, 77, 0.3);
 }
 
 .trade-fire-neon__badge {
@@ -105,6 +156,18 @@ body.dark {
   white-space: nowrap;
 }
 
+.trade-fire-tooltip--detected {
+  background: rgba(6, 18, 24, 0.92);
+  border: 1px solid rgba(0, 229, 255, 0.65);
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.45);
+}
+
+.trade-fire-tooltip--confirming {
+  background: rgba(24, 16, 6, 0.92);
+  border: 1px solid rgba(255, 176, 32, 0.65);
+  box-shadow: 0 0 12px rgba(255, 176, 32, 0.45);
+}
+
 .trade-fire-tooltip--long {
   background: rgba(10, 20, 10, 0.92);
   border: 1px solid rgba(57, 255, 20, 0.65);
@@ -117,6 +180,41 @@ body.dark {
   box-shadow: 0 0 12px rgba(255, 16, 240, 0.45);
 }
 
+.trade-fire-tooltip--skipped {
+  background: rgba(24, 8, 8, 0.92);
+  border: 1px solid rgba(255, 77, 77, 0.65);
+  box-shadow: 0 0 12px rgba(255, 77, 77, 0.45);
+}
+
+.trade-fire-tooltip__stage {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+  opacity: 0.95;
+}
+
+.trade-fire-tooltip--detected .trade-fire-tooltip__stage {
+  color: #67f0ff;
+}
+
+.trade-fire-tooltip--confirming .trade-fire-tooltip__stage {
+  color: #ffd060;
+}
+
+.trade-fire-tooltip--long .trade-fire-tooltip__stage {
+  color: #bbf7d0;
+}
+
+.trade-fire-tooltip--short .trade-fire-tooltip__stage {
+  color: #f5d0fe;
+}
+
+.trade-fire-tooltip--skipped .trade-fire-tooltip__stage {
+  color: #ff8a8a;
+}
+
 .trade-fire-tooltip__pattern {
   font-size: 10px;
   font-weight: 800;
@@ -125,12 +223,24 @@ body.dark {
   color: #e5e7eb;
 }
 
+.trade-fire-tooltip--detected .trade-fire-tooltip__pattern {
+  color: #a5f3fc;
+}
+
+.trade-fire-tooltip--confirming .trade-fire-tooltip__pattern {
+  color: #fde68a;
+}
+
 .trade-fire-tooltip--long .trade-fire-tooltip__pattern {
   color: #bbf7d0;
 }
 
 .trade-fire-tooltip--short .trade-fire-tooltip__pattern {
   color: #f5d0fe;
+}
+
+.trade-fire-tooltip--skipped .trade-fire-tooltip__pattern {
+  color: #fecaca;
 }
 
 .trade-fire-tooltip__time {
