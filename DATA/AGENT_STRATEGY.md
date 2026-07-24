@@ -32,7 +32,7 @@ fetches that section in microseconds and logs it in System Log / AI confirm.
 - **One auto fire per candle**; ≥3 bars between entries
 - Volume ≥ 1.6× Vol MA, vs prev ≥ 1.15×
 - Block opposite side while an auto position is open
-- Whale: ≥100 BTC, poll **60s**
+- Whale: ≥100 BTC, poll **60s** — **same 3-candle queue** (no instant fire)
 - Prefer chart **5m** (1m optional watch); PDF/Bible top-down favors higher TF
 
 ## Exits

@@ -2884,11 +2884,12 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 print(
                     f"[3-CANDLE] {pair} CONFIRM OK ({why}) — firing at candle-3 open "
                     f"(pattern={pending.get('pattern')} {pending['action']}, "
+                    f"source={pending.get('source', 'pattern')}, "
                     f"structure_sl={fire_result.get('sl')})"
                 )
                 system_log.push_agent_chat(
                     f"3-candle confirm OK on {pair}: {pending.get('pattern')} {pending['action']} "
-                    f"→ fire at bar-3 open ({why})",
+                    f"[{pending.get('source', 'pattern')}] → fire at bar-3 open ({why})",
                     status="match",
                     details={"pair": pair, "pending": pending, "confirm": why},
                 )
@@ -2944,38 +2945,85 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         blocked = bool(detect_cost and detect_cost.get("would_block") and not detect_cost.get("dry_run"))
 
         if THREE_CANDLE_ENTRY and not blocked:
-            PENDING_ENTRY_SIGNALS[pair] = {
-                "action": detect["action"],
-                "pattern": detect.get("pattern"),
-                "result": detect,
-                "signal_candle_time": close_time,
-                "timeframe_key": timeframe_key,
-                "signal_ohlc": {
-                    "open": confirm_candle.get("open"),
-                    "high": confirm_candle["high"],
-                    "low": confirm_candle["low"],
-                    "close": confirm_candle["close"],
-                },
-                "queued_at": time.time(),
-            }
-            result = {
-                **detect,
-                "reason": (
-                    f"Queued for 3-candle entry — await confirm bar, "
-                    f"then fire at next open (pattern={detect.get('pattern')})"
-                ),
-            }
-            cost_aware = detect_cost
-            print(
-                f"[3-CANDLE] {pair} QUEUE {detect['action']} {detect.get('pattern')} "
-                f"@ {close_time} — waiting confirm candle"
-            )
-            system_log.push_agent_chat(
-                f"Pattern {detect.get('pattern')} on {pair} queued — "
-                f"await direction confirm on next candle, fire at 3rd open.",
-                status="match",
-                details={"pair": pair, "decision": detect, "stage": "queued"},
-            )
+            # Don't clobber an in-flight confirm wait (whale or pattern).
+            pend = PENDING_ENTRY_SIGNALS.get(pair)
+            if pend and pend.get("timeframe_key") == timeframe_key:
+                expected = int(pend["signal_candle_time"]) + interval_ms
+                if close_time < expected:
+                    print(
+                        f"[3-CANDLE] {pair} skip new queue — pending {pend.get('pattern')} "
+                        f"awaits confirm @ {expected}"
+                    )
+                    result = detect
+                    cost_aware = detect_cost
+                else:
+                    PENDING_ENTRY_SIGNALS[pair] = {
+                        "action": detect["action"],
+                        "pattern": detect.get("pattern"),
+                        "result": detect,
+                        "signal_candle_time": close_time,
+                        "timeframe_key": timeframe_key,
+                        "signal_ohlc": {
+                            "open": confirm_candle.get("open"),
+                            "high": confirm_candle["high"],
+                            "low": confirm_candle["low"],
+                            "close": confirm_candle["close"],
+                        },
+                        "queued_at": time.time(),
+                        "source": "pattern",
+                    }
+                    result = {
+                        **detect,
+                        "reason": (
+                            f"Queued for 3-candle entry — await confirm bar, "
+                            f"then fire at next open (pattern={detect.get('pattern')})"
+                        ),
+                    }
+                    cost_aware = detect_cost
+                    print(
+                        f"[3-CANDLE] {pair} QUEUE {detect['action']} {detect.get('pattern')} "
+                        f"@ {close_time} — waiting confirm candle"
+                    )
+                    system_log.push_agent_chat(
+                        f"Pattern {detect.get('pattern')} on {pair} queued — "
+                        f"await direction confirm on next candle, fire at 3rd open.",
+                        status="match",
+                        details={"pair": pair, "decision": detect, "stage": "queued"},
+                    )
+            else:
+                PENDING_ENTRY_SIGNALS[pair] = {
+                    "action": detect["action"],
+                    "pattern": detect.get("pattern"),
+                    "result": detect,
+                    "signal_candle_time": close_time,
+                    "timeframe_key": timeframe_key,
+                    "signal_ohlc": {
+                        "open": confirm_candle.get("open"),
+                        "high": confirm_candle["high"],
+                        "low": confirm_candle["low"],
+                        "close": confirm_candle["close"],
+                    },
+                    "queued_at": time.time(),
+                    "source": "pattern",
+                }
+                result = {
+                    **detect,
+                    "reason": (
+                        f"Queued for 3-candle entry — await confirm bar, "
+                        f"then fire at next open (pattern={detect.get('pattern')})"
+                    ),
+                }
+                cost_aware = detect_cost
+                print(
+                    f"[3-CANDLE] {pair} QUEUE {detect['action']} {detect.get('pattern')} "
+                    f"@ {close_time} — waiting confirm candle"
+                )
+                system_log.push_agent_chat(
+                    f"Pattern {detect.get('pattern')} on {pair} queued — "
+                    f"await direction confirm on next candle, fire at 3rd open.",
+                    status="match",
+                    details={"pair": pair, "decision": detect, "stage": "queued"},
+                )
         elif not THREE_CANDLE_ENTRY and not blocked:
             # Legacy immediate fire (env THREE_CANDLE_ENTRY=false)
             detect["signal_candle_time"] = close_time
@@ -3088,15 +3136,17 @@ async def auto_buy_loop():
             await asyncio.sleep(_AUTO_BUY_BURST_POLL if fired_any else poll)
 
 async def whale_alert_loop():
-    """BTC/USDT automation: fetch Telegram WhaleBotAlerts → fire LONG/SHORT alongside candle patterns."""
+    """BTC/USDT: WhaleBotAlerts → same 3-candle PENDING queue as candle patterns.
+
+    Whale alert = bar1 signal (queued on latest closed candle).
+    Next closed candle = bar2 confirm → fire at bar3 open (handled in scan_and_maybe_fire_pair).
+    """
     print(
         f"[WHALE LOOP] BTC/USDT merge — poll {WHALE_SOURCE_URL} every {WHALE_POLL_SECONDS}s "
-        f"(≥{MIN_BTC_AMOUNT:.0f} BTC Unknown↔Exchange)."
+        f"(≥{MIN_BTC_AMOUNT:.0f} BTC Unknown↔Exchange) → 3-candle queue (not instant fire)."
     )
     async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
         while True:
-            # Whale always trades BTC — fire when BTC is in the AI watchlist
-            # (or is the sole chart focus when watchlist is empty).
             if not agent.is_active or agent.emergency_triggered:
                 await asyncio.sleep(min(WHALE_POLL_SECONDS, 5.0))
                 continue
@@ -3106,6 +3156,7 @@ async def whale_alert_loop():
 
             btc_pair = "BTC/USDT"
             bybit_symbol = get_bybit_symbol(btc_pair) or "BTCUSDT"
+            timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
             try:
                 snap = await fetch_whale_alerts(client)
             except Exception as exc:
@@ -3124,7 +3175,6 @@ async def whale_alert_loop():
 
             signals = snap.get("signals") or []
             if not is_seeded():
-                # Keep newest alert eligible so a trade can fire on this / next poll.
                 n = seed_seen_from_snapshot(signals, keep_newest=1)
                 kept = signals[0] if signals else None
                 system_log.push(
@@ -3136,16 +3186,15 @@ async def whale_alert_loop():
                         if kept
                         else ""
                     )
-                    + f". New ≥{MIN_BTC_AMOUNT:.0f} BTC flows also fire.",
+                    + f". New ≥{MIN_BTC_AMOUNT:.0f} BTC flows queue for 3-candle confirm.",
                     {"source": WHALE_SOURCE_URL},
                 )
-                # Fall through — try to fire the kept newest signal now.
 
             unseen = [s for s in signals if s.get("id") and not is_signal_seen(s.get("id"))]
             system_log.push(
                 "whale",
                 f"WhaleBotAlerts scanned — {len(signals)} qualifying (≥{MIN_BTC_AMOUNT:.0f} BTC), "
-                f"{len(unseen)} unseen / fireable from {snap.get('raw_count', 0)} BTC posts.",
+                f"{len(unseen)} unseen / queueable from {snap.get('raw_count', 0)} BTC posts.",
                 {"min_btc": MIN_BTC_AMOUNT, "source": WHALE_SOURCE_URL, "unseen": len(unseen)},
             )
 
@@ -3154,82 +3203,85 @@ async def whale_alert_loop():
                 if not sid or is_signal_seen(sid):
                     continue
 
+                # Already waiting confirm on BTC — don't overwrite / double-queue.
+                existing = PENDING_ENTRY_SIGNALS.get(btc_pair)
+                if existing and existing.get("timeframe_key") == timeframe_key:
+                    system_log.push(
+                        "whale",
+                        f"Whale {sig.get('pattern')} deferred — BTC already has pending "
+                        f"{existing.get('pattern')} awaiting 3-candle confirm.",
+                        {"signal_id": sid, "pending": existing.get("pattern")},
+                    )
+                    break
+
                 entry_px = agent.mark_price_for(btc_pair) or agent.current_price
                 result = build_trade_plan_from_signal(sig, float(entry_px) if entry_px else 0.0)
                 if not result:
-                    # Bad price — retry next poll (do not burn signal).
                     continue
 
-                system_log.push_agent_chat(
-                    f"Whale signal: {sig['reason']}",
-                    status="match",
-                    details={"decision": result, "pair": btc_pair},
+                try:
+                    latest_closed = await probe_latest_closed_kline(
+                        client, bybit_symbol, timeframe_key
+                    )
+                except Exception as exc:
+                    print(f"[WHALE LOOP] kline probe failed: {exc}")
+                    break
+                if not latest_closed:
+                    break
+
+                # Need open for confirm green/red check — fetch 1 closed bar OHLC from history.
+                try:
+                    hist = await fetch_kline_history(
+                        bybit_symbol, timeframe_key, limit=5, client=client
+                    )
+                except Exception as exc:
+                    print(f"[WHALE LOOP] history failed: {exc}")
+                    break
+                if not hist:
+                    break
+                signal_bar = hist[-1]
+                close_time = int(signal_bar.get("close_time") or latest_closed["close_time"])
+
+                result["signal_candle_time"] = close_time
+                result["timeframe_key"] = timeframe_key
+                result["entry"] = float(entry_px) if entry_px else result.get("entry")
+
+                PENDING_ENTRY_SIGNALS[btc_pair] = {
+                    "action": result["action"],
+                    "pattern": result.get("pattern"),
+                    "result": result,
+                    "signal_candle_time": close_time,
+                    "timeframe_key": timeframe_key,
+                    "signal_ohlc": {
+                        "open": signal_bar.get("open"),
+                        "high": signal_bar.get("high"),
+                        "low": signal_bar.get("low"),
+                        "close": signal_bar.get("close"),
+                    },
+                    "queued_at": time.time(),
+                    "source": "whale",
+                    "whale_signal_id": sid,
+                }
+                mark_signal_seen(sid)
+                print(
+                    f"[3-CANDLE/WHALE] QUEUE {result['action']} {result.get('pattern')} "
+                    f"on {btc_pair} @ candle {close_time} — await confirm bar"
                 )
-
-                balance = agent.get_available_capital()
-                if balance is None or balance <= 0:
-                    _log_trade_skip(
-                        result["action"], bybit_symbol, result.get("pattern"),
-                        f"Insufficient available capital (balance=${balance}).",
-                    )
-                    # Retry when capital frees up.
-                    break
-
-                plan = compute_auto_trade_plan(agent, float(result["entry"]), pair=btc_pair)
-                if plan is None:
-                    _log_trade_skip(
-                        result["action"], bybit_symbol, result.get("pattern"),
-                        "Could not size whale trade.",
-                    )
-                    break
-
-                candle_key = int(time.time())
-                if is_bybit_testnet_configured() or bybit_api.mode == "PAPER_TRADING":
-                    log_trade_execution(
-                        signal_action_to_trade_side(result["action"]),
-                        float(result["entry"]),
-                        float(result["sl"]),
-                        float(result["tp"]),
-                        float(plan["qty"]),
-                        float(balance),
-                        result.get("pattern", "WHALE"),
-                    )
-                    _trade, fired, fire_err = await fire_taapi_auto_trade(
-                        {**result, "action": execution_action_for_fire(result["action"]), "symbol": bybit_symbol},
-                        bybit_symbol,
-                        plan,
-                        plan["position_usd"],
-                        plan["qty"],
-                        candle_close_time=candle_key,
-                        timeframe_key="whale",
-                        signal_action=result["action"],
-                        pair=btc_pair,
-                    )
-                    if fired:
-                        mark_signal_seen(sid)
-                        system_log.push(
-                            "whale",
-                            f"Whale trade FIRED: {result.get('pattern')} {sig.get('amount_btc')} BTC → "
-                            f"{result['action']} {bybit_symbol} qty={plan['qty']}",
-                            {"signal_id": sid, "amount_btc": sig.get("amount_btc")},
-                        )
-                    else:
-                        _log_trade_skip(
-                            result["action"], bybit_symbol, result.get("pattern"),
-                            fire_err or "Whale fire blocked.",
-                        )
-                        # Permanent-ish blocks: burn so we don't retry forever.
-                        err_l = (fire_err or "").lower()
-                        if "opposite open position" in err_l or "max concurrent" in err_l or "duplicate" in err_l:
-                            mark_signal_seen(sid)
-                    # One attempt per poll cycle
-                    break
-                else:
-                    _log_trade_skip(
-                        result["action"], bybit_symbol, result.get("pattern"),
-                        "BYBIT_TESTNET keys missing — whale signal logged only.",
-                    )
-                    break
+                system_log.push_agent_chat(
+                    f"Whale {result.get('pattern')} queued on {btc_pair} — "
+                    f"same 3-candle confirm as patterns (fire at bar-3 open). "
+                    f"{sig.get('reason', '')}",
+                    status="match",
+                    details={"decision": result, "pair": btc_pair, "stage": "queued", "source": "whale"},
+                )
+                system_log.push(
+                    "whale",
+                    f"Whale queued for 3-candle: {result.get('pattern')} "
+                    f"{sig.get('amount_btc')} BTC → {result['action']} (not fired yet).",
+                    {"signal_id": sid, "amount_btc": sig.get("amount_btc"), "close_time": close_time},
+                )
+                # One queue attempt per poll
+                break
 
             await asyncio.sleep(WHALE_POLL_SECONDS)
 
