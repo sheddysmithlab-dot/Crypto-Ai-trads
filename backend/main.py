@@ -621,12 +621,26 @@ bybit_api = BybitAPIWrapper()
 # PILLAR 3: CORE AI AGENT LOGIC (State & Rules)
 # ==========================================
 class AITradingAgent:
-    # Strict Exit Logic (replaces all prior profit-lock / trailing / target exit rules).
+    # Strict Exit — profit trail + structure SL + TF hard stop (no reverse-% trail).
     STRICT_EXIT_HARD_TARGET_PCT = float(os.environ.get("STRICT_EXIT_HARD_TARGET", "1.2"))
-    # Fee-aware floor: 0.40% gross (0.20% was too thin vs round-trip costs).
+    # Fee-aware floor: 0.40% gross.
     STRICT_EXIT_MIN_LOCK_PCT = float(os.environ.get("STRICT_EXIT_MIN_LOCK", "0.40"))
     STRICT_EXIT_FLUCTUATION_X_PCT = float(os.environ.get("STRICT_EXIT_FLUCTUATION_X", "0.10"))
     STRICT_EXIT_TRAIL_MULTIPLIER = float(os.environ.get("STRICT_EXIT_TRAIL_MULT", "1.5"))
+    # Structure SL buffer beyond swing high/low (Bible invalidation pad).
+    STRUCTURE_SL_BUFFER_PCT = float(os.environ.get("STRUCTURE_SL_BUFFER_PCT", "0.05"))  # 0.05% of price
+    # TF hard stop (gross % loss) — tighter on fast TFs.
+    HARD_STOP_PCT_BY_TF: dict[str, float] = {
+        "30s": float(os.environ.get("HARD_STOP_30S", "0.50")),
+        "1m": float(os.environ.get("HARD_STOP_1M", "0.60")),
+        "3m": float(os.environ.get("HARD_STOP_3M", "0.70")),
+        "5m": float(os.environ.get("HARD_STOP_5M", "0.75")),
+        "10m": float(os.environ.get("HARD_STOP_10M", "0.85")),
+        "15m": float(os.environ.get("HARD_STOP_15M", "1.00")),
+        "30m": float(os.environ.get("HARD_STOP_30M", "1.10")),
+        "1h": float(os.environ.get("HARD_STOP_1H", "1.20")),
+        "1D": float(os.environ.get("HARD_STOP_1D", "1.20")),
+    }
 
     def __init__(self):
         self.is_active = False
@@ -774,71 +788,63 @@ class AITradingAgent:
         else:
             self.peak_net_pct = max(float(t.get("peak_gross_pct") or 0) for t in auto)
 
+    def hard_stop_pct_for_trade(self, trade: dict) -> float:
+        """TF hard-stop magnitude (positive %)."""
+        tf = (trade.get("timeframe_key") or "").strip()
+        if not tf:
+            tf = SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
+        return float(self.HARD_STOP_PCT_BY_TF.get(tf, self.HARD_STOP_PCT_BY_TF.get("5m", 0.75)))
+
     def _evaluate_strict_exit(self, trade: dict, gross: float, net: float) -> str | None:
-        """Strict Exit Logic — profit rules + mirrored stop-loss (gross % P&L).
+        """Profit trail + structure SL + TF hard stop.
+
+        Stop side (old reverse-% trail REMOVED):
+          1) Structure SL — mark breaks pattern/confirm swing (Bible invalidation)
+          2) TF hard stop — e.g. 5m −0.75%, 15m −1.0%, 1h −1.2%
 
         Profit side:
-          Rule 1: Hard target at +1.2% — immediate auto-exit.
-          Rule 2: Once +0.20% is reached, profit floor locks at +0.20%.
-          Rule 3: Trailing exit = peak − (1.5 × x), never below +0.20% floor.
-
-        Stop-loss side (exact reverse — cuts tangled losers):
-          Rule 1R: Hard stop at −1.2% — immediate auto-exit.
-          Rule 2R: Once −0.20% is reached, stop zone arms.
-          Rule 3R: Trailing stop = trough + (1.5 × x), never above −0.20% ceiling
-                   (exit when loss is at/below that trigger).
+          Rule 1: Hard target +1.2%
+          Rule 2: Min lock +0.40%
+          Rule 3: Trail peak − 1.5×x, never below min lock
         """
         hard_target = self.STRICT_EXIT_HARD_TARGET_PCT
         min_lock = self.STRICT_EXIT_MIN_LOCK_PCT
         x = self.STRICT_EXIT_FLUCTUATION_X_PCT
         trail_mult = self.STRICT_EXIT_TRAIL_MULTIPLIER
-        hard_stop = -hard_target
-        min_stop = -min_lock
 
-        # ── Stop-loss side (reverse of profit trail) ──────────────────────────
-        prev_trough = float(trade.get("trough_gross_pct") or 0.0)
-        if gross < prev_trough:
-            trade["trough_gross_pct"] = gross
-        trough = float(trade.get("trough_gross_pct") or 0.0)
+        # ── Structure SL (Bible invalidation) ────────────────────────────────
+        sl_px = trade.get("sl_price")
+        trade_pair = trade.get("pair") or ""
+        mark = self.mark_price_for(trade_pair)
+        if sl_px is not None and mark is not None:
+            try:
+                sl_f = float(sl_px)
+                mark_f = float(mark)
+            except (TypeError, ValueError):
+                sl_f = 0.0
+                mark_f = 0.0
+            if sl_f > 0 and mark_f > 0:
+                side = trade.get("side")
+                if side == "LONG" and mark_f <= sl_f + 1e-12:
+                    return (
+                        f"Structure SL: LONG mark {mark_f:.4f} ≤ SL {sl_f:.4f} "
+                        f"(pattern/confirm swing invalidated)."
+                    )
+                if side == "SHORT" and mark_f >= sl_f - 1e-12:
+                    return (
+                        f"Structure SL: SHORT mark {mark_f:.4f} ≥ SL {sl_f:.4f} "
+                        f"(pattern/confirm swing invalidated)."
+                    )
 
-        # Rule 1R — hard stop (mirror of hard target).
-        if gross <= hard_stop + 1e-9:
+        # ── TF hard stop (replaces reverse-% trail) ──────────────────────────
+        hard_stop = self.hard_stop_pct_for_trade(trade)
+        if gross <= -hard_stop + 1e-9:
+            tf = trade.get("timeframe_key") or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
             return (
-                f"Strict Stop Rule 1R (Hard Stop): {gross:.3f}% ≤ {hard_stop:.2f}% — "
-                "immediate auto-exit (reverse of +hard target)."
+                f"TF hard stop ({tf}): {gross:.3f}% ≤ −{hard_stop:.2f}% — immediate auto-exit."
             )
 
-        # Rule 2R — arm stop zone at −0.20% (mirror of min profit lock).
-        if trough <= min_stop and not trade.get("is_stop_active"):
-            trade["is_stop_active"] = True
-            trade["stop_level_pct"] = min_stop
-            notifications.push(
-                f"Stop-loss armed #{trade['id']} @ {gross:.3f}% "
-                f"(zone at {min_stop:.2f}% gross, reverse of min lock).",
-                "warning",
-            )
-            system_log.push(
-                "agent",
-                f"Strict Stop Rule 2R — stop armed #{trade['id']} {gross:.3f}%",
-                {"trade_id": trade["id"], "trough_gross_pct": trough, "min_stop_pct": min_stop},
-            )
-
-        if trough <= min_stop:
-            trade["stop_level_pct"] = min_stop
-            # Rule 3R — reverse trail from trough, capped at −0.20%.
-            # Profit:  trigger = max(+0.20, peak − 1.5x)
-            # Loss:    trigger = min(−0.20, trough + 1.5x)
-            stop_trigger = min(min_stop, trough + (trail_mult * x))
-            trade["stop_trigger_pct"] = stop_trigger
-            if trade.get("is_stop_active") and gross <= stop_trigger + 1e-9:
-                return (
-                    f"Strict Stop Rule 3R (1.5× reverse trail): trough {trough:.3f}% → "
-                    f"stop trigger {stop_trigger:.3f}% (trough + {trail_mult}×{x:.2f}%, "
-                    f"ceiling {min_stop:.2f}%) → {gross:.3f}%. Market close."
-                )
-
-        # ── Profit side (unchanged) ───────────────────────────────────────────
-        # Rule 1 — hard target (no trailing wait).
+        # ── Profit side ──────────────────────────────────────────────────────
         if gross >= hard_target:
             return (
                 f"Strict Exit Rule 1 (Hard Target): +{gross:.3f}% ≥ +{hard_target:.2f}% — "
@@ -851,7 +857,6 @@ class AITradingAgent:
             trade["peak_net_pct"] = max(float(trade.get("peak_net_pct") or 0.0), net)
         peak = float(trade.get("peak_gross_pct") or 0.0)
 
-        # Rule 2 — minimum profit lock at +0.20%.
         if peak >= min_lock and not trade.get("is_lock_active"):
             trade["is_lock_active"] = True
             trade["lock_level_pct"] = min_lock
@@ -872,7 +877,6 @@ class AITradingAgent:
         if peak < min_lock:
             return None
 
-        # Rule 3 — 1.5× trailing stop from peak, floored at Rule 2 minimum.
         sell_trigger = max(min_lock, peak - (trail_mult * x))
         trade["sell_trigger_pct"] = sell_trigger
 
@@ -1215,6 +1219,7 @@ class AITradingAgent:
         tp_price=None,
         target_mult=None,
         pair=None,
+        timeframe_key=None,
     ):
         """ RULE 1: Opens a position as a Market Order (RULE 7) with simulated minor slippage.
         Manual entries default to 1% margin x 100x leverage. Auto entries pass
@@ -1347,6 +1352,8 @@ class AITradingAgent:
             "target_mult": target_mult,
             "capital_reserved": capital_reserved,
             "season_id": self.ai_season_id,
+            "timeframe_key": timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m"),
+            "exit_mode": "structure_sl+tf_hard_stop",
         }
         self.trades.append(trade)
         self.set_pair_mark(trade_pair, filled_price)
@@ -2262,8 +2269,9 @@ def agent_policy_summary() -> str:
             f"Strict Exit (+{agent.STRICT_EXIT_HARD_TARGET_PCT:.1f}% hard target, "
             f"+{agent.STRICT_EXIT_MIN_LOCK_PCT:.2f}% min lock, "
             f"{agent.STRICT_EXIT_TRAIL_MULTIPLIER}×{agent.STRICT_EXIT_FLUCTUATION_X_PCT:.2f}% trail) + "
-            f"reverse stop (−{agent.STRICT_EXIT_HARD_TARGET_PCT:.1f}% hard / "
-            f"−{agent.STRICT_EXIT_MIN_LOCK_PCT:.2f}% arm / 1.5× trail)"
+            f"structure SL (pattern/confirm swing) + TF hard stop "
+            f"(1m −{agent.HARD_STOP_PCT_BY_TF['1m']:.2f}% / 5m −{agent.HARD_STOP_PCT_BY_TF['5m']:.2f}% / "
+            f"15m −{agent.HARD_STOP_PCT_BY_TF['15m']:.2f}%)"
             if AUTO_TRADE_AUTO_EXIT_ENABLED
             else "no auto-exit (manual close / STOP only)"
         )
@@ -2450,6 +2458,7 @@ async def fire_taapi_auto_trade(
                 tp_price=result.get("tp"),
                 target_mult=result.get("target_mult"),
                 pair=trade_pair,
+                timeframe_key=timeframe_key,
             )
             fired = trade is not None
             order_error = None
@@ -2489,6 +2498,7 @@ async def fire_taapi_auto_trade(
                     tp_price=result.get("tp"),
                     target_mult=result.get("target_mult"),
                     pair=trade_pair,
+                    timeframe_key=timeframe_key,
                 )
                 if not trade:
                     fired = False
@@ -2640,6 +2650,46 @@ def _confirm_entry_direction(action: str, signal: dict, confirm: dict) -> tuple[
             return False, "confirm candle green (need red continuation)"
         return True, "sell_confirm_red_below_signal"
     return False, f"unknown_action_{action}"
+
+
+def structure_sl_from_setup(
+    action: str,
+    signal: dict,
+    confirm: dict | None = None,
+    *,
+    buffer_pct: float | None = None,
+) -> float | None:
+    """Bible invalidation SL: beyond pattern (+ confirm) swing extreme.
+
+    BUY → below min(signal_low, confirm_low)
+    SELL → above max(signal_high, confirm_high)
+    """
+    buf = float(buffer_pct if buffer_pct is not None else AITradingAgent.STRUCTURE_SL_BUFFER_PCT)
+    buf_frac = buf / 100.0
+    try:
+        s_lo = float(signal.get("low") or 0)
+        s_hi = float(signal.get("high") or 0)
+    except (TypeError, ValueError):
+        return None
+    c_lo = s_lo
+    c_hi = s_hi
+    if confirm:
+        try:
+            c_lo = float(confirm.get("low") or s_lo)
+            c_hi = float(confirm.get("high") or s_hi)
+        except (TypeError, ValueError):
+            pass
+    if action == "BUY":
+        swing = min(s_lo, c_lo)
+        if swing <= 0:
+            return None
+        return round(swing * (1.0 - buf_frac), 8)
+    if action == "SELL":
+        swing = max(s_hi, c_hi)
+        if swing <= 0:
+            return None
+        return round(swing * (1.0 + buf_frac), 8)
+    return None
 
 
 async def _execute_pattern_auto_fire(
@@ -2811,6 +2861,14 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 fire_result = {**pending["result"]}
                 fire_result["entry"] = mark_px
                 fire_result["signal_candle_time"] = pending["signal_candle_time"]
+                struct_sl = structure_sl_from_setup(
+                    pending["action"],
+                    pending.get("signal_ohlc") or signal_candle,
+                    confirm_candle,
+                )
+                if struct_sl is not None:
+                    fire_result["sl"] = struct_sl
+                fire_result["timeframe_key"] = timeframe_key
                 fee_pct = bybit_api.get_taker_fee_pct()
                 cost_aware = evaluate_cost_aware_entry(
                     fire_result,
@@ -2825,7 +2883,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 ) if UVSS_COST_AWARE_ENTRY else None
                 print(
                     f"[3-CANDLE] {pair} CONFIRM OK ({why}) — firing at candle-3 open "
-                    f"(pattern={pending.get('pattern')} {pending['action']})"
+                    f"(pattern={pending.get('pattern')} {pending['action']}, "
+                    f"structure_sl={fire_result.get('sl')})"
                 )
                 system_log.push_agent_chat(
                     f"3-candle confirm OK on {pair}: {pending.get('pattern')} {pending['action']} "
@@ -2921,6 +2980,10 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             # Legacy immediate fire (env THREE_CANDLE_ENTRY=false)
             detect["signal_candle_time"] = close_time
             detect["entry"] = mark_px
+            detect["timeframe_key"] = timeframe_key
+            struct_sl = structure_sl_from_setup(detect["action"], confirm_candle, None)
+            if struct_sl is not None:
+                detect["sl"] = struct_sl
             cost_aware = detect_cost
             result = detect
             fired_trade = await _execute_pattern_auto_fire(
@@ -3378,11 +3441,14 @@ async def start_bot():
     return {
         "status": "success",
         "message": (
-            f"Bot active — Strict Exit Logic "
-            f"Bot active — Strict Exit + reverse Stop "
-            f"(+{agent.STRICT_EXIT_HARD_TARGET_PCT:.1f}%/−{agent.STRICT_EXIT_HARD_TARGET_PCT:.1f}% hard, "
-            f"+{agent.STRICT_EXIT_MIN_LOCK_PCT:.2f}%/−{agent.STRICT_EXIT_MIN_LOCK_PCT:.2f}% arm, "
-            f"{agent.STRICT_EXIT_TRAIL_MULTIPLIER}× trail)."
+            f"Bot active — structure SL + TF hard stop "
+            f"(profit +{agent.STRICT_EXIT_HARD_TARGET_PCT:.1f}% hard / "
+            f"+{agent.STRICT_EXIT_MIN_LOCK_PCT:.2f}% lock / "
+            f"{agent.STRICT_EXIT_TRAIL_MULTIPLIER}× trail; "
+            f"stop: swing invalidation + TF hard "
+            f"1m−{agent.HARD_STOP_PCT_BY_TF['1m']:.2f}% "
+            f"5m−{agent.HARD_STOP_PCT_BY_TF['5m']:.2f}% "
+            f"15m−{agent.HARD_STOP_PCT_BY_TF['15m']:.2f}%)."
         ),
         "open_positions": open_count,
         "trade_history_count": len(agent.trade_history),

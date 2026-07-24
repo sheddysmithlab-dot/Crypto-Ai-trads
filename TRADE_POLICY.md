@@ -17,7 +17,8 @@
 - Runs alongside candle patterns when active pair is BTC/USDT (`whale_alert_loop`)
 
 ## Exits
-Strict Exit: +0.40% min lock, +1.2% hard target, trail peak − 1.5×0.10%. Mirror stop on loss side.
+Strict Exit profit: +0.40% min lock, +1.2% hard target, trail peak − 1.5×0.10%.
+Stop: structure SL (swing invalidate) + TF hard stop (1m −0.60% / 5m −0.75% / 15m −1.0%).
 
 ## Session schedule (optional UI switch)
 Mon–Fri IST auto on/off (no browser needed): Morning 05:30–08:30 · Peak Overlap 18:30–23:30 · US Core 19:30–01:30.

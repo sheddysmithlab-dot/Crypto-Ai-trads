@@ -37,7 +37,8 @@ fetches that section in microseconds and logs it in System Log / AI confirm.
 
 ## Exits
 Profit lock: activate +0.40% gross, 1.5× trail from peak, hard +1.2%.
-Stop mirror: arm −0.40% / 1.5× trail from trough / hard −1.2%.
+Stop: **structure SL** (pattern+confirm swing invalidation) + **TF hard stop**
+(1m −0.60% / 5m −0.75% / 15m −1.0% / 1h −1.2%). Reverse-% trail removed.
 
 ## Whale flow (merged into BTC/USDT)
 - No separate UI pair — runs with BTC candle automation when active pair is BTC/USDT

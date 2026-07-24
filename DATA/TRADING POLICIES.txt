@@ -24,4 +24,7 @@ Pipeline: Detect → Bible (RAM) → ML cost-aware → Fire
 
 ## Exits
 Profit lock +0.40% floor / 1.5× trail from peak / hard +1.2%.
-Stop-loss (reverse): arm at −0.40% / 1.5× trail from trough / hard −1.2%.
+Stop-loss:
+- Structure SL = beyond pattern+confirm swing (BUY below lows / SELL above highs)
+- TF hard stop: 1m −0.60% · 5m −0.75% · 15m −1.0% · 1h −1.2%
+(Old reverse-% trail stop removed.)
