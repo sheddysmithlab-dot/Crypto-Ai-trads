@@ -2152,6 +2152,102 @@ async def auto_buy_loop():
                 await asyncio.sleep(2.0)
 
 
+async def market_simulator():
+    """Synthetic fallback price walk when Bybit feed is missing/stale."""
+    while True:
+        no_real_feed = get_bybit_symbol(agent.active_pair) is None
+        real_feed_stale = (time.time() - _last_real_feed_update) > REAL_FEED_STALE_AFTER_SECONDS
+        if no_real_feed or real_feed_stale:
+            base = _sanitize_market_price(agent.current_price)
+            if base is None:
+                base = 1.0
+                agent.current_price = base
+            volatility_pct = random.uniform(-0.002, 0.002)
+            new_price = max(base * (1 + volatility_pct), base * 0.0001)
+            volume_increment = random.uniform(0.5, 3.0)
+            if random.random() < 0.03:
+                volume_increment *= random.uniform(3, 6)
+            await agent.process_tick(new_price, volume_increment, pair=agent.active_pair)
+        await asyncio.sleep(0.5)
+
+
+async def bybit_price_feed():
+    """Poll Bybit lastPrice for chart pair + watchlist + every open-trade pair."""
+    global _last_real_feed_update
+    print(f"[MARKET FEED] Background task starting (Bybit linear multi-pair poll, ~{_AUTO_BUY_TICKER_POLL}s).")
+
+    async with httpx.AsyncClient(timeout=6.0) as client:
+        while True:
+            pairs: set[str] = set()
+            if agent.active_pair:
+                pairs.add(agent.active_pair)
+            pairs |= set(agent.get_scan_pairs())
+            pairs |= agent.open_trade_pairs()
+
+            if not pairs:
+                await asyncio.sleep(2)
+                continue
+
+            any_ok = False
+            for pair_label in pairs:
+                bybit_symbol = get_bybit_symbol(pair_label)
+                if bybit_symbol is None:
+                    continue
+                try:
+                    price = await _fetch_bybit_linear_ticker_price(client, bybit_symbol)
+                    if price is not None:
+                        await agent.process_tick(price, 0.0, pair=pair_label)
+                        any_ok = True
+                    else:
+                        print(f"[MARKET FEED] Invalid ticker for {bybit_symbol} ({pair_label})")
+                except Exception as exc:
+                    print(f"[MARKET FEED] Ticker poll error for {bybit_symbol}: {exc}")
+
+            if any_ok:
+                _last_real_feed_update = time.time()
+
+            await asyncio.sleep(_AUTO_BUY_TICKER_POLL)
+
+
+async def bybit_balance_refresher():
+    """Keep bybit_api.last_known_balance fresh while LIVE_TRADING."""
+    while True:
+        if bybit_api.mode == "LIVE_TRADING" and bybit_api.connected:
+            await bybit_api.fetch_real_balance()
+        await asyncio.sleep(3)
+
+
+KEEPALIVE_INTERVAL_SECONDS = 13 * 60
+
+
+async def _ping_health(client: httpx.AsyncClient, self_url: str) -> bool:
+    try:
+        resp = await client.get(f"{self_url}/health")
+        print(f"[KEEPALIVE] Self-ping OK (HTTP {resp.status_code}) — /health only, no trades touched.")
+        return True
+    except Exception as exc:
+        print(f"[KEEPALIVE] Self-ping failed ({exc}) — will retry next interval.")
+        return False
+
+
+async def self_ping_keepalive():
+    self_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not self_url:
+        print("[KEEPALIVE] RENDER_EXTERNAL_URL not set (local/VPS) — keepalive disabled.")
+        return
+
+    interval = int(os.environ.get("KEEPALIVE_INTERVAL_SECONDS", str(KEEPALIVE_INTERVAL_SECONDS)))
+    print(
+        f"[KEEPALIVE] Pinging {self_url}/health every {interval // 60} minutes "
+        f"(read-only wake ping — bot/trades unchanged)."
+    )
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        await _ping_health(client, self_url)
+        while True:
+            await asyncio.sleep(interval)
+            await _ping_health(client, self_url)
+
+
 @app.on_event("startup")
 async def start_background_tasks():
     try:
