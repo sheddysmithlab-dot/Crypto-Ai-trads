@@ -1,6 +1,6 @@
 """In-RAM ML Bitcoin trading paper memory — O(1) / microsecond fetch.
 
-Loads DATA/ml_trading_memory.json once. Companion to candlestick_bible_memory.py.
+Loads DATA/ml_trading_memory.json once.
 Paper: arXiv:2606.00060v1 — Machine Learning-Based Bitcoin Trading Under Transaction Costs.
 """
 from __future__ import annotations

@@ -1,30 +1,29 @@
-"""Candlestick pattern entry engine — Bible patterns + volume-first fire path.
+"""Candlestick helpers retained for kline parse / sizing compatibility.
 
-Pipeline (closed bar only):
-  1) Detect pattern on last candle(s)
-  2) Volume gate (Vol MA + expanding vs previous) — ALL patterns
-  3) Volume boosts strength score
-  4) Attach Bible section id + ML cost-aware gate (main.py)
-  5) Return BUY/SELL with entry/SL/TP
-
-Legacy Blue Box / VSA rule codes are retired. Helpers for klines, sizing,
-and chart overlay stay for main.py compatibility.
+Strategy wiped: evaluate_uvss always returns NO_TRADE; blue-box overlay is inactive.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-UVSS_POLICIES_ENABLED = True
-# Cost-aware ON — PDF / AGENT_STRATEGY fire discipline.
-UVSS_COST_AWARE_ENTRY = True
+# Strategy wiped — no auto pattern entries.
+UVSS_POLICIES_ENABLED = False
+# Cost-aware — OFF unless COST_AWARE_ENABLED=true
+UVSS_COST_AWARE_ENTRY = __import__("os").environ.get("COST_AWARE_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 UVSS_SL_EXIT_ENABLED = False
 
 EMA_FAST = 50
 EMA_SLOW = 200
 BODY_AVG_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-# PDF participation: real volume, not climax-only (3× was overkill on 1m/5m).
-VOLUME_CONFIRM_MULT = float(__import__("os").environ.get("VOLUME_CONFIRM_MULT", "1.6"))
+# Volume gate — set VOLUME_CONFIRM_MULT=0 or SKIP_VOLUME_GATE=true to disable.
+VOLUME_CONFIRM_MULT = float(__import__("os").environ.get("VOLUME_CONFIRM_MULT", "0"))
+VOLUME_VS_PREV_MULT = float(__import__("os").environ.get("VOLUME_VS_PREV_MULT", "0"))
+SKIP_VOLUME_GATE = __import__("os").environ.get("SKIP_VOLUME_GATE", "true").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 VOLUME_SETUP_MULT: dict[str, float] = {
     "pin_bar": 1.8,
     "doji": 1.9,
@@ -39,7 +38,6 @@ VOLUME_SETUP_MULT: dict[str, float] = {
     "soldiers": 1.7,
     "crows": 1.7,
 }
-VOLUME_VS_PREV_MULT = float(__import__("os").environ.get("VOLUME_VS_PREV_MULT", "1.15"))
 # Soft relative check OFF by default (PDF has no 3× candle-size hard rule).
 CANDLE_TO_VOLUME_MULT = float(__import__("os").environ.get("CANDLE_TO_VOLUME_MULT", "0"))
 TREND_LOOKBACK = 5
@@ -48,22 +46,6 @@ RISK_PCT_PER_TRADE = 0.01
 RR_RATIO = 2.0
 SL_BUFFER_PCT = 0.001
 LOCAL_SLOPE_PCT = 0.0015
-
-# Bible / SYSTEM_ROLE priority only — everything else detected but never fires.
-FIRE_ALLOWLIST: set[str] = {
-    "BULL_ENGULF",
-    "BEAR_ENGULF",
-    "PIN_BULL",
-    "PIN_BEAR",
-    "HAMMER",
-    "SHOOTING_STAR",
-    "MORNING_STAR",
-    "EVENING_STAR",
-    "INSIDE_UP",
-    "INSIDE_DOWN",
-    "PIERCING",
-    "DARK_CLOUD",
-}
 
 # code → human label
 PATTERN_LABELS: dict[str, str] = {
@@ -93,35 +75,7 @@ PATTERN_LABELS: dict[str, str] = {
     "MBZ_S": "Bearish Marubozu continuation",
 }
 
-# code → Bible memory alias (candlestick_bible_memory)
-PATTERN_BIBLE_KEY: dict[str, str] = {
-    "BULL_ENGULF": "engulfing_bar",
-    "BEAR_ENGULF": "engulfing_bar",
-    "HAMMER": "hammer",
-    "SHOOTING_STAR": "shooting_star",
-    "PIN_BULL": "pin_bar_strategy",
-    "PIN_BEAR": "pin_bar_strategy",
-    "MORNING_STAR": "morning_star",
-    "EVENING_STAR": "evening_star",
-    "PIERCING": "engulfing_bar",
-    "DARK_CLOUD": "engulfing_bar",
-    "BULL_HARAMI": "harami",
-    "BEAR_HARAMI": "harami",
-    "INSIDE_UP": "inside_bar",
-    "INSIDE_DOWN": "inside_bar",
-    "TWEEZER_BOT": "tweezers",
-    "TWEEZER_TOP": "tweezers",
-    "DRAGONFLY": "dragonfly_doji",
-    "GRAVESTONE": "gravestone_doji",
-    "THREE_WHITE": "patterns_intro",
-    "THREE_BLACK": "patterns_intro",
-    "BULL_BELT": "patterns_intro",
-    "BEAR_BELT": "patterns_intro",
-    "MBZ_L": "engulfing_how_to_trade",
-    "MBZ_S": "engulfing_how_to_trade",
-}
-
-# Higher = preferred when multiple fire (Bible priority: pin/engulf/inside)
+# Higher = preferred when multiple fire (pin/engulf/inside preferred)
 PATTERN_PRIORITY: dict[str, int] = {
     "BULL_ENGULF": 95,
     "BEAR_ENGULF": 95,
@@ -263,7 +217,7 @@ def _is_marubozu(c: dict, candles: list[dict]) -> bool:
 
 
 def _engulfs(outer: dict, inner: dict) -> bool:
-    """Bible / Nison: second real body must ENTIRELY cover the first real body.
+    """Nison: second real body must ENTIRELY cover the first real body.
 
     Previous loose 95% cover let tiny red bars 'engulf' larger greens mid-trend
     and fire false BEAR_ENGULF shorts (classic impulse trap).
@@ -279,7 +233,7 @@ def _engulfs(outer: dict, inner: dict) -> bool:
 
 
 def _engulf_close_conviction(action: str, candle: dict) -> bool:
-    """Sellers/buyers must finish in control of the bar (Bible psychology)."""
+    """Sellers/buyers must finish in control of the bar (bar psychology)."""
     r = _range(candle)
     if r <= 0:
         return False
@@ -297,7 +251,7 @@ def _engulf_trend_gate(
     candles: list[dict],
     signal: dict,
 ) -> tuple[bool, str]:
-    """Bible: 'the trend should be your best friend' + MA pullback strategy.
+    """Trend: 'the trend should be your best friend' + MA pullback strategy.
 
     With-trend engulfing (continuation / pullback) is preferred.
     Counter-trend reversal only as exhaustion — never mid-impulse above
@@ -361,7 +315,7 @@ def _engulf_trend_gate(
 
 
 def _is_impulse_chase(action: str, candles: list[dict]) -> bool:
-    """Bible (trending_markets + engulfing_ma): price far from MA = overbought/oversold.
+    """Trending (trending_markets + engulfing_ma): price far from MA = overbought/oversold.
 
     Buying THREE_WHITE / marubozu after a vertical spike = buying the END of the
     impulsive move (professionals take profit there — classic bull trap).
@@ -436,6 +390,16 @@ def volume_confirm(
       2) vol ≥ VOLUME_VS_PREV_MULT × previous bar
       3) optional: if CANDLE_TO_VOLUME_MULT > 0, rel_vol ≥ mult × rel_candle
     """
+    if SKIP_VOLUME_GATE or VOLUME_CONFIRM_MULT <= 0:
+        signal = candles[-1]
+        vol = float(signal.get("volume") or 0.0)
+        return True, {
+            "volume": round(vol, 4),
+            "skipped": True,
+            "reason": "volume_gate_disabled",
+            "ok": True,
+        }
+
     signal = candles[-1]
     prev = candles[-2] if len(candles) >= 2 else None
     vol = float(signal.get("volume") or 0.0)
@@ -634,7 +598,6 @@ def _hit(code: str, action: str, candle: dict, *, strength: float, setup: str) -
         "rr": RULE_RR.get(code, RR_RATIO),
         "strength": round(strength, 4),
         "priority": PATTERN_PRIORITY.get(code, 50),
-        "bible_key": PATTERN_BIBLE_KEY.get(code, "patterns_intro"),
         "label": PATTERN_LABELS.get(code, code),
     }
 
@@ -650,11 +613,11 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
     avg = max(_avg_body(candles), 1e-12)
     strength_base = min(_body(c0) / avg, 3.0)
     hits: list[dict] = []
-    # Bible: with-trend setups are highest quality ("trend is your friend").
+    # With-trend setups are highest quality ("trend is your friend").
     bull_with_trend = trend == "uptrend" or local == "up"
     bear_with_trend = trend == "downtrend" or local == "down"
 
-    # --- Engulfing (Bible core) — strict body + trend gate (anti mid-impulse trap) ---
+    # --- Engulfing \(core\) — strict body + trend gate (anti mid-impulse trap) ---
     if _is_red(c1) and _is_green(c0) and _engulfs(c0, c1) and _engulf_close_conviction("BUY", c0):
         ok, why = _engulf_trend_gate("BUY", trend, local, candles, c0)
         if ok:
@@ -738,7 +701,7 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
         if trend != "uptrend":
             hits.append(_hit("BEAR_HARAMI", "SELL", c0, strength=strength_base, setup="harami"))
 
-    # --- Inside bar break (Bible strategy) ---
+    # --- Inside bar break ---
     # Mother = c2, inside = c1, break = c0
     if (
         c1["high"] <= c2["high"]
@@ -817,11 +780,7 @@ def _detect_patterns(candles: list[dict], trend: str | None) -> list[dict]:
 
 
 def _pick_best(hits: list[dict]) -> dict | None:
-    """PDF: same-bar bull+bear conflict = NO_TRADE. Else highest Bible priority."""
-    if not hits:
-        return None
-    # Only fire allowlisted Bible-priority patterns.
-    hits = [h for h in hits if h.get("pattern") in FIRE_ALLOWLIST]
+    """Same-bar bull+bear conflict = NO_TRADE. Else highest priority."""
     if not hits:
         return None
     buys = [h for h in hits if h["action"] == "BUY"]
@@ -840,144 +799,16 @@ def evaluate_uvss(
     *,
     pair: str = "default",
 ) -> dict:
-    """Detect candle pattern → attach Bible key + strength for ML cost gate."""
-    if not UVSS_POLICIES_ENABLED:
-        return {"action": "NO_TRADE", "reason": "Entry policies disabled"}
-
-    if len(candles) < MIN_CANDLES:
-        return {
-            "action": "NO_TRADE",
-            "reason": f"Need {MIN_CANDLES}+ closed candles (have {len(candles)})",
-        }
-
-    get_blue_box_state(pair, timeframe_key)  # keep store keyed
-    signal = candles[-1]
-    close = signal["close"]
-    trend, ema50, ema200 = _trend_state(candles, close)
-    local = _recent_direction(candles)
-    avg_body = _avg_body(candles)
-    candle_range_pct = (_range(signal) / max(signal["low"], 1e-12)) * 100.0
-
-    diagnostics = {
-        "engine": "candle_pattern_v1",
-        "trend": trend,
-        "local_dir": local,
-        "ema50": round(ema50, 4) if ema50 is not None else None,
-        "ema200": round(ema200, 4) if ema200 is not None else None,
-        "avg_body": round(avg_body, 8),
-        "body": round(_body(signal), 8),
-        "candle_range_pct": round(candle_range_pct, 4),
-        "volume": round(signal.get("volume", 0.0), 4),
+    """Strategy wiped — never emits BUY/SELL."""
+    return {
+        "action": "NO_TRADE",
+        "reason": "Strategy wiped — manual mode only",
+        "engine": "none",
         "long_rules": [],
         "short_rules": [],
         "rules_fired": [],
-        "sweep_events": [],
-        "candidates": [],
-    }
-
-    hits = _detect_patterns(candles, trend)
-    diagnostics["candidates"] = [
-        {"pattern": h["pattern"], "action": h["action"], "priority": h["priority"], "strength": h["strength"]}
-        for h in hits
-    ]
-
-    # Volume is mandatory for every pattern candidate — quiet bars never compete.
-    volume_passed: list[dict] = []
-    volume_rejects: list[dict] = []
-    for h in hits:
-        ok, vinfo = volume_confirm(candles, setup=h.get("setup"))
-        if ok:
-            boost = volume_strength_boost(vinfo)
-            volume_passed.append({
-                **h,
-                "strength": round(float(h["strength"]) + boost, 4),
-                "volume_boost": boost,
-                "vol_info": vinfo,
-            })
-        else:
-            volume_rejects.append({
-                "pattern": h["pattern"],
-                "setup": h.get("setup"),
-                "reason": vinfo.get("reason"),
-                "volume_ratio": vinfo.get("volume_ratio"),
-            })
-    diagnostics["volume_rejects"] = volume_rejects[:8]
-
-    best = _pick_best(volume_passed)
-    if best is None:
-        if hits and not volume_passed:
-            top = hits[0]
-            _, vinfo = volume_confirm(candles, setup=top.get("setup"))
-            diagnostics["volume_gate"] = vinfo
-            diagnostics["volume"] = vinfo.get("volume", diagnostics["volume"])
-            diagnostics["volume_ma"] = vinfo.get("volume_ma")
-            return {
-                "action": "NO_TRADE",
-                "reason": vinfo.get("reason") or "All patterns failed volume gate",
-                "pattern": top.get("pattern"),
-                "setup": top.get("setup"),
-                "strength": top.get("strength"),
-                **diagnostics,
-            }
-        if hits:
-            return {
-                "action": "NO_TRADE",
-                "reason": "Conflicting bullish and bearish candle patterns on same bar",
-                "pattern": None,
-                **diagnostics,
-            }
-        return {
-            "action": "NO_TRADE",
-            "reason": "No candle pattern signal (Bible patterns + trend filter)",
-            "pattern": None,
-            **diagnostics,
-        }
-
-    action = best["action"]
-    pattern = best["pattern"]
-    sl = best["sl"]
-    entry_px = close
-    rr = float(best.get("rr", RR_RATIO))
-    prices = compute_sl_tp(action, entry_px, sl, rr=rr)
-    if not prices:
-        return {"action": "NO_TRADE", "reason": "Could not compute SL/TP", "pattern": pattern, **diagnostics}
-
-    entry_px, sl, tp = prices
-    risk_dist = abs(entry_px - sl)
-    vol_info = best.get("vol_info") or {}
-    vol_boost = float(best.get("volume_boost") or 0.0)
-    strength = float(best["strength"])
-    # ML magnitude proxy: volume-boosted strength × candle range
-    signal_magnitude = round(strength * max(candle_range_pct, 0.01), 4)
-
-    diagnostics["long_rules"] = [pattern] if action == "BUY" else []
-    diagnostics["short_rules"] = [pattern] if action == "SELL" else []
-    diagnostics["rules_fired"] = [pattern]
-    diagnostics["volume_gate"] = vol_info
-    diagnostics["volume"] = vol_info.get("volume", diagnostics["volume"])
-    diagnostics["volume_ma"] = vol_info.get("volume_ma")
-
-    return {
-        "action": action,
-        "pattern": pattern,
-        "reason": (
-            f"{best['label']} · trend={trend} · local={local} · "
-            f"strength={strength} · vol={vol_info.get('volume_ratio')}×MA "
-            f"(+{vol_boost} vol) · vsPrev={vol_info.get('volume_vs_prev')}"
-        ),
-        "setup": best.get("setup"),
-        "size_mult": rr,
-        "target_mult": rr,
-        "entry": entry_px,
-        "sl": sl,
-        "tp": tp,
-        "risk_distance": round(risk_dist, 6),
-        "strength": strength,
-        "volume_boost": vol_boost,
-        "signal_magnitude": signal_magnitude,
-        "bible_key": best.get("bible_key"),
-        "ml_gate": "cost_aware",
-        **diagnostics,
+        "entry_pattern": "MANUAL",
+        "diagnostics": {"engine": "none", "pair": pair, "timeframe": timeframe_key},
     }
 
 
@@ -998,21 +829,16 @@ def build_blue_box_chart_overlay(
 ) -> dict:
     decision = (last_scan or {}).get("decision") or {}
     if not is_active:
-        return {"engine": "candle_pattern", "active": False, "status": "idle"}
+        return {"engine": "fire_trade_engine", "active": False, "status": "idle"}
     status = "signal" if decision.get("action") in ("BUY", "SELL") else "scanning"
     return {
-        "engine": "candle_pattern",
+        "engine": "fire_trade_engine",
         "active": True,
         "status": status,
         "pair": pair,
         "timeframe": timeframe_key,
-        "ema50": decision.get("ema50"),
-        "ema200": decision.get("ema200"),
-        "trend": decision.get("trend"),
         "last_pattern": decision.get("pattern"),
         "last_action": decision.get("action"),
-        "bible_key": decision.get("bible_key"),
-        "strength": decision.get("strength"),
-        "bullish_trap": None,
-        "bearish_trap": None,
+        "strength": decision.get("strength") or decision.get("confidence"),
+        "note": "Fire Engine v3",
     }

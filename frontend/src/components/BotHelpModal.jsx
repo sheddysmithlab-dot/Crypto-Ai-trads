@@ -1,10 +1,10 @@
 const HOW_IT_WORKS = [
   'Pick a coin pair and chart timeframe (1M, 5M, 15M, etc.).',
-  'Press START AI AUTOMATION and set your risk level (max open trades).',
-  'Normal pairs: Detect candle pattern → Bible → ML cost-aware gate → fire.',
-  'BTC/USDT also merges WhaleBotAlerts: Unknown→Exchange (≥100 BTC)=SHORT, Exchange→Unknown (≥100 BTC)=LONG.',
-  'BUY → LONG, SELL → SHORT. Profit lock / Strict Exit on auto trades.',
-  'PAPER simulates fills; testnet sends real orders. STOP ends automation.',
+  'Press START AI AUTOMATION — Fire Engine v3.1 scans closed candles on your watchlist.',
+  'Patterns + shadow psych + market structure + EMA/MACD/ADX/RSI confluence → LONG/SHORT.',
+  'Stop-loss = pattern extreme ± ATR pad · Take-profit = 1:2 risk:reward.',
+  'Positions auto-close on SL or TP; you can still manual-close or emergency sell-all.',
+  'PAPER simulates fills; testnet can send real orders when keys are set.',
 ];
 
 export default function BotHelpModal({ open, onClose }) {
@@ -39,7 +39,7 @@ export default function BotHelpModal({ open, onClose }) {
 
         <div className="px-5 py-4 max-h-[70vh] overflow-y-auto">
           <p className="text-sm text-gray-600 dark:text-gray-300 mb-4 leading-relaxed">
-            Candle patterns + Bible + ML cost-aware fire — in plain English. Not financial advice.
+            Fire Engine v3.1 — patterns + structure + indicators confluence. Not financial advice.
           </p>
           <ul className="space-y-2.5 text-sm text-gray-700 dark:text-gray-200 list-disc pl-5 leading-relaxed">
             {HOW_IT_WORKS.map((line) => (

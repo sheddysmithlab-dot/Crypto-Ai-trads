@@ -1,25 +1,9 @@
-# AI Trading Agent — Brain v2
+# AI Trading Agent
 
-**Pipeline:** Detect candle pattern → Bible RAM fetch → ML cost-aware gate → Fire.
+| Profile | Role |
+|---------|------|
+| `PATTERN_2` | EMA + MACD/ADX (Bitcoin ML/TA paper) — **default** |
+| `PATTERN_1` | Candlestick Bible Pin/Engulf/Inside |
+| `ml_trading_memory.json` | Cost-aware takeaways |
 
-| Pack | Role |
-|------|------|
-| `CANDLESTICK_PATTERNS_INTRO.md` | 38-pattern vocabulary |
-| `candlestick_bible_memory.json` | How to trade setups |
-| `ml_trading_memory.json` | Cost-aware fire discipline |
-| `AGENT_STRATEGY.md` | Full deep strategy |
-
-**Engine:** `volume_spread_system.py` (candle_pattern_v1)  
-**Enrich:** `agent_brain.py`  
-**Gate:** `UVSS_COST_AWARE_ENTRY=True`
-
-## Profit Book (Active — code)
-- Activate lock at +0.15% gross per trade
-- Lock steps every +0.02% from peak
-- Sell when price retreats to previous lock step
-- Never sell below +0.15% gross
-
-## UI & Control
-1. START — agent monitors and executes in background
-2. Live chart + locks from Bybit feed
-3. BUY = manual LONG | SELL = manual SHORT (automation OFF only)
+Router: `entry_router.py` · set `ENTRY_PATTERN_NAME` in `.env`

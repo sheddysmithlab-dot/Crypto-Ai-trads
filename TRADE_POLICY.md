@@ -1,32 +1,20 @@
-# Trade Policy (live)
+# Trade Policy (live) — FIRE ENGINE V3.1
 
-**Authoritative strategy:** [`DATA/AGENT_STRATEGY.md`](DATA/AGENT_STRATEGY.md)  
-**Short ops spec:** [`DATA/TRADING POLICIES.txt`](DATA/TRADING%20POLICIES.txt)
+**Engine:** [`backend/fire_trade_engine.py`](backend/fire_trade_engine.py) via [`backend/fire_engine_bridge.py`](backend/fire_engine_bridge.py)  
+**Spec:** `pettern -4.txt` Chapters 1–7 (ML/DQN chapters not in live bot)
 
-## Live pipeline (normal pairs)
-1. Detect candle pattern (`backend/volume_spread_system.py`)
-2. Bible RAM fetch (`candlestick_bible_memory`)
-3. Cost-aware gate **ON** (PDF: λ=1.2, abs range ≥0.02%) + strength≥0.75 / **3 bars** gap / **3-candle confirm entry** / volume≥1.6×MA / Bible allowlist only
-4. Fire BUY→LONG / SELL→SHORT at **bar-3 open** after bar-2 direction confirm (`main.py` auto_buy_loop)
+## Live pipeline
+1. Closed-candle Bybit OHLCV (watchlist pairs; lookback ≥ 120 for EMA 95)
+2. Patterns (15+) + shadow psychology + market structure (skip sideways; soft-block mid-retracement unless strong reversal)
+3. Tech bias: EMA 6/95, MACD+ADX, RSI soft filter
+4. Weighted confluence (patterns ~0.45, shadow ~0.20, structure ~0.15, tech ~0.20) → fire if ≥ `FIRE_ENGINE_MIN_CONFLUENCE` (default 0.72)
+5. SL = pattern extreme ± ATR pad · TP = 1:2 R:R
+6. Auto-exit when mark hits SL or TP (auto trades only)
 
-## Whale flow (merged into BTC/USDT)
-- Source: [WhaleBotAlerts](https://t.me/s/WhaleBotAlerts)
-- SHORT: Unknown → Exchange (≥100 BTC)
-- LONG: Exchange → Unknown (≥100 BTC)
-- Poll every **60 seconds (1m)** — rules not loosened with candle gate
-- Runs alongside candle patterns when active pair is BTC/USDT (`whale_alert_loop`)
+## Knobs (`.env`)
+`FIRE_ENGINE_LOOKBACK`, `FIRE_ENGINE_MIN_CONFLUENCE`, `FIRE_ENGINE_MIN_EDGE`, `FIRE_ENGINE_MIN_CONFIDENCE`, `FIRE_ENGINE_ATR_SL_PAD`, `FIRE_ENGINE_RR`, `FIRE_ENGINE_SKIP_SIDEWAYS`
 
-## Exits
-Strict Exit profit: +0.40% min lock, +1.2% hard target, trail peak − 1.5×0.10%.
-Stop: structure SL (swing invalidate) + TF hard stop (1m −0.60% / 5m −0.75% / 15m −1.0%).
+## Manual
+Manual open/close and emergency sell-all still work.
 
-## Session schedule (optional UI switch)
-Mon–Fri IST auto on/off (no browser needed): Morning 05:30–08:30 · Peak Overlap 18:30–23:30 · US Core 19:30–01:30.
-
-## Trading Statement (MySQL)
-Closed/open trades persist to Hostinger MySQL (`backend/sql/schema.sql`). Profile → Trading Statement. Setup: `upload/HOSTINGER_MYSQL.md`.
-
-## Size
-Auto fire size = chart timeframe capital % of available capital:
-1m **3%** · 5m **7%** · 15m **10%** · 1h **15%** · 1D **20%** (`timeframe_profiles.py`).
-UI shows expected win/lose rates per TF (display guide) on chart hover/select.
+Old PATTERN_1 / PATTERN_2 / UVSS / trailing profit-book paths stay wiped.

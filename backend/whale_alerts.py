@@ -368,7 +368,6 @@ def build_trade_plan_from_signal(sig: dict[str, Any], entry: float) -> dict[str,
             "source_url": WHALE_SOURCE_URL,
         },
         "engine": "whale_alerts",
-        "bible_key": None,
         "ml_gate": "off",
         "strength": min(sig["amount_btc"] / MIN_BTC_AMOUNT, 10.0),
     }

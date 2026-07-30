@@ -1,88 +1,56 @@
-"""Unified AI agent brain — pattern → Bible → ML → fire context.
-
-Merges three knowledge packs into one decision enrichment used by auto_buy_loop
-and AI confirmation. Lookups are in-RAM (microsecond).
-"""
+"""Agent brain — Fire Engine v3.1 (patterns + structure + indicators)."""
 from __future__ import annotations
 
 from typing import Any
 
-from candlestick_bible_memory import fetch_bible, search_bible
-from ml_trading_memory import fetch_ml, memory_stats as ml_stats
-from volume_spread_system import PATTERN_BIBLE_KEY, PATTERN_LABELS
+try:
+    from fire_engine_bridge import ENTRY_PATTERN_NAME, entry_pattern_profile
+except Exception:
+    ENTRY_PATTERN_NAME = "FIRE_ENGINE_V3"
+
+    def entry_pattern_profile() -> dict[str, Any]:
+        return {"name": ENTRY_PATTERN_NAME, "engine": "fire_trade_engine"}
 
 
 PIPELINE_STEPS = (
-    "1_detect_candle_pattern",
-    "2_read_bible_section",
-    "3_ml_cost_aware_gate",
-    "4_fire_trade",
+    "1_market_structure",
+    "2_candlestick_patterns",
+    "3_shadow_psychology",
+    "4_tech_confluence",
+    "5_atr_sl_tp_fire",
 )
 
 
-def enrich_signal(result: dict[str, Any], *, max_bible_chars: int = 1200, max_ml_chars: int = 900) -> dict[str, Any]:
-    """Attach Bible text + ML takeaways to a pattern decision (no I/O beyond RAM)."""
+def enrich_signal(result: dict[str, Any], *, max_ml_chars: int = 900) -> dict[str, Any]:
     out = dict(result)
-    pattern = result.get("pattern")
-    bible_key = result.get("bible_key") or PATTERN_BIBLE_KEY.get(str(pattern or ""), "")
-    bible_hit = fetch_bible(bible_key or str(pattern or ""), max_chars=max_bible_chars) if (bible_key or pattern) else {"ok": False}
-    if not bible_hit.get("ok") and pattern:
-        # fallback search by label
-        label = PATTERN_LABELS.get(str(pattern), str(pattern))
-        found = search_bible(label, limit=1)
-        if found:
-            bible_hit = fetch_bible(found[0]["id"], max_chars=max_bible_chars)
-
-    ml_hit = fetch_ml("cost aware", max_chars=max_ml_chars)
-    ml_takeaways = (ml_stats().get("takeaways") or [])[:5]
-
     out["brain"] = {
         "pipeline": list(PIPELINE_STEPS),
-        "pattern_label": PATTERN_LABELS.get(str(pattern or ""), pattern),
-        "bible": {
-            "ok": bool(bible_hit.get("ok")),
-            "id": bible_hit.get("id"),
-            "title": bible_hit.get("title"),
-            "fetch_ns": bible_hit.get("fetch_ns"),
-            "text": bible_hit.get("text") if bible_hit.get("ok") else None,
-        },
-        "ml": {
-            "ok": bool(ml_hit.get("ok")),
-            "id": ml_hit.get("id"),
-            "title": ml_hit.get("title"),
-            "fetch_ns": ml_hit.get("fetch_ns"),
-            "text": ml_hit.get("text") if ml_hit.get("ok") else None,
-            "takeaways": ml_takeaways,
-            "gate": "cost_aware_magnitude_vs_fees",
-        },
+        "entry_pattern": result.get("entry_pattern") or ENTRY_PATTERN_NAME,
+        "pattern_label": result.get("pattern"),
+        "confidence": result.get("confidence") or result.get("strength"),
+        "risk_reward": result.get("risk_reward"),
+        "reasoning": result.get("reason"),
     }
     return out
 
 
 def brain_chat_summary(enriched: dict[str, Any]) -> str:
-    """One-line System Log summary of the brain pipeline."""
     action = enriched.get("action")
-    pattern = enriched.get("pattern")
-    label = PATTERN_LABELS.get(str(pattern or ""), pattern or "n/a")
-    bible = (enriched.get("brain") or {}).get("bible") or {}
-    strength = enriched.get("strength")
+    pattern = enriched.get("pattern") or "n/a"
     if action in ("BUY", "SELL"):
         return (
-            f"Brain: detect={label} -> Bible[{bible.get('id') or 'n/a'}] "
-            f"-> ML cost-aware -> {action} (strength={strength})"
+            f"FireEngine: {pattern} → {action} "
+            f"(conf={enriched.get('confidence') or enriched.get('strength')})"
         )
-    return f"Brain: no pattern — {enriched.get('reason', 'skip')}"
+    return f"FireEngine: no setup — {enriched.get('reason', 'skip')}"
 
 
 def strategy_system_blurb() -> str:
     return (
-        "AI AGENT BRAIN PIPELINE (merged 3 PDFs):\n"
-        "1) DETECT — closed-candle patterns (engulfing, pin/hammer/star, inside bar, "
-        "morning/evening star, harami, tweezers, doji, soldiers/crows, belt, marubozu).\n"
-        "2) BIBLE — fetch matching Candlestick Trading Bible section from RAM "
-        "(pin bar / engulfing / inside bar strategies preferred).\n"
-        "3) ML — cost-aware gate: only fire when remaining edge & candle range clear "
-        "λ×round-trip fee hurdle (arXiv:2606.00060). Naive every-signal trading is banned.\n"
-        "4) FIRE — BUY→LONG / SELL→SHORT with SL sizing + profit lock exits.\n"
-        "Conflicts (bull+bear same bar) = NO_TRADE. Prefer confluence with trend/local slope."
+        f"AI AGENT — {ENTRY_PATTERN_NAME} (Live Fire Engine v3.1):\n"
+        "1) Market structure filter (skip sideways; soft-block weak retracement entries).\n"
+        "2) DETECT 15+ candlestick patterns + shadow psychology on closed bars.\n"
+        "3) EMA/MACD/ADX/RSI tech bias → weighted confluence gate.\n"
+        "4) FIRE LONG/SHORT with pattern-extreme SL + ATR pad, TP at 1:2 R:R.\n"
+        "5) Auto-exit when mark hits SL or TP (manual/emergency still available)."
     )

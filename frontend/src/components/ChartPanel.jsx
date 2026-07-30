@@ -61,7 +61,7 @@ export default function ChartPanel({
           {botIsActive && readouts.blueBoxStatus ? (
             <div
               className="flex items-center gap-1.5 px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-[10px] font-bold uppercase tracking-wide text-cyan-300"
-              title="AI candle brain: detect → Bible → ML cost-aware → fire"
+              title="AI candle brain: PATTERN_2 EMA + MACD/ADX → fire"
             >
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
               {readouts.blueBoxStatus}
@@ -153,19 +153,13 @@ export default function ChartPanel({
       <div ref={chartContainerRef} className="w-full h-80 lg:h-[28rem] relative">
         {botIsActive ? (
           <div className="absolute top-2 right-2 z-20 pointer-events-none flex flex-col items-end gap-1">
-            <div className="px-2 py-1 rounded-md bg-cyan-950/80 border border-cyan-500/50 text-[9px] font-black uppercase tracking-widest text-cyan-200 shadow-lg">
-              Candle Brain
+            <div className="px-2 py-1 rounded-md bg-emerald-950/80 border border-emerald-500/50 text-[9px] font-black uppercase tracking-widest text-emerald-200 shadow-lg">
+              Fire Engine v3
             </div>
-            <div className="text-[8px] text-cyan-300/80 font-mono text-right leading-tight">
-              <span className="text-cyan-300">◉ detect</span>
-              {' → '}
-              <span className="text-amber-300">◐ confirm</span>
-              {' → '}
-              <span className="text-lime-400">⚡ fire</span>
-              <span className="text-gray-500">/</span>
-              <span className="text-red-400">✕ skip</span>
+            <div className="text-[8px] text-emerald-300/80 font-mono text-right leading-tight">
+              patterns + shadow psych
               <br />
-              <span className="text-yellow-400">—</span> EMA50 · <span className="text-purple-400">—</span> EMA200
+              SL · 1:2 TP auto-exit
             </div>
           </div>
         ) : null}

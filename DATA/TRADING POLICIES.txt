@@ -1,30 +1,12 @@
-# Candle Brain — Active Entry Policies (PDF merge)
+# Candle Brain — Active Policies
 
-Pipeline: Detect → Bible (RAM) → ML cost-aware → Fire
+Active profile from `ENTRY_PATTERN_NAME` (default **PATTERN_2**).
 
-## Active pattern families (Bible priority — fire allowlist)
-1. Engulfing / Piercing / Dark Cloud
-2. Pin bar / Hammer / Shooting Star
-3. Morning / Evening Star
-4. Inside-bar break (Bible)
+## PATTERN_2
+EMA cross (6/95) + MACD/ADX (17/21/15, ADX>25) → fire on closed-bar state change
 
-(Disabled for fire: harami, tweezers, doji extremes, three white/black, belt, marubozu)
-
-## Filters
-- EMA50 / EMA200 trend + local slope
-- Engulfing: full body cover (Nison) + with-trend preferred; counter-trend only on exhaustion
-- No impulse chase: block when stretched far above/below EMA8+EMA21
-- Max 1 same-side auto position per pair
-- Min 3 bars between auto entries
-- **3-candle entry:** bar1 pattern → bar2 direction confirm → fire at bar3 open
-- Volume ≥ 1.6× Vol MA and expanding vs previous (≥1.15×)
-- Min pattern strength ≥ 0.75
-- Same-bar bull+bear conflict = NO_TRADE
-- ML cost-aware: λ=1.2 × fee hurdle + abs candle range ≥ 0.02%
+## PATTERN_1
+Pin / Engulf / Inside + confluence ≥2 + R:R≥2 → skip choppy
 
 ## Exits
-Profit lock +0.40% floor / 1.5× trail from peak / hard +1.2%.
-Stop-loss:
-- Structure SL = beyond pattern+confirm swing (BUY below lows / SELL above highs)
-- TF hard stop: 1m −0.60% · 5m −0.75% · 15m −1.0% · 1h −1.2%
-(Old reverse-% trail stop removed.)
+Strict Exit lock +0.50%+ / hard +1.8%+ / max loss −0.40% / structure SL / TF hard stops
