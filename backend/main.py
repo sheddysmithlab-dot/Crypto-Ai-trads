@@ -52,6 +52,7 @@ from volume_spread_system import (
     build_blue_box_chart_overlay,
 )
 from fire_engine_bridge import evaluate_fire_engine
+import min1_engine
 from bybit_executor import BybitAgent
 from ml_trading_memory import (
     fetch_ml,
@@ -597,7 +598,9 @@ bybit_api = BybitAPIWrapper()
 # Manual-mode defaults (auto strategy wiped)
 MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "5"))
 MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "1"))
-AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Fire Engine SL/TP
+AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Fire Engine SL/TP + 1M batch exit
+# Global: at most one new 1M-engine entry per closed candle timestamp.
+LAST_MIN1_GLOBAL_CLOSE_TIME = 0
 INVERT_AUTO_TRADE_FIRE = False
 BTC_REGIME_GATE = False
 _AUTO_BUY_TICKER_POLL = float(os.environ.get("MARKET_TICKER_POLL", "0.35"))
@@ -657,6 +660,9 @@ class AITradingAgent:
         # Risk % from modal -> max_concurrent_trades via round(risk_pct * 1.5). Not a stop-loss.
         self.risk_level_pct = 3.0
         self.max_concurrent_trades = MAX_CONCURRENT_TRADES_DEFAULT
+        self._max_concurrent_before_min1: int | None = None
+        # Capital snapshot when the current 1M batch opened (first of up to 10).
+        self.min1_batch_capital: float | None = None
         # AI Agent Instructions modal: optional "Capital profit of the day" target.
         # 0.0 means disabled. Once the day's profit % crosses this, new entries are
         # halted (existing positions keep being managed by strict exit logic).
@@ -687,7 +693,10 @@ class AITradingAgent:
         self.trade_history = []  # session list (active + sold), cleared only on START/STOP
 
         # Chart timeframe — shared by all watchlist pairs in auto_buy_loop().
+        # Default 1M → arm 1min fade engine (max 10 open).
         self.timeframe_seconds = 60
+        self._max_concurrent_before_min1 = self.max_concurrent_trades
+        self.max_concurrent_trades = min1_engine.MAX_OPEN
 
     # Cap = every mapped Bybit pair (frontend TRADING_PAIRS / BYBIT_SYMBOL_MAP).
     MAX_WATCHLIST = 32
@@ -1163,10 +1172,24 @@ class AITradingAgent:
         """
         if self.timeframe_seconds == seconds:
             return
+        was_1m = self.timeframe_seconds == 60
         self.timeframe_seconds = seconds
         LAST_CANDLE_TIMESTAMPS.clear()
         reset_blue_box_state()
         _invalidate_kline_cache()
+        if seconds == 60:
+            if not was_1m:
+                self._max_concurrent_before_min1 = self.max_concurrent_trades
+            self.max_concurrent_trades = min1_engine.MAX_OPEN
+            print(
+                f"[1MIN] Engine armed — Doji/Engulf fade opposite | "
+                f"max {min1_engine.MAX_OPEN} | batch +{min1_engine.BATCH_PROFIT_PCT}% net"
+            )
+        elif was_1m:
+            if self._max_concurrent_before_min1 is not None:
+                self.max_concurrent_trades = self._max_concurrent_before_min1
+                self._max_concurrent_before_min1 = None
+            print("[1MIN] Engine disarmed — back to Fire Engine path for non-1m TFs.")
         print(f"[TIMEFRAME SYNC] Backend trading timeframe set to {seconds}s.")
 
     def open_trade(
@@ -1188,6 +1211,8 @@ class AITradingAgent:
         target_mult=None,
         pair=None,
         timeframe_key=None,
+        entry_pattern=None,
+        exit_mode=None,
     ):
         """ RULE 1: Opens a position as a Market Order (RULE 7) with simulated minor slippage.
         Manual entries default to 1% margin x 100x leverage. Auto entries pass
@@ -1199,6 +1224,8 @@ class AITradingAgent:
 
         trade_pair = (pair or self.active_pair or "").strip() or self.active_pair
         mark_px = self.mark_price_for(trade_pair) or self.current_price
+        tf_key = timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
+        min1_mode = min1_engine.is_min1_timeframe(tf_key) and source == "auto"
 
         if source == "manual":
             # Manual trading is the opposite of automation - only allowed while the bot
@@ -1220,7 +1247,7 @@ class AITradingAgent:
                 )
                 return None
 
-            if not self.has_same_side_auto_capacity(side, trade_pair):
+            if not self.has_same_side_auto_capacity(side, trade_pair, min1_mode=min1_mode):
                 print(
                     f"[PILLAR 3: AI AGENT] Same-side stack blocked on {trade_pair} "
                     f"({side} already open — max {MAX_SAME_SIDE_AUTO_PER_PAIR})."
@@ -1335,9 +1362,25 @@ class AITradingAgent:
             "target_mult": target_mult,
             "capital_reserved": capital_reserved,
             "season_id": self.ai_season_id,
-            "timeframe_key": timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m"),
-            "exit_mode": ("fire_engine_sl_tp" if source == "auto" else "manual"),
+            "timeframe_key": tf_key,
+            "entry_pattern": entry_pattern
+            or (min1_engine.ENTRY_PATTERN_NAME if min1_mode else ENTRY_PATTERN_NAME),
+            "exit_mode": exit_mode
+            or (
+                "min1_batch_2pct"
+                if min1_mode
+                else ("fire_engine_sl_tp" if source == "auto" else "manual")
+            ),
         }
+        # Start a new 1M batch capital baseline on first open of an empty min1 book.
+        if min1_mode and not any(min1_engine.is_min1_trade(t) for t in self.trades):
+            base = self.get_trading_capital_base()
+            self.min1_batch_capital = float(base if base is not None else self.current_capital)
+            print(
+                f"[1MIN] Batch baseline ${self.min1_batch_capital:,.2f} — "
+                f"target +{min1_engine.BATCH_PROFIT_PCT}% net after fees "
+                f"(${min1_engine.batch_target_usd(self.min1_batch_capital):,.2f})"
+            )
         self.trades.append(trade)
         self.set_pair_mark(trade_pair, filled_price)
         if bybit_api.mode != "LIVE_TRADING":
@@ -1492,11 +1535,16 @@ class AITradingAgent:
             self.peak_net_pct = 0.0
             return
 
-        # Fire Engine exits: hit SL or TP on auto trades (manual stays manual-close only).
+        # Exits: 1M batch +2% net (after fees), else Fire Engine SL/TP on non-1M autos.
         if AUTO_TRADE_AUTO_EXIT_ENABLED:
+            self._try_close_min1_batch()
             still_open = []
             for trade in self.trades:
                 if trade.get("source") == "manual":
+                    still_open.append(trade)
+                    continue
+                if min1_engine.is_min1_trade(trade):
+                    # 1M trades only exit via batch target (no individual SL/TP).
                     still_open.append(trade)
                     continue
                 trade_pair = trade.get("pair") or ""
@@ -1514,6 +1562,50 @@ class AITradingAgent:
             self.trades = still_open
 
         self._sync_agent_trailing_lock_state()
+
+    def _try_close_min1_batch(self) -> bool:
+        """Close all 1M fade trades when batch is full (10) and net after fees ≥ +2% of baseline."""
+        min1_trades = [t for t in self.trades if min1_engine.is_min1_trade(t)]
+        if len(min1_trades) < min1_engine.MAX_OPEN:
+            return False
+        base = self.min1_batch_capital
+        if base is None or base <= 0:
+            base = float(self.get_trading_capital_base() or self.current_capital or 0)
+        if base <= 0:
+            return False
+        target = min1_engine.batch_target_usd(base)
+        net = sum(float(self._trade_metrics(t, for_close=True)["net_usd"]) for t in min1_trades)
+        if net < target:
+            return False
+
+        reason = (
+            f"1M batch exit: net ${net:.2f} ≥ +{min1_engine.BATCH_PROFIT_PCT}% "
+            f"of ${base:.2f} (${target:.2f}) after fees — closing {len(min1_trades)} trades"
+        )
+        still = []
+        closed = 0
+        for t in list(self.trades):
+            if not min1_engine.is_min1_trade(t):
+                still.append(t)
+                continue
+            m = self._trade_metrics(t, for_close=True)
+            if self._close_single_trade(t, m, reason):
+                closed += 1
+            else:
+                still.append(t)
+        self.trades = still
+        self.min1_batch_capital = None
+        notifications.push(
+            f"1M batch closed ({closed}/{len(min1_trades)}): net ${net:.2f} hit +{min1_engine.BATCH_PROFIT_PCT}% target.",
+            "success" if net >= 0 else "warning",
+        )
+        system_log.push_agent_chat(
+            reason,
+            status="match",
+            details={"net_usd": net, "target_usd": target, "closed": closed},
+        )
+        print(f"[1MIN] {reason}")
+        return closed > 0
 
     def _evaluate_fire_engine_exit(self, trade: dict, mark: float) -> str | None:
         """Close auto trade when mark hits Fire Engine SL or TP."""
@@ -1605,8 +1697,11 @@ class AITradingAgent:
             if t.get("source") == "auto" and t.get("pair") == pair and t.get("side") == side
         )
 
-    def has_same_side_auto_capacity(self, side: str, pair: str) -> bool:
+    def has_same_side_auto_capacity(self, side: str, pair: str, *, min1_mode: bool = False) -> bool:
         """False when this pair already has enough same-side auto positions."""
+        if min1_mode:
+            # 1M strategy stacks up to MAX_OPEN across minutes on the same pair/side.
+            return self.same_side_auto_count(side, pair) < min1_engine.MAX_OPEN
         limit = max(1, int(MAX_SAME_SIDE_AUTO_PER_PAIR))
         return self.same_side_auto_count(side, pair) < limit
 
@@ -1960,6 +2055,7 @@ def compute_auto_trade_plan(
     price: float | None = None,
     size_mult: float = 1.0,
     pair: str | None = None,
+    capital_frac: float | None = None,
 ) -> dict | None:
     trade_pair = (pair or getattr(agent, "active_pair", None) or "").strip()
     mark = agent.mark_price_for(trade_pair) if trade_pair else None
@@ -1972,7 +2068,7 @@ def compute_auto_trade_plan(
     if available is None or available <= 0:
         return None
     mult = max(1.0, float(size_mult))
-    cap_frac = auto_trade_capital_pct_for_agent(agent)
+    cap_frac = float(capital_frac) if capital_frac is not None else auto_trade_capital_pct_for_agent(agent)
     position_usd = round(available * cap_frac * mult, 2)
     if position_usd <= 0:
         return None
@@ -2019,7 +2115,12 @@ def compute_auto_trade_plan(
 
 
 def evaluate_entry(candles, timeframe_key: str, *, pair: str = "default"):
-    """Fire Engine v3 entry scan."""
+    """Route: 1M → min1 fade engine; else Fire Engine v3."""
+    if min1_engine.is_min1_timeframe(timeframe_key):
+        result = min1_engine.evaluate_1min(candles, timeframe_key, pair=pair)
+        if result.get("action") in ("BUY", "SELL"):
+            return enrich_signal(result)
+        return result
     result = evaluate_fire_engine(candles, timeframe_key, pair=pair)
     if result.get("action") in ("BUY", "SELL"):
         return enrich_signal(result)
@@ -2042,19 +2143,32 @@ async def fetch_closed_candle_history(
 
 
 async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
-    """Closed-candle Fire Engine scan → open auto trade with SL/TP."""
+    """Closed-candle scan → open auto trade (1M fade or Fire Engine)."""
+    global LAST_MIN1_GLOBAL_CLOSE_TIME
+
     bybit_symbol = get_bybit_symbol(pair)
     if not bybit_symbol:
         return False
 
-    history = await fetch_closed_candle_history(client, bybit_symbol, timeframe_key, limit=max(MIN_CANDLES, 80))
-    if len(history) < 20:
+    min1_mode = min1_engine.is_min1_timeframe(timeframe_key)
+    if min1_mode:
+        open_min1 = sum(1 for t in agent.trades if min1_engine.is_min1_trade(t))
+        if open_min1 >= min1_engine.MAX_OPEN:
+            return False
+
+    hist_limit = min1_engine.LOOKBACK if min1_mode else max(MIN_CANDLES, 80)
+    history = await fetch_closed_candle_history(client, bybit_symbol, timeframe_key, limit=hist_limit)
+    if len(history) < (2 if min1_mode else 20):
         return False
 
     close_time = int(history[-1]["close_time"])
     if close_time <= LAST_CANDLE_TIMESTAMPS.get(pair, 0):
         return False
     LAST_CANDLE_TIMESTAMPS[pair] = close_time
+
+    # Global: only one new 1M trade per closed minute across all pairs.
+    if min1_mode and close_time <= LAST_MIN1_GLOBAL_CLOSE_TIME:
+        return False
 
     detect = evaluate_entry(history, timeframe_key, pair=pair)
     system_log.set_last_uvss_scan(
@@ -2071,7 +2185,11 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
     if detect.get("action") not in ("BUY", "SELL"):
         system_log.push_agent_chat(
-            f"FireEngine scan {pair} @ {timeframe_key}: {detect.get('reason', 'no setup')}",
+            (
+                f"1M fade scan {pair}: {detect.get('reason', 'no setup')}"
+                if min1_mode
+                else f"FireEngine scan {pair} @ {timeframe_key}: {detect.get('reason', 'no setup')}"
+            ),
             status="scanning",
             details={"pair": pair, "timeframe": timeframe_key},
         )
@@ -2079,10 +2197,15 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
     mark_px = agent.mark_price_for(pair) or float(detect.get("entry") or history[-1]["close"])
     side = "LONG" if detect["action"] == "BUY" else "SHORT"
-    plan = compute_auto_trade_plan(agent, price=mark_px, pair=pair)
+    plan = compute_auto_trade_plan(
+        agent,
+        price=mark_px,
+        pair=pair,
+        capital_frac=min1_engine.SIZE_FRAC if min1_mode else None,
+    )
     if plan is None:
         system_log.push_agent_chat(
-            f"FireEngine signal on {pair} but size plan failed",
+            f"{'1M fade' if min1_mode else 'FireEngine'} signal on {pair} but size plan failed",
             status="no_match",
             details={"pair": pair, "detect": detect},
         )
@@ -2090,7 +2213,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
     trade = agent.open_trade(
         side=side,
-        reason=detect.get("reason") or f"FireEngine {detect.get('pattern')}",
+        reason=detect.get("reason") or f"{'1M fade' if min1_mode else 'FireEngine'} {detect.get('pattern')}",
         source="auto",
         position_size_usd=plan["position_usd"],
         qty=plan["qty"],
@@ -2099,14 +2222,19 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         pattern=detect.get("pattern"),
         signal_candle_time=close_time,
         taapi_action=detect["action"],
-        sl_price=detect.get("sl"),
-        tp_price=detect.get("tp"),
-        target_mult=detect.get("risk_reward"),
+        sl_price=None if min1_mode else detect.get("sl"),
+        tp_price=None if min1_mode else detect.get("tp"),
+        target_mult=None if min1_mode else detect.get("risk_reward"),
         pair=pair,
         timeframe_key=timeframe_key,
+        entry_pattern=detect.get("entry_pattern") or (min1_engine.ENTRY_PATTERN_NAME if min1_mode else ENTRY_PATTERN_NAME),
+        exit_mode=detect.get("exit_mode") or ("min1_batch_2pct" if min1_mode else "fire_engine_sl_tp"),
     )
     if not trade:
         return False
+
+    if min1_mode:
+        LAST_MIN1_GLOBAL_CLOSE_TIME = close_time
 
     system_log.push_agent_chat(
         brain_chat_summary(detect) + f" → FIRED {side} on {pair}",
@@ -2123,29 +2251,37 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             "entry": mark_px,
             "sl": detect.get("sl"),
             "tp": detect.get("tp"),
+            "engine": detect.get("engine"),
         }
     )
+    tag = "1MIN FADE" if min1_mode else "FIRE ENGINE"
     print(
-        f"[FIRE ENGINE] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} "
+        f"[{tag}] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} "
         f"SL={detect.get('sl')} TP={detect.get('tp')} conf={detect.get('confidence')}"
     )
     return True
 
 
 async def auto_buy_loop():
-    """Multi-pair Fire Engine scanner on each new closed candle."""
-    print(f"[AUTO BUY LOOP] {ENTRY_PATTERN_NAME} multi-pair fire engine online.")
+    """Multi-pair scanner: 1M fade engine or Fire Engine depending on timeframe."""
+    print("[AUTO BUY LOOP] multi-pair scanner online (1M fade | Fire Engine).")
     async with httpx.AsyncClient(timeout=8.0) as client:
         while True:
             try:
                 timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
                 poll = 0.5 if timeframe_key in ("1m", "30s") else 1.0
                 if agent.is_active and not agent.emergency_triggered:
+                    fired = False
                     for pair in agent.get_scan_pairs():
                         try:
-                            await scan_and_maybe_fire_pair(client, pair, timeframe_key)
+                            if await scan_and_maybe_fire_pair(client, pair, timeframe_key):
+                                fired = True
+                                # 1M: one trade per minute globally — stop scanning other pairs.
+                                if min1_engine.is_min1_timeframe(timeframe_key):
+                                    break
                         except Exception as exc:
-                            print(f"[FIRE ENGINE] scan error {pair}: {exc}")
+                            print(f"[SCAN] error {pair}: {exc}")
+                    _ = fired
                 await asyncio.sleep(poll)
             except Exception as exc:
                 print(f"[AUTO BUY LOOP] error: {exc}")
@@ -2312,20 +2448,27 @@ async def start_bot():
     agent.daily_target_reached = False  # fresh session -> clear any prior daily-target halt
     agent.begin_ai_season()  # season P&L + kill-switch baseline = portfolio value right now
     agent.is_active = True
-    print("[PILLAR 2: BACKEND] Received 'START' from Frontend — Fire Engine v3 armed.")
+    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+    profile = entry_pattern_profile(tf_key)
+    engine_label = "1M fade" if min1_engine.is_min1_timeframe(tf_key) else "Fire Engine v3"
+    print(f"[PILLAR 2: BACKEND] Received 'START' from Frontend — {engine_label} armed.")
     system_log.push(
         "ai",
         f"AI automation STARTED on {agent.active_pair} ({open_count} open position(s) preserved).",
         {"open_positions": open_count, "timeframe_seconds": agent.timeframe_seconds},
     )
-    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     system_log.push_agent_chat(
-        f"Fire Engine armed on {agent.active_pair} ({tf_key}) — scan → fire → SL/TP.",
+        (
+            f"1M fade armed on {agent.active_pair} — Doji/Engulf opposite, max {min1_engine.MAX_OPEN}, "
+            f"batch +{min1_engine.BATCH_PROFIT_PCT}% net exit."
+            if min1_engine.is_min1_timeframe(tf_key)
+            else f"Fire Engine armed on {agent.active_pair} ({tf_key}) — scan → fire → SL/TP."
+        ),
         status="active",
         details={
             "pair": agent.active_pair,
             "timeframe": tf_key,
-            "entry_pattern": entry_pattern_profile(),
+            "entry_pattern": profile,
         },
     )
     if open_count:
@@ -2337,12 +2480,9 @@ async def start_bot():
         notifications.push(f"AI Agent STARTED - now monitoring {agent.active_pair} live.", "success")
     return {
         "status": "success",
-        "entry_pattern": ENTRY_PATTERN_NAME,
-        "entry_pattern_profile": entry_pattern_profile(),
-        "message": (
-            f"Bot active — {ENTRY_PATTERN_NAME}: candlestick patterns + shadow psychology. "
-            "Fires LONG/SHORT with ATR-padded SL and 1:2 TP; auto-exits on SL/TP."
-        ),
+        "entry_pattern": profile.get("name") or ENTRY_PATTERN_NAME,
+        "entry_pattern_profile": profile,
+        "message": strategy_system_blurb(tf_key),
         "open_positions": open_count,
         "trade_history_count": len(agent.trade_history),
     }
@@ -2639,20 +2779,24 @@ async def get_agent_config():
     risk_pct = agent.risk_level_pct or (
         round(agent.max_concurrent_trades / 1.5, 1) if agent.max_concurrent_trades else 3.0
     )
+    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+    profile = entry_pattern_profile(tf_key)
     return {
         "stop_loss_pct": risk_pct,
         "risk_pct": risk_pct,
         "daily_profit_pct": agent.daily_profit_target_pct,
         "max_concurrent_trades": agent.max_concurrent_trades,
-        "entry_pattern": ENTRY_PATTERN_NAME,
-        "entry_pattern_profile": entry_pattern_profile(),
+        "entry_pattern": profile.get("name") or ENTRY_PATTERN_NAME,
+        "entry_pattern_profile": profile,
+        "timeframe": tf_key,
     }
 
 
 @app.get("/entry-pattern")
 async def get_entry_pattern():
-    """Active entry profile (Fire Engine v3)."""
-    return {"status": "success", **entry_pattern_profile()}
+    """Active entry profile for current timeframe (1M fade or Fire Engine)."""
+    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+    return {"status": "success", "timeframe": tf_key, **entry_pattern_profile(tf_key)}
 
 
 # ==========================================
