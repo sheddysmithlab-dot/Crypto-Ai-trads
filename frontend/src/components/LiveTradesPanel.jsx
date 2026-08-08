@@ -90,6 +90,11 @@ function TradeRowDesktop({ trade, onRequestClose }) {
       <td className="px-3 py-1.5 font-mono">${fmtNum(trade.current)}</td>
       <td className={`px-3 py-1.5 font-bold font-mono ${pnlColor}`}>
         {formatMovePct(trade)}
+        {!isSold && trade.exit_mode === 'min1_batch_2pct' ? (
+          <div className="text-[9px] font-normal text-amber-400">
+            {trade.exit_label || 'batch +2% net exit'}
+          </div>
+        ) : null}
         {!isSold && trade.status === 'locked' && trade.sell_trigger_pct != null ? (
           <div className="text-[9px] font-normal text-blue-400">
             exit ≤ +{Number(trade.sell_trigger_pct).toFixed(2)}%

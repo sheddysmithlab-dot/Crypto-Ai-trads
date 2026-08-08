@@ -1,18 +1,18 @@
-# Agent Strategy — active entry profiles
+# Agent Strategy — active engines
 
-| Profile | Env | Engine |
-|---------|-----|--------|
-| **PATTERN_2** (default) | `ENTRY_PATTERN_NAME=PATTERN_2` | EMA + MACD/ADX (`pattern_2_*`) |
-| **PATTERN_1** | `ENTRY_PATTERN_NAME=PATTERN_1` | Candlestick Bible (`pattern_1_*`) |
+| TF | Profile | Engine |
+|----|---------|--------|
+| **1M** | `MIN1_FADE_V1` | [`backend/1min.py`](../backend/1min.py) — Doji/Engulf fade opposite |
+| **5M+** | `FIRE_ENGINE_V3` | [`backend/fire_trade_engine.py`](../backend/fire_trade_engine.py) |
 
-## PATTERN_2
+## 1M fade
 ```
-closed candle → EMA cross / MACD+ADX → fire
+closed 1m → Doji|Engulfing → OPPOSITE side → stack to 10
+→ batch net after fees ≥ +2% of batch capital → close all → repeat
 ```
-See [`PATTERN_2.md`](PATTERN_2.md). Source: `pettern-2.txt`.
 
-## PATTERN_1
+## Fire Engine
 ```
-closed candle → Pin/Engulf/Inside + confluence → fire
+closed candle → patterns + structure + tech confluence → LONG/SHORT
+→ SL pattern±ATR · TP 1:2 → mark exit
 ```
-See [`PATTERN_1.md`](PATTERN_1.md).

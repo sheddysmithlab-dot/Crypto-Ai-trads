@@ -1,20 +1,26 @@
-# Trade Policy (live) — FIRE ENGINE V3.1
+# Trade Policy (live)
 
-**Engine:** [`backend/fire_trade_engine.py`](backend/fire_trade_engine.py) via [`backend/fire_engine_bridge.py`](backend/fire_engine_bridge.py)  
-**Spec:** `pettern -4.txt` Chapters 1–7 (ML/DQN chapters not in live bot)
+## Timeframe routing
+- **1M (and 30s)** → [`backend/1min.py`](backend/1min.py) via [`backend/min1_engine.py`](backend/min1_engine.py)
+- **5M+** → [`backend/fire_trade_engine.py`](backend/fire_trade_engine.py) Fire Engine v3.1
 
-## Live pipeline
-1. Closed-candle Bybit OHLCV (watchlist pairs; lookback ≥ 120 for EMA 95)
-2. Patterns (15+) + shadow psychology + market structure (skip sideways; soft-block mid-retracement unless strong reversal)
-3. Tech bias: EMA 6/95, MACD+ADX, RSI soft filter
-4. Weighted confluence (patterns ~0.45, shadow ~0.20, structure ~0.15, tech ~0.20) → fire if ≥ `FIRE_ENGINE_MIN_CONFLUENCE` (default 0.72)
-5. SL = pattern extreme ± ATR pad · TP = 1:2 R:R
-6. Auto-exit when mark hits SL or TP (auto trades only)
+## 1M fade — ENTRY
+1. Closed 1m candle: detect **Doji** or **Bullish/Bearish Engulfing**
+2. Trade the **opposite** side (fade)
+3. At most **one new trade per minute** (global across watchlist)
+4. Hold up to **10** open trades
 
-## Knobs (`.env`)
-`FIRE_ENGINE_LOOKBACK`, `FIRE_ENGINE_MIN_CONFLUENCE`, `FIRE_ENGINE_MIN_EDGE`, `FIRE_ENGINE_MIN_CONFIDENCE`, `FIRE_ENGINE_ATR_SL_PAD`, `FIRE_ENGINE_RR`, `FIRE_ENGINE_SKIP_SIDEWAYS`
+## 1M fade — EXIT
+1. **No individual SL/TP**
+2. **No** trailing profit-book / structure stop / TF hard-stop
+3. When **10** are open and **combined net P&L after fees ≥ +2% of batch capital** → close all
+4. Reset batch → open next 10 → repeat
+5. Manual close + emergency sell-all always available
+
+Knobs: `MIN1_MAX_OPEN`, `MIN1_BATCH_PROFIT_PCT`, `MIN1_SIZE_FRAC`, `MIN1_LOOKBACK`, `MIN1_DOJI_BODY_RATIO`
+
+## Fire Engine (non-1M) — EXIT
+Patterns + shadow + structure + EMA/MACD/ADX/RSI confluence → SL/TP 1:2 on mark.
 
 ## Manual
 Manual open/close and emergency sell-all still work.
-
-Old PATTERN_1 / PATTERN_2 / UVSS / trailing profit-book paths stay wiped.

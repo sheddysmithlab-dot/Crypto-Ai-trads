@@ -1,13 +1,14 @@
 # System Role & Identity — active profile
 
-Live entry is selected by `ENTRY_PATTERN_NAME`.
+Live entry is selected by **chart timeframe**:
 
-## PATTERN_2 (default)
-Bitcoin TA/ML paper strategies:
-1. EMA short/long cross
-2. MACD + ADX>25 trend filter
-3. Cost-aware — paper fee ~0.1%/side; do not overtrade
-4. BUY=LONG, SELL=SHORT
+## 1M — `MIN1_FADE_V1`
+1. Doji / Engulfing on closed 1m bar
+2. Trade opposite side (fade)
+3. Hold up to 10; one new entry per minute
+4. **Exit:** batch net after fees ≥ +2% of batch capital → close all (no per-trade SL/TP)
 
-## PATTERN_1
-Candlestick Trading Bible: Pin / Engulfing / Inside with confluence; skip choppy.
+## 5M+ — `FIRE_ENGINE_V3`
+1. Candlestick patterns + shadow psychology + structure
+2. EMA/MACD/ADX/RSI confluence
+3. **Exit:** SL = pattern extreme ± ATR pad · TP = 1:2 R:R on mark
