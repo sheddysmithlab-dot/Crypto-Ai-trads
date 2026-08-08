@@ -1,6 +1,6 @@
 const HOW_IT_WORKS = [
   'Pick a coin pair and chart timeframe (1M, 5M, 15M, etc.).',
-  '1M = separate fade engine: Doji/Engulfing → opposite side, up to 10 trades.',
+  '1M = fade engine: Doji/Engulf → opposite; pattern bar1 → fire bar4; 1m gap per coin.',
   '1M batch: after fees, when 10 trades net +2% of batch capital → close all, then next 10.',
   '5M+ = Fire Engine v3.1 (patterns + structure + indicators → SL/TP).',
   'You can still manual-close or emergency sell-all anytime.',

@@ -599,8 +599,8 @@ bybit_api = BybitAPIWrapper()
 MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "5"))
 MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "1"))
 AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Fire Engine SL/TP + 1M batch exit
-# Global: at most one new 1M-engine entry per closed candle timestamp.
-LAST_MIN1_GLOBAL_CLOSE_TIME = 0
+# Per-pair last 1M fire candle close_time (chart-wise 1m gap).
+LAST_MIN1_FIRE_BY_PAIR: dict[str, int] = {}
 INVERT_AUTO_TRADE_FIRE = False
 BTC_REGIME_GATE = False
 _AUTO_BUY_TICKER_POLL = float(os.environ.get("MARKET_TICKER_POLL", "0.35"))
@@ -1175,6 +1175,7 @@ class AITradingAgent:
         was_1m = self.timeframe_seconds == 60
         self.timeframe_seconds = seconds
         LAST_CANDLE_TIMESTAMPS.clear()
+        LAST_MIN1_FIRE_BY_PAIR.clear()
         reset_blue_box_state()
         _invalidate_kline_cache()
         if seconds == 60:
@@ -1183,6 +1184,8 @@ class AITradingAgent:
             self.max_concurrent_trades = min1_engine.MAX_OPEN
             print(
                 f"[1MIN] Engine armed — Doji/Engulf fade opposite | "
+                f"pattern bar1 → fire bar{min1_engine.FIRE_CANDLE} | "
+                f"per-coin {min1_engine.PAIR_GAP_MS // 1000}s gap | "
                 f"max {min1_engine.MAX_OPEN} | batch +{min1_engine.BATCH_PROFIT_PCT}% net"
             )
         elif was_1m:
@@ -2173,8 +2176,6 @@ async def fetch_closed_candle_history(
 
 async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
     """Closed-candle scan → open auto trade (1M fade or Fire Engine)."""
-    global LAST_MIN1_GLOBAL_CLOSE_TIME
-
     bybit_symbol = get_bybit_symbol(pair)
     if not bybit_symbol:
         return False
@@ -2185,9 +2186,10 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         if open_min1 >= min1_engine.MAX_OPEN:
             return False
 
-    hist_limit = min1_engine.LOOKBACK if min1_mode else max(MIN_CANDLES, 80)
+    hist_limit = max(min1_engine.LOOKBACK, min1_engine.FIRE_CANDLE + 5) if min1_mode else max(MIN_CANDLES, 80)
     history = await fetch_closed_candle_history(client, bybit_symbol, timeframe_key, limit=hist_limit)
-    if len(history) < (2 if min1_mode else 20):
+    need = (min1_engine.FIRE_CANDLE + 1) if min1_mode else 20
+    if len(history) < need:
         return False
 
     close_time = int(history[-1]["close_time"])
@@ -2195,8 +2197,13 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return False
     LAST_CANDLE_TIMESTAMPS[pair] = close_time
 
-    # Global: only one new 1M trade per closed minute across all pairs.
-    if min1_mode and close_time <= LAST_MIN1_GLOBAL_CLOSE_TIME:
+    # Per-coin chart gap: at least 1m since last 1M fire on this pair.
+    if min1_mode and not min1_engine.pair_gap_ok(LAST_MIN1_FIRE_BY_PAIR.get(pair), close_time):
+        system_log.push_agent_chat(
+            f"1M fade {pair}: waiting {min1_engine.PAIR_GAP_MS // 1000}s coin gap since last fire",
+            status="scanning",
+            details={"pair": pair, "last_fire": LAST_MIN1_FIRE_BY_PAIR.get(pair), "close_time": close_time},
+        )
         return False
 
     detect = evaluate_entry(history, timeframe_key, pair=pair)
@@ -2263,12 +2270,19 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return False
 
     if min1_mode:
-        LAST_MIN1_GLOBAL_CLOSE_TIME = close_time
+        LAST_MIN1_FIRE_BY_PAIR[pair] = close_time
 
     system_log.push_agent_chat(
         brain_chat_summary(detect) + f" → FIRED {side} on {pair}",
         status="match",
-        details={"pair": pair, "trade_id": trade.get("id"), "sl": detect.get("sl"), "tp": detect.get("tp")},
+        details={
+            "pair": pair,
+            "trade_id": trade.get("id"),
+            "fire_candle": detect.get("fire_candle"),
+            "pattern_candle_time": detect.get("pattern_candle_time"),
+            "sl": detect.get("sl"),
+            "tp": detect.get("tp"),
+        },
     )
     system_log.set_last_trade_fire(
         {
@@ -2281,12 +2295,14 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             "sl": detect.get("sl"),
             "tp": detect.get("tp"),
             "engine": detect.get("engine"),
+            "fire_candle": detect.get("fire_candle"),
         }
     )
     tag = "1MIN FADE" if min1_mode else "FIRE ENGINE"
     print(
         f"[{tag}] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} "
-        f"SL={detect.get('sl')} TP={detect.get('tp')} conf={detect.get('confidence')}"
+        f"fire_bar={detect.get('fire_candle')} SL={detect.get('sl')} TP={detect.get('tp')} "
+        f"conf={detect.get('confidence')}"
     )
     return True
 
@@ -2300,17 +2316,11 @@ async def auto_buy_loop():
                 timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
                 poll = 0.5 if timeframe_key in ("1m", "30s") else 1.0
                 if agent.is_active and not agent.emergency_triggered:
-                    fired = False
                     for pair in agent.get_scan_pairs():
                         try:
-                            if await scan_and_maybe_fire_pair(client, pair, timeframe_key):
-                                fired = True
-                                # 1M: one trade per minute globally — stop scanning other pairs.
-                                if min1_engine.is_min1_timeframe(timeframe_key):
-                                    break
+                            await scan_and_maybe_fire_pair(client, pair, timeframe_key)
                         except Exception as exc:
                             print(f"[SCAN] error {pair}: {exc}")
-                    _ = fired
                 await asyncio.sleep(poll)
             except Exception as exc:
                 print(f"[AUTO BUY LOOP] error: {exc}")

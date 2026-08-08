@@ -161,7 +161,7 @@ export default function ChartPanel({
                 <div className="text-[8px] text-amber-200/85 font-mono text-right leading-tight">
                   Doji/Engulf → opposite
                   <br />
-                  hold 10 · batch +2% net exit
+                  fire bar4 · 1m/coin · batch +2%
                 </div>
               </>
             ) : (

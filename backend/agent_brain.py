@@ -72,9 +72,10 @@ def strategy_system_blurb(timeframe_key: str | None = None) -> str:
     if min1_engine is not None and min1_engine.is_min1_timeframe(timeframe_key or "1m"):
         return (
             f"AI AGENT — {min1_engine.ENTRY_PATTERN_NAME} (1-minute fade):\n"
-            "1) On each closed 1m candle detect Doji or Engulfing.\n"
-            "2) Trade the OPPOSITE side (fade).\n"
-            f"3) Hold up to {min1_engine.MAX_OPEN} trades (one new entry per minute).\n"
+            "1) Detect Doji/Engulfing on bar 1 of a 4-bar window.\n"
+            "2) Trade the OPPOSITE side (fade) — FIRE only when bar 4 closes.\n"
+            f"3) Per coin: ≥{min1_engine.PAIR_GAP_MS // 1000}s gap between fires; "
+            f"hold up to {min1_engine.MAX_OPEN}.\n"
             f"EXIT: No per-trade SL/TP. When batch is full ({min1_engine.MAX_OPEN}) and "
             f"combined net after fees ≥ +{min1_engine.BATCH_PROFIT_PCT}% of batch capital → close ALL.\n"
             "Then open the next batch. Manual/emergency close still available.\n"
