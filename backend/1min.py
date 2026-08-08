@@ -8,7 +8,7 @@ Rules
 - Patterns: Doji, Bullish Engulfing, Bearish Engulfing
 - Direction: OPPOSITE of the pattern bias (fade)
 - Timing: pattern on candle #1 → wait #2 + #3 → FIRE on closed candle #4
-- Per coin (chart pair): at least 1 minute gap between fires
+- Gap: at least 1 real minute between fires — globally AND per coin (wall clock)
 - Hold up to 10 open trades
 - No individual SL/TP — batch exit when combined net P&L
   (after broker fees) >= +2% of batch capital baseline
@@ -30,8 +30,12 @@ LOOKBACK = int(os.environ.get("MIN1_LOOKBACK", "30"))
 DOJI_BODY_RATIO = float(os.environ.get("MIN1_DOJI_BODY_RATIO", "0.10"))
 # Pattern on bar 1; fire when bar FIRE_CANDLE (4) has just closed.
 FIRE_CANDLE = int(os.environ.get("MIN1_FIRE_CANDLE", "4"))
-# Per-pair minimum gap between fires (ms). 1m chart = 60_000.
-PAIR_GAP_MS = int(os.environ.get("MIN1_PAIR_GAP_MS", "60000"))
+# Minimum seconds between ANY two 1M fires (global) and between fires on the same pair.
+PAIR_GAP_SEC = float(os.environ.get("MIN1_PAIR_GAP_SEC", os.environ.get("MIN1_PAIR_GAP_MS", "60000")))
+# Allow legacy ms env: if value looks like ms (>= 1000), convert to seconds.
+if PAIR_GAP_SEC >= 1000:
+    PAIR_GAP_SEC = PAIR_GAP_SEC / 1000.0
+PAIR_GAP_MS = int(PAIR_GAP_SEC * 1000)  # back-compat for UI/profile
 
 
 def entry_pattern_profile() -> dict[str, Any]:
@@ -40,7 +44,7 @@ def entry_pattern_profile() -> dict[str, Any]:
         "engine": ENGINE_NAME,
         "description": (
             f"1M fade: Doji/Engulfing → opposite; pattern bar1 → fire bar{FIRE_CANDLE}; "
-            f"per-coin {PAIR_GAP_MS // 1000}s gap; max {MAX_OPEN}; "
+            f"global+per-coin {int(PAIR_GAP_SEC)}s gap; max {MAX_OPEN}; "
             f"batch +{BATCH_PROFIT_PCT}% net after fees → close all"
         ),
         "max_open": MAX_OPEN,
@@ -48,6 +52,7 @@ def entry_pattern_profile() -> dict[str, Any]:
         "size_frac": SIZE_FRAC,
         "lookback": LOOKBACK,
         "fire_candle": FIRE_CANDLE,
+        "pair_gap_sec": PAIR_GAP_SEC,
         "pair_gap_ms": PAIR_GAP_MS,
     }
 
@@ -159,14 +164,28 @@ def detect_fade_signal(candles: list[dict]) -> dict[str, Any] | None:
         "fire_candle": FIRE_CANDLE,
         "reason": (
             f"1M fade: {pattern} on bar1 (native={natural}) → OPPOSITE {action} "
-            f"fired on bar{FIRE_CANDLE}. Per-coin {PAIR_GAP_MS // 1000}s gap; "
+            f"fired on bar{FIRE_CANDLE}. Global+per-coin {int(PAIR_GAP_SEC)}s wall gap; "
             f"batch hold up to {MAX_OPEN}; exit all at +{BATCH_PROFIT_PCT}% net after fees."
         ),
     }
 
 
+def wall_gap_ok(last_fire_wall_ts: float | None, now: float | None = None) -> bool:
+    """True if enough real-time seconds passed since last fire (not candle timestamp)."""
+    import time as _time
+
+    now_f = float(now if now is not None else _time.time())
+    if last_fire_wall_ts is None:
+        return True
+    try:
+        last = float(last_fire_wall_ts)
+    except (TypeError, ValueError):
+        return True
+    return (now_f - last) >= float(PAIR_GAP_SEC)
+
+
 def pair_gap_ok(last_fire_close_time: int | None, current_close_time: int) -> bool:
-    """True if this pair may fire again (chart-wise ≥ 1m since last fire)."""
+    """Legacy candle-time gap (kept for tests). Prefer wall_gap_ok for live fires."""
     if last_fire_close_time is None:
         return True
     try:
@@ -174,9 +193,8 @@ def pair_gap_ok(last_fire_close_time: int | None, current_close_time: int) -> bo
         cur_i = int(current_close_time)
     except (TypeError, ValueError):
         return True
-    # Support seconds or ms timestamps from Bybit.
     gap = PAIR_GAP_MS
-    if cur_i < 1_000_000_000_000:  # seconds
+    if cur_i < 1_000_000_000_000:
         gap = max(1, PAIR_GAP_MS // 1000)
     return cur_i >= last_i + gap
 
