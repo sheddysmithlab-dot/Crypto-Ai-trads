@@ -90,9 +90,13 @@ function TradeRowDesktop({ trade, onRequestClose }) {
       <td className="px-3 py-1.5 font-mono">${fmtNum(trade.current)}</td>
       <td className={`px-3 py-1.5 font-bold font-mono ${pnlColor}`}>
         {formatMovePct(trade)}
-        {!isSold && trade.exit_mode === 'min1_batch_2pct' ? (
+        {!isSold && trade.exit_mode === 'scalp_partial_be_trail' ? (
           <div className="text-[9px] font-normal text-amber-400">
-            {trade.exit_label || 'batch +2% net exit'}
+            {trade.scalp_partial_done
+              ? trade.scalp_be_done
+                ? 'scalp trail · BE on'
+                : 'scalp · partial done'
+              : 'scalp 50%@1R → BE → trail'}
           </div>
         ) : null}
         {!isSold && trade.status === 'locked' && trade.sell_trigger_pct != null ? (

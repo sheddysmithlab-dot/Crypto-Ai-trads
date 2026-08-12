@@ -134,11 +134,14 @@ class BybitAgent:
             print(f"❌ ORDER FAILED: {err}")
             return False, err
 
-    def close_position(self, trade: dict) -> tuple[bool, str | None]:
-        """Market reduce-only close for a tracked linear perpetual position."""
+    def close_position(self, trade: dict, qty: float | None = None) -> tuple[bool, str | None]:
+        """Market reduce-only close for a tracked linear perpetual position.
+
+        Optional ``qty`` closes a partial size; defaults to full trade qty.
+        """
         symbol = trade.get("bybit_symbol")
-        qty = trade.get("qty")
-        if not symbol or qty is None:
+        close_qty = qty if qty is not None else trade.get("qty")
+        if not symbol or close_qty is None:
             self.last_error = "Missing bybit_symbol or qty on trade record"
             return False, self.last_error
 
@@ -151,14 +154,14 @@ class BybitAgent:
                 symbol=symbol,
                 side=close_side,
                 orderType="Market",
-                qty=str(qty),
+                qty=str(close_qty),
                 reduceOnly=True,
             )
             ok, api_err = self._check_place_order_response(
                 resp,
                 action=f"CLOSE-{close_side}",
                 symbol=symbol,
-                qty=qty,
+                qty=close_qty,
                 pattern=f"trade#{trade.get('id')}",
             )
             if not ok:
@@ -168,7 +171,7 @@ class BybitAgent:
 
             self.last_error = None
             print(
-                f"✅ CLOSE FIRED: {close_side} {symbol} | qty={qty} | "
+                f"✅ CLOSE FIRED: {close_side} {symbol} | qty={close_qty} | "
                 f"trade #{trade.get('id')} ({side})"
             )
             return True, None
@@ -177,7 +180,7 @@ class BybitAgent:
                 exc,
                 action=f"CLOSE-{close_side}",
                 symbol=symbol,
-                qty=qty,
+                qty=close_qty,
                 pattern=f"trade#{trade.get('id')}",
             )
             self.last_error = err

@@ -52,7 +52,7 @@ from volume_spread_system import (
     build_blue_box_chart_overlay,
 )
 from fire_engine_bridge import evaluate_fire_engine
-import min1_engine
+import scalp_1m5m as scalp
 from bybit_executor import BybitAgent
 from ml_trading_memory import (
     fetch_ml,
@@ -598,10 +598,7 @@ bybit_api = BybitAPIWrapper()
 # Manual-mode defaults (auto strategy wiped)
 MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "5"))
 MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "1"))
-AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Fire Engine SL/TP + 1M batch exit
-# Wall-clock last fire times (seconds since epoch) — prevents same-second multi-coin spam.
-LAST_MIN1_FIRE_WALL_TS: float = 0.0
-LAST_MIN1_FIRE_BY_PAIR_WALL: dict[str, float] = {}
+AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Fire Engine SL/TP
 INVERT_AUTO_TRADE_FIRE = False
 BTC_REGIME_GATE = False
 _AUTO_BUY_TICKER_POLL = float(os.environ.get("MARKET_TICKER_POLL", "0.35"))
@@ -661,9 +658,6 @@ class AITradingAgent:
         # Risk % from modal -> max_concurrent_trades via round(risk_pct * 1.5). Not a stop-loss.
         self.risk_level_pct = 3.0
         self.max_concurrent_trades = MAX_CONCURRENT_TRADES_DEFAULT
-        self._max_concurrent_before_min1: int | None = None
-        # Capital snapshot when the current 1M batch opened (first of up to 10).
-        self.min1_batch_capital: float | None = None
         # AI Agent Instructions modal: optional "Capital profit of the day" target.
         # 0.0 means disabled. Once the day's profit % crosses this, new entries are
         # halted (existing positions keep being managed by strict exit logic).
@@ -694,10 +688,7 @@ class AITradingAgent:
         self.trade_history = []  # session list (active + sold), cleared only on START/STOP
 
         # Chart timeframe — shared by all watchlist pairs in auto_buy_loop().
-        # Default 1M → arm 1min fade engine (max 10 open).
         self.timeframe_seconds = 60
-        self._max_concurrent_before_min1 = self.max_concurrent_trades
-        self.max_concurrent_trades = min1_engine.MAX_OPEN
 
     # Cap = every mapped Bybit pair (frontend TRADING_PAIRS / BYBIT_SYMBOL_MAP).
     MAX_WATCHLIST = 32
@@ -1173,29 +1164,10 @@ class AITradingAgent:
         """
         if self.timeframe_seconds == seconds:
             return
-        was_1m = self.timeframe_seconds == 60
         self.timeframe_seconds = seconds
         LAST_CANDLE_TIMESTAMPS.clear()
-        LAST_MIN1_FIRE_BY_PAIR_WALL.clear()
-        global LAST_MIN1_FIRE_WALL_TS
-        LAST_MIN1_FIRE_WALL_TS = 0.0
         reset_blue_box_state()
         _invalidate_kline_cache()
-        if seconds == 60:
-            if not was_1m:
-                self._max_concurrent_before_min1 = self.max_concurrent_trades
-            self.max_concurrent_trades = min1_engine.MAX_OPEN
-            print(
-                f"[1MIN] Engine armed — Doji/Engulf fade opposite | "
-                f"pattern bar1 → fire bar{min1_engine.FIRE_CANDLE} | "
-                f"global+per-coin {int(min1_engine.PAIR_GAP_SEC)}s wall-clock gap | "
-                f"max {min1_engine.MAX_OPEN} | batch +{min1_engine.BATCH_PROFIT_PCT}% net"
-            )
-        elif was_1m:
-            if self._max_concurrent_before_min1 is not None:
-                self.max_concurrent_trades = self._max_concurrent_before_min1
-                self._max_concurrent_before_min1 = None
-            print("[1MIN] Engine disarmed — back to Fire Engine path for non-1m TFs.")
         print(f"[TIMEFRAME SYNC] Backend trading timeframe set to {seconds}s.")
 
     def open_trade(
@@ -1217,8 +1189,6 @@ class AITradingAgent:
         target_mult=None,
         pair=None,
         timeframe_key=None,
-        entry_pattern=None,
-        exit_mode=None,
     ):
         """ RULE 1: Opens a position as a Market Order (RULE 7) with simulated minor slippage.
         Manual entries default to 1% margin x 100x leverage. Auto entries pass
@@ -1230,8 +1200,6 @@ class AITradingAgent:
 
         trade_pair = (pair or self.active_pair or "").strip() or self.active_pair
         mark_px = self.mark_price_for(trade_pair) or self.current_price
-        tf_key = timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
-        min1_mode = min1_engine.is_min1_timeframe(tf_key) and source == "auto"
 
         if source == "manual":
             # Manual trading is the opposite of automation - only allowed while the bot
@@ -1253,7 +1221,7 @@ class AITradingAgent:
                 )
                 return None
 
-            if not self.has_same_side_auto_capacity(side, trade_pair, min1_mode=min1_mode):
+            if not self.has_same_side_auto_capacity(side, trade_pair):
                 print(
                     f"[PILLAR 3: AI AGENT] Same-side stack blocked on {trade_pair} "
                     f"({side} already open — max {MAX_SAME_SIDE_AUTO_PER_PAIR})."
@@ -1368,25 +1336,33 @@ class AITradingAgent:
             "target_mult": target_mult,
             "capital_reserved": capital_reserved,
             "season_id": self.ai_season_id,
-            "timeframe_key": tf_key,
-            "entry_pattern": entry_pattern
-            or (min1_engine.ENTRY_PATTERN_NAME if min1_mode else ENTRY_PATTERN_NAME),
-            "exit_mode": exit_mode
-            or (
-                "min1_batch_2pct"
-                if min1_mode
+            "timeframe_key": timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m"),
+            "exit_mode": (
+                "scalp_partial_be_trail"
+                if source == "auto" and scalp.is_scalp_timeframe(
+                    timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
+                )
                 else ("fire_engine_sl_tp" if source == "auto" else "manual")
             ),
+            "entry_pattern": (
+                scalp.ENTRY_PATTERN_NAME
+                if source == "auto" and scalp.is_scalp_timeframe(
+                    timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
+                )
+                else ENTRY_PATTERN_NAME
+            ),
+            "scalp_partial_done": False,
+            "scalp_be_done": False,
+            "scalp_initial_risk": (
+                abs(float(filled_price) - float(clean_sl))
+                if source == "auto"
+                and clean_sl is not None
+                and scalp.is_scalp_timeframe(
+                    timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
+                )
+                else None
+            ),
         }
-        # Start a new 1M batch capital baseline on first open of an empty min1 book.
-        if min1_mode and not any(min1_engine.is_min1_trade(t) for t in self.trades):
-            base = self.get_trading_capital_base()
-            self.min1_batch_capital = float(base if base is not None else self.current_capital)
-            print(
-                f"[1MIN] Batch baseline ${self.min1_batch_capital:,.2f} — "
-                f"target +{min1_engine.BATCH_PROFIT_PCT}% net after fees "
-                f"(${min1_engine.batch_target_usd(self.min1_batch_capital):,.2f})"
-            )
         self.trades.append(trade)
         self.set_pair_mark(trade_pair, filled_price)
         if bybit_api.mode != "LIVE_TRADING":
@@ -1500,17 +1476,6 @@ class AITradingAgent:
                     else None
                 ),
                 "strong_upside": bool(trade.get("strong_upside")),
-                "exit_mode": trade.get("exit_mode"),
-                "entry_pattern": trade.get("entry_pattern"),
-                "exit_label": (
-                    f"batch +{min1_engine.BATCH_PROFIT_PCT}% net"
-                    if min1_engine.is_min1_trade(trade)
-                    else (
-                        f"SL {trade.get('sl_price')} · TP {trade.get('tp_price')}"
-                        if trade.get("sl_price") is not None or trade.get("tp_price") is not None
-                        else "manual"
-                    )
-                ),
             })
             snapshot.append(out)
 
@@ -1552,16 +1517,12 @@ class AITradingAgent:
             self.peak_net_pct = 0.0
             return
 
-        # Exits: 1M batch +2% net (after fees), else Fire Engine SL/TP on non-1M autos.
+        # Auto exits: 1m/5m scalp (partial→BE→trail) or Fire Engine SL/TP.
         if AUTO_TRADE_AUTO_EXIT_ENABLED:
-            self._try_close_min1_batch()
+            news_blocked, _news_reason = scalp.check_news_block()
             still_open = []
             for trade in self.trades:
                 if trade.get("source") == "manual":
-                    still_open.append(trade)
-                    continue
-                if min1_engine.is_min1_trade(trade):
-                    # 1M trades only exit via batch target (no individual SL/TP).
                     still_open.append(trade)
                     continue
                 trade_pair = trade.get("pair") or ""
@@ -1569,6 +1530,27 @@ class AITradingAgent:
                 entry = float(trade.get("entry") or 0)
                 if mark is None or entry <= 0:
                     still_open.append(trade)
+                    continue
+                if scalp.is_scalp_trade(trade):
+                    # News kill-switch: pull open scalp SL to breakeven while paused
+                    if news_blocked and not trade.get("scalp_be_done"):
+                        risk = float(trade.get("scalp_initial_risk") or 0)
+                        if risk <= 0 and trade.get("sl_price") is not None:
+                            risk = abs(entry - float(trade["sl_price"]))
+                            trade["scalp_initial_risk"] = risk
+                        if risk > 0:
+                            buf = risk * scalp.BE_BUFFER_R
+                            be_sl = entry + buf if trade.get("side") == "LONG" else entry - buf
+                            trade["sl_price"] = round(be_sl, price_decimals_for_mark(be_sl))
+                            trade["scalp_be_done"] = True
+                            system_log.push(
+                                "ai",
+                                f"#{trade['id']} news kill-switch → BE SL {trade['sl_price']}",
+                                {"pair": trade_pair},
+                            )
+                    kept = self._apply_scalp_exit_actions(trade, float(mark))
+                    if kept is not None:
+                        still_open.append(kept)
                     continue
                 reason = self._evaluate_fire_engine_exit(trade, float(mark))
                 if reason:
@@ -1580,49 +1562,141 @@ class AITradingAgent:
 
         self._sync_agent_trailing_lock_state()
 
-    def _try_close_min1_batch(self) -> bool:
-        """Close all 1M fade trades when batch is full (10) and net after fees ≥ +2% of baseline."""
-        min1_trades = [t for t in self.trades if min1_engine.is_min1_trade(t)]
-        if len(min1_trades) < min1_engine.MAX_OPEN:
-            return False
-        base = self.min1_batch_capital
-        if base is None or base <= 0:
-            base = float(self.get_trading_capital_base() or self.current_capital or 0)
-        if base <= 0:
-            return False
-        target = min1_engine.batch_target_usd(base)
-        net = sum(float(self._trade_metrics(t, for_close=True)["net_usd"]) for t in min1_trades)
-        if net < target:
-            return False
+    def _apply_scalp_exit_actions(self, trade: dict, mark: float) -> dict | None:
+        """Run scalp dynamic exit. Returns updated trade to keep, or None if fully closed."""
+        action = scalp.evaluate_scalp_exit(trade, mark)
+        if not action:
+            return trade
+        kind = action.get("action")
+        if kind == "full_close":
+            m = self._trade_metrics(trade)
+            if self._close_single_trade(trade, m, action.get("reason") or "Scalp exit"):
+                return None
+            return trade
+        if kind == "partial":
+            ok = self._partial_close_trade(trade, float(action.get("frac") or 0.5), action.get("reason") or "Scalp partial")
+            if not ok:
+                return trade
+            trade["scalp_partial_done"] = True
+            if action.get("initial_risk"):
+                trade["scalp_initial_risk"] = float(action["initial_risk"])
+            # Immediately move toward BE on same tick when possible
+            if action.get("then_be") and not trade.get("scalp_be_done"):
+                risk = float(trade.get("scalp_initial_risk") or 0)
+                entry = float(trade.get("entry") or 0)
+                if risk > 0 and entry > 0:
+                    buf = risk * scalp.BE_BUFFER_R
+                    be_sl = entry + buf if trade.get("side") == "LONG" else entry - buf
+                    trade["sl_price"] = round(be_sl, price_decimals_for_mark(be_sl))
+                    trade["scalp_be_done"] = True
+                    system_log.push(
+                        "ai",
+                        f"#{trade['id']} {action.get('reason')} → BE SL {trade['sl_price']}",
+                        {"trade_id": trade["id"], "pair": trade.get("pair")},
+                    )
+            return trade
+        if kind == "update_sl":
+            new_sl = action.get("sl")
+            if new_sl is not None:
+                trade["sl_price"] = round(float(new_sl), price_decimals_for_mark(float(new_sl)))
+                if action.get("mark_be"):
+                    trade["scalp_be_done"] = True
+                system_log.push(
+                    "ai",
+                    f"#{trade['id']} {action.get('reason')}",
+                    {"trade_id": trade["id"], "sl": trade["sl_price"]},
+                )
+            return trade
+        return trade
 
-        reason = (
-            f"1M batch exit: net ${net:.2f} ≥ +{min1_engine.BATCH_PROFIT_PCT}% "
-            f"of ${base:.2f} (${target:.2f}) after fees — closing {len(min1_trades)} trades"
-        )
-        still = []
-        closed = 0
-        for t in list(self.trades):
-            if not min1_engine.is_min1_trade(t):
-                still.append(t)
-                continue
-            m = self._trade_metrics(t, for_close=True)
-            if self._close_single_trade(t, m, reason):
-                closed += 1
-            else:
-                still.append(t)
-        self.trades = still
-        self.min1_batch_capital = None
+    def _partial_close_trade(self, trade: dict, frac: float, reason: str) -> bool:
+        """Book frac of position; leave remainder open. Returns True on success."""
+        frac = max(0.05, min(0.95, float(frac)))
+        pos = float(trade.get("position_size") or 0)
+        qty = trade.get("qty")
+        if pos <= 0:
+            return False
+        close_notional = round(pos * frac, 2)
+        close_qty = None
+        if qty is not None:
+            try:
+                close_qty = float(qty) * frac
+                bybit_symbol = trade.get("bybit_symbol") or get_bybit_symbol(trade.get("pair"))
+                snapped = snap_qty_to_step(close_qty, bybit_symbol) if bybit_symbol else close_qty
+                if snapped is not None:
+                    close_qty = snapped
+            except (TypeError, ValueError):
+                close_qty = None
+
+        # Build a slice trade for metrics/history
+        slice_trade = dict(trade)
+        slice_trade["position_size"] = close_notional
+        if close_qty is not None:
+            slice_trade["qty"] = close_qty
+        slice_trade["entry_fee_usd"] = round(float(trade.get("entry_fee_usd") or 0) * frac, 4)
+        metrics = self._trade_metrics(slice_trade, for_close=True)
+
+        if trade_uses_bybit_executor(trade):
+            ok, err = bybit_close_trade(trade, qty=close_qty)
+            if not ok:
+                notifications.push(
+                    f"Bybit partial close FAILED #{trade['id']}: {err or 'unknown'}",
+                    "error",
+                )
+                return False
+        else:
+            bybit_api.execute_market_close(
+                trade["pair"],
+                trade["side"],
+                f"{reason} | partial {frac:.0%} ${close_notional}",
+            )
+
+        # Credit capital for paper reserved slice
+        reserved = float(trade.get("capital_reserved") or 0)
+        if bybit_api.mode != "LIVE_TRADING" and reserved > 0:
+            release = round(reserved * frac, 2)
+            pnl = float(metrics.get("net_usd") or 0)
+            self.current_capital = round(self.current_capital + release + pnl, 2)
+            trade["capital_reserved"] = round(reserved - release, 2)
+
+        # Shrink remaining position
+        trade["position_size"] = round(pos - close_notional, 2)
+        if qty is not None and close_qty is not None:
+            try:
+                trade["qty"] = max(0.0, float(qty) - float(close_qty))
+            except (TypeError, ValueError):
+                pass
+        trade["entry_fee_usd"] = round(float(trade.get("entry_fee_usd") or 0) * (1.0 - frac), 4)
+        trade["margin"] = round(float(trade.get("position_size") or 0) / max(self.leverage, 1), 2)
+
+        # Keep live history row active; stamp partial metadata.
+        for row in self.trade_history:
+            if row.get("id") == trade["id"] and row.get("status") == "active":
+                row["position_size"] = trade["position_size"]
+                row["margin"] = trade["margin"]
+                row["partial_taken"] = True
+                row["last_partial_reason"] = reason
+                row["last_partial_net_usd"] = round(float(metrics.get("net_usd") or 0), 2)
+                break
+        try:
+            trade_db.upsert_open_trade(trade)
+        except Exception as exc:
+            print(f"[SCALP PARTIAL] db note: {exc}")
         notifications.push(
-            f"1M batch closed ({closed}/{len(min1_trades)}): net ${net:.2f} hit +{min1_engine.BATCH_PROFIT_PCT}% target.",
-            "success" if net >= 0 else "warning",
+            f"Partial exit #{trade['id']} {trade.get('pair')} {frac:.0%} — {reason} "
+            f"(slice net ${float(metrics.get('net_usd') or 0):.2f})",
+            "success",
         )
-        system_log.push_agent_chat(
-            reason,
-            status="match",
-            details={"net_usd": net, "target_usd": target, "closed": closed},
+        system_log.push(
+            "ai",
+            f"#{trade['id']} {reason}",
+            {
+                "partial_frac": frac,
+                "remain": trade["position_size"],
+                "slice_net": metrics.get("net_usd"),
+            },
         )
-        print(f"[1MIN] {reason}")
-        return closed > 0
+        return True
 
     def _evaluate_fire_engine_exit(self, trade: dict, mark: float) -> str | None:
         """Close auto trade when mark hits Fire Engine SL or TP."""
@@ -1714,11 +1788,8 @@ class AITradingAgent:
             if t.get("source") == "auto" and t.get("pair") == pair and t.get("side") == side
         )
 
-    def has_same_side_auto_capacity(self, side: str, pair: str, *, min1_mode: bool = False) -> bool:
+    def has_same_side_auto_capacity(self, side: str, pair: str) -> bool:
         """False when this pair already has enough same-side auto positions."""
-        if min1_mode:
-            # 1M strategy stacks up to MAX_OPEN across minutes on the same pair/side.
-            return self.same_side_auto_count(side, pair) < min1_engine.MAX_OPEN
         limit = max(1, int(MAX_SAME_SIDE_AUTO_PER_PAIR))
         return self.same_side_auto_count(side, pair) < limit
 
@@ -1890,6 +1961,7 @@ BYBIT_SYMBOL_MAP = {
     "PEPE": "1000PEPEUSDT",
     "WIF": "WIFUSDT",
     "BONK": "1000BONKUSDT",
+    "XAUT": "XAUTUSDT",
 }
 
 # qtyStep from Bybit instruments-info (linear). Used to snap order size.
@@ -1913,6 +1985,7 @@ BYBIT_QTY_STEP = {
     "1000PEPEUSDT": 100,
     "WIFUSDT": 1,
     "1000BONKUSDT": 100,
+    "XAUTUSDT": 0.001,
 }
 
 def get_bybit_symbol(pair_label):
@@ -2003,9 +2076,9 @@ def trade_uses_bybit_executor(trade: dict) -> bool:
     )
 
 
-def bybit_close_trade(trade: dict) -> tuple[bool, str | None]:
+def bybit_close_trade(trade: dict, qty: float | None = None) -> tuple[bool, str | None]:
     executor = get_bybit_executor_agent()
-    return executor.close_position(trade)
+    return executor.close_position(trade, qty=qty)
 
 
 def get_bybit_executor_agent():
@@ -2019,29 +2092,12 @@ def get_bybit_executor_agent():
 
 
 def agent_policy_summary() -> str:
-    """Policy text shown in System Log — entry + exit for active timeframe."""
-    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
-    if min1_engine.is_min1_timeframe(tf_key):
-        return (
-            f"{min1_engine.ENTRY_PATTERN_NAME} — 1M Doji/Engulf FADE (opposite side) | "
-            f"max {min1_engine.MAX_OPEN} open · 1 entry/min | "
-            + min1_engine.exit_policy_summary()
-        )
+    """Policy text shown in System Log."""
     return (
-        f"{ENTRY_PATTERN_NAME} — candlestick fire engine + shadow psychology | "
-        "BUY→LONG / SELL→SHORT | "
-        + min1_engine.fire_exit_policy_summary(ENTRY_PATTERN_NAME)
-    )
-
-
-def min1_batch_snapshot() -> dict:
-    """Live 1M batch exit progress for portfolio / UI."""
-    min1_trades = [t for t in agent.trades if min1_engine.is_min1_trade(t)]
-    net = sum(float(agent._trade_metrics(t, for_close=True)["net_usd"]) for t in min1_trades)
-    return min1_engine.batch_status(
-        open_count=len(min1_trades),
-        batch_capital=agent.min1_batch_capital,
-        net_usd=net,
+        f"{ENTRY_PATTERN_NAME} + FIRE_SCALP_1M5M trap brain | "
+        "1m/5m: RecentHigh20 → bait → reclaim → wick>1.5xBody → SHORT "
+        "SL=High+ATR*0.5 TP1:2 · 50%@1R→BE→trail | "
+        "15m+: Fire Engine SL/TP 1:2"
     )
 
 
@@ -2090,7 +2146,6 @@ def compute_auto_trade_plan(
     price: float | None = None,
     size_mult: float = 1.0,
     pair: str | None = None,
-    capital_frac: float | None = None,
 ) -> dict | None:
     trade_pair = (pair or getattr(agent, "active_pair", None) or "").strip()
     mark = agent.mark_price_for(trade_pair) if trade_pair else None
@@ -2103,7 +2158,7 @@ def compute_auto_trade_plan(
     if available is None or available <= 0:
         return None
     mult = max(1.0, float(size_mult))
-    cap_frac = float(capital_frac) if capital_frac is not None else auto_trade_capital_pct_for_agent(agent)
+    cap_frac = auto_trade_capital_pct_for_agent(agent)
     position_usd = round(available * cap_frac * mult, 2)
     if position_usd <= 0:
         return None
@@ -2149,14 +2204,20 @@ def compute_auto_trade_plan(
     }
 
 
-def evaluate_entry(candles, timeframe_key: str, *, pair: str = "default"):
-    """Route: 1M → min1 fade engine; else Fire Engine v3."""
-    if min1_engine.is_min1_timeframe(timeframe_key):
-        result = min1_engine.evaluate_1min(candles, timeframe_key, pair=pair)
-        if result.get("action") in ("BUY", "SELL"):
-            return enrich_signal(result)
-        return result
+def evaluate_entry(candles, timeframe_key: str, *, pair: str = "default", htf_candles=None):
+    """Fire Engine entry; 1m/5m = trap-primary scalp (won't stall on Fire-only)."""
     result = evaluate_fire_engine(candles, timeframe_key, pair=pair)
+    if scalp.is_scalp_timeframe(timeframe_key):
+        out = scalp.evaluate_scalp_entry(
+            candles,
+            timeframe_key,
+            fire_result=result,
+            htf_candles=htf_candles,
+            pair=pair,
+        )
+        if out.get("action") in ("BUY", "SELL"):
+            return enrich_signal(out)
+        return out
     if result.get("action") in ("BUY", "SELL"):
         return enrich_signal(result)
     return result
@@ -2178,42 +2239,31 @@ async def fetch_closed_candle_history(
 
 
 async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
-    """Closed-candle scan → open auto trade (1M fade or Fire Engine)."""
-    global LAST_MIN1_FIRE_WALL_TS
-
+    """Closed-candle Fire Engine scan → open auto trade with SL/TP (scalp path on 1m/5m)."""
     bybit_symbol = get_bybit_symbol(pair)
     if not bybit_symbol:
         return False
 
-    min1_mode = min1_engine.is_min1_timeframe(timeframe_key)
-    if min1_mode:
-        open_min1 = sum(1 for t in agent.trades if min1_engine.is_min1_trade(t))
-        if open_min1 >= min1_engine.MAX_OPEN:
-            return False
-        now = time.time()
-        # Global wall-clock gap: only ONE new 1M trade every PAIR_GAP_SEC across all coins.
-        if not min1_engine.wall_gap_ok(LAST_MIN1_FIRE_WALL_TS or None, now):
-            return False
-        # Per-coin wall-clock gap.
-        if not min1_engine.wall_gap_ok(LAST_MIN1_FIRE_BY_PAIR_WALL.get(pair), now):
-            system_log.push_agent_chat(
-                f"1M fade {pair}: waiting {int(min1_engine.PAIR_GAP_SEC)}s coin gap (wall clock)",
-                status="scanning",
-                details={"pair": pair, "last_fire_wall": LAST_MIN1_FIRE_BY_PAIR_WALL.get(pair)},
-            )
-            return False
-
-    hist_limit = max(min1_engine.LOOKBACK, min1_engine.FIRE_CANDLE + 5) if min1_mode else max(MIN_CANDLES, 80)
-    history = await fetch_closed_candle_history(client, bybit_symbol, timeframe_key, limit=hist_limit)
-    need = (min1_engine.FIRE_CANDLE + 1) if min1_mode else 20
-    if len(history) < need:
+    lookback = max(MIN_CANDLES, 120) if scalp.is_scalp_timeframe(timeframe_key) else max(MIN_CANDLES, 80)
+    history = await fetch_closed_candle_history(client, bybit_symbol, timeframe_key, limit=lookback)
+    if len(history) < 20:
         return False
+
+    htf_history = None
+    if scalp.is_scalp_timeframe(timeframe_key):
+        try:
+            htf_history = await fetch_closed_candle_history(
+                client, bybit_symbol, scalp.HTF_KEY, limit=80
+            )
+        except Exception as exc:
+            print(f"[SCALP] HTF fetch failed {pair}: {exc}")
 
     close_time = int(history[-1]["close_time"])
     if close_time <= LAST_CANDLE_TIMESTAMPS.get(pair, 0):
         return False
+    LAST_CANDLE_TIMESTAMPS[pair] = close_time
 
-    detect = evaluate_entry(history, timeframe_key, pair=pair)
+    detect = evaluate_entry(history, timeframe_key, pair=pair, htf_candles=htf_history)
     system_log.set_last_uvss_scan(
         pair,
         timeframe_key,
@@ -2226,39 +2276,21 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         },
     )
 
+    engine_label = "Scalp1m5m" if scalp.is_scalp_timeframe(timeframe_key) else "FireEngine"
     if detect.get("action") not in ("BUY", "SELL"):
-        # Advance candle cursor only after a clean no-setup scan (avoid blocking retries on gap).
-        LAST_CANDLE_TIMESTAMPS[pair] = close_time
         system_log.push_agent_chat(
-            (
-                f"1M fade scan {pair}: {detect.get('reason', 'no setup')}"
-                if min1_mode
-                else f"FireEngine scan {pair} @ {timeframe_key}: {detect.get('reason', 'no setup')}"
-            ),
+            f"{engine_label} scan {pair} @ {timeframe_key}: {detect.get('reason', 'no setup')}",
             status="scanning",
-            details={"pair": pair, "timeframe": timeframe_key},
+            details={"pair": pair, "timeframe": timeframe_key, "scalp": detect.get("scalp_gates")},
         )
         return False
 
-    # Re-check wall gaps immediately before open (another pair may have just fired).
-    if min1_mode:
-        now = time.time()
-        if not min1_engine.wall_gap_ok(LAST_MIN1_FIRE_WALL_TS or None, now):
-            return False
-        if not min1_engine.wall_gap_ok(LAST_MIN1_FIRE_BY_PAIR_WALL.get(pair), now):
-            return False
-
     mark_px = agent.mark_price_for(pair) or float(detect.get("entry") or history[-1]["close"])
     side = "LONG" if detect["action"] == "BUY" else "SHORT"
-    plan = compute_auto_trade_plan(
-        agent,
-        price=mark_px,
-        pair=pair,
-        capital_frac=min1_engine.SIZE_FRAC if min1_mode else None,
-    )
+    plan = compute_auto_trade_plan(agent, price=mark_px, pair=pair)
     if plan is None:
         system_log.push_agent_chat(
-            f"{'1M fade' if min1_mode else 'FireEngine'} signal on {pair} but size plan failed",
+            f"{engine_label} signal on {pair} but size plan failed",
             status="no_match",
             details={"pair": pair, "detect": detect},
         )
@@ -2266,7 +2298,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
     trade = agent.open_trade(
         side=side,
-        reason=detect.get("reason") or f"{'1M fade' if min1_mode else 'FireEngine'} {detect.get('pattern')}",
+        reason=detect.get("reason") or f"{engine_label} {detect.get('pattern')}",
         source="auto",
         position_size_usd=plan["position_usd"],
         qty=plan["qty"],
@@ -2275,34 +2307,19 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         pattern=detect.get("pattern"),
         signal_candle_time=close_time,
         taapi_action=detect["action"],
-        sl_price=None if min1_mode else detect.get("sl"),
-        tp_price=None if min1_mode else detect.get("tp"),
-        target_mult=None if min1_mode else detect.get("risk_reward"),
+        sl_price=detect.get("sl"),
+        tp_price=detect.get("tp"),
+        target_mult=detect.get("risk_reward"),
         pair=pair,
         timeframe_key=timeframe_key,
-        entry_pattern=detect.get("entry_pattern") or (min1_engine.ENTRY_PATTERN_NAME if min1_mode else ENTRY_PATTERN_NAME),
-        exit_mode=detect.get("exit_mode") or ("min1_batch_2pct" if min1_mode else "fire_engine_sl_tp"),
     )
     if not trade:
         return False
 
-    LAST_CANDLE_TIMESTAMPS[pair] = close_time
-    if min1_mode:
-        now = time.time()
-        LAST_MIN1_FIRE_WALL_TS = now
-        LAST_MIN1_FIRE_BY_PAIR_WALL[pair] = now
-
     system_log.push_agent_chat(
         brain_chat_summary(detect) + f" → FIRED {side} on {pair}",
         status="match",
-        details={
-            "pair": pair,
-            "trade_id": trade.get("id"),
-            "fire_candle": detect.get("fire_candle"),
-            "pattern_candle_time": detect.get("pattern_candle_time"),
-            "sl": detect.get("sl"),
-            "tp": detect.get("tp"),
-        },
+        details={"pair": pair, "trade_id": trade.get("id"), "sl": detect.get("sl"), "tp": detect.get("tp")},
     )
     system_log.set_last_trade_fire(
         {
@@ -2314,22 +2331,19 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             "entry": mark_px,
             "sl": detect.get("sl"),
             "tp": detect.get("tp"),
-            "engine": detect.get("engine"),
-            "fire_candle": detect.get("fire_candle"),
+            "scalp": scalp.is_scalp_timeframe(timeframe_key),
         }
     )
-    tag = "1MIN FADE" if min1_mode else "FIRE ENGINE"
     print(
-        f"[{tag}] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} "
-        f"fire_bar={detect.get('fire_candle')} gap={int(min1_engine.PAIR_GAP_SEC)}s "
+        f"[{engine_label.upper()}] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} "
         f"SL={detect.get('sl')} TP={detect.get('tp')} conf={detect.get('confidence')}"
     )
     return True
 
 
 async def auto_buy_loop():
-    """Multi-pair scanner: 1M fade engine or Fire Engine depending on timeframe."""
-    print("[AUTO BUY LOOP] multi-pair scanner online (1M fade | Fire Engine).")
+    """Multi-pair Fire Engine scanner on each new closed candle."""
+    print(f"[AUTO BUY LOOP] {ENTRY_PATTERN_NAME} multi-pair fire engine online.")
     async with httpx.AsyncClient(timeout=8.0) as client:
         while True:
             try:
@@ -2338,12 +2352,9 @@ async def auto_buy_loop():
                 if agent.is_active and not agent.emergency_triggered:
                     for pair in agent.get_scan_pairs():
                         try:
-                            fired = await scan_and_maybe_fire_pair(client, pair, timeframe_key)
-                            # 1M: one trade then stop this loop — next fire only after wall-clock gap.
-                            if fired and min1_engine.is_min1_timeframe(timeframe_key):
-                                break
+                            await scan_and_maybe_fire_pair(client, pair, timeframe_key)
                         except Exception as exc:
-                            print(f"[SCAN] error {pair}: {exc}")
+                            print(f"[FIRE ENGINE] scan error {pair}: {exc}")
                 await asyncio.sleep(poll)
             except Exception as exc:
                 print(f"[AUTO BUY LOOP] error: {exc}")
@@ -2510,27 +2521,20 @@ async def start_bot():
     agent.daily_target_reached = False  # fresh session -> clear any prior daily-target halt
     agent.begin_ai_season()  # season P&L + kill-switch baseline = portfolio value right now
     agent.is_active = True
-    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
-    profile = entry_pattern_profile(tf_key)
-    engine_label = "1M fade" if min1_engine.is_min1_timeframe(tf_key) else "Fire Engine v3"
-    print(f"[PILLAR 2: BACKEND] Received 'START' from Frontend — {engine_label} armed.")
+    print("[PILLAR 2: BACKEND] Received 'START' from Frontend — Fire Engine v3 armed.")
     system_log.push(
         "ai",
         f"AI automation STARTED on {agent.active_pair} ({open_count} open position(s) preserved).",
         {"open_positions": open_count, "timeframe_seconds": agent.timeframe_seconds},
     )
+    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     system_log.push_agent_chat(
-        (
-            f"1M fade armed on {agent.active_pair} — Doji/Engulf opposite, max {min1_engine.MAX_OPEN}, "
-            f"batch +{min1_engine.BATCH_PROFIT_PCT}% net exit."
-            if min1_engine.is_min1_timeframe(tf_key)
-            else f"Fire Engine armed on {agent.active_pair} ({tf_key}) — scan → fire → SL/TP."
-        ),
+        f"Fire Engine armed on {agent.active_pair} ({tf_key}) — scan → fire → SL/TP.",
         status="active",
         details={
             "pair": agent.active_pair,
             "timeframe": tf_key,
-            "entry_pattern": profile,
+            "entry_pattern": entry_pattern_profile(),
         },
     )
     if open_count:
@@ -2542,9 +2546,12 @@ async def start_bot():
         notifications.push(f"AI Agent STARTED - now monitoring {agent.active_pair} live.", "success")
     return {
         "status": "success",
-        "entry_pattern": profile.get("name") or ENTRY_PATTERN_NAME,
-        "entry_pattern_profile": profile,
-        "message": strategy_system_blurb(tf_key),
+        "entry_pattern": ENTRY_PATTERN_NAME,
+        "entry_pattern_profile": entry_pattern_profile(),
+        "message": (
+            f"Bot active — {ENTRY_PATTERN_NAME}: candlestick patterns + shadow psychology. "
+            "Fires LONG/SHORT with ATR-padded SL and 1:2 TP; auto-exits on SL/TP."
+        ),
         "open_positions": open_count,
         "trade_history_count": len(agent.trade_history),
     }
@@ -2742,34 +2749,16 @@ async def set_timeframe(payload: SetTimeframePayload):
     agent.set_timeframe(payload.seconds)
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     profile = get_timeframe_profile(tf_key)
-    min1_mode = min1_engine.is_min1_timeframe(tf_key)
     return {
         "status": "success",
         "message": (
             f"Backend synced to {payload.seconds}s ({tf_key}) — "
-            + (
-                f"1M fade engine · max {min1_engine.MAX_OPEN} · batch +{min1_engine.BATCH_PROFIT_PCT}% net exit"
-                if min1_mode
-                else (
-                    f"Fire Engine · trade size {profile['capital_pct']:.0f}% capital, "
-                    f"win/lose {profile['win_rate']}/{profile['lose_rate']} · SL/TP 1:2"
-                )
-            )
+            f"trade size {profile['capital_pct']:.0f}% capital, "
+            f"win/lose {profile['win_rate']}/{profile['lose_rate']}."
         ),
         "seconds": agent.timeframe_seconds,
         "timeframe": tf_key,
         "profile": profile,
-        "engine": "1min" if min1_mode else "fire_trade_engine",
-        "entry_pattern": (
-            min1_engine.ENTRY_PATTERN_NAME if min1_mode else ENTRY_PATTERN_NAME
-        ),
-        "exit_policy": (
-            min1_engine.exit_policy_summary()
-            if min1_mode
-            else min1_engine.fire_exit_policy_summary(ENTRY_PATTERN_NAME)
-        ),
-        "profit_floor_mode": "min1_batch_net_2pct" if min1_mode else "fire_engine_sl_tp",
-        "max_concurrent_trades": agent.max_concurrent_trades,
     }
 
 
@@ -2859,24 +2848,20 @@ async def get_agent_config():
     risk_pct = agent.risk_level_pct or (
         round(agent.max_concurrent_trades / 1.5, 1) if agent.max_concurrent_trades else 3.0
     )
-    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
-    profile = entry_pattern_profile(tf_key)
     return {
         "stop_loss_pct": risk_pct,
         "risk_pct": risk_pct,
         "daily_profit_pct": agent.daily_profit_target_pct,
         "max_concurrent_trades": agent.max_concurrent_trades,
-        "entry_pattern": profile.get("name") or ENTRY_PATTERN_NAME,
-        "entry_pattern_profile": profile,
-        "timeframe": tf_key,
+        "entry_pattern": ENTRY_PATTERN_NAME,
+        "entry_pattern_profile": entry_pattern_profile(),
     }
 
 
 @app.get("/entry-pattern")
 async def get_entry_pattern():
-    """Active entry profile for current timeframe (1M fade or Fire Engine)."""
-    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
-    return {"status": "success", "timeframe": tf_key, **entry_pattern_profile(tf_key)}
+    """Active entry profile (Fire Engine v3)."""
+    return {"status": "success", **entry_pattern_profile()}
 
 
 # ==========================================
@@ -3233,14 +3218,6 @@ async def portfolio_feed(websocket: WebSocket):
                 last_scan=last_scan,
             )
 
-            min1_mode = min1_engine.is_min1_timeframe(tf_key)
-            exit_policy = (
-                min1_engine.exit_policy_summary()
-                if min1_mode
-                else min1_engine.fire_exit_policy_summary(ENTRY_PATTERN_NAME)
-            )
-            batch = min1_batch_snapshot() if min1_mode else None
-
             payload = {
                 "capital": round(agent.current_capital, 2),
                 "available_capital": round(agent.get_available_capital(), 2),
@@ -3263,21 +3240,12 @@ async def portfolio_feed(websocket: WebSocket):
                     SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
                 ),
                 "session_schedule": schedule_store.status_dict(),
+                "scalp_1m5m": scalp.status_dict(),
                 "emergency": False,
                 "risk_level_pct": agent.risk_level_pct,
                 "max_concurrent_trades": agent.max_concurrent_trades,
-                "profit_floor_pct": (
-                    float(min1_engine.BATCH_PROFIT_PCT) if min1_mode else agent.get_profit_floor_pct()
-                ),
-                "profit_floor_mode": (
-                    "min1_batch_net_2pct" if min1_mode else "fire_engine_sl_tp"
-                ),
-                "exit_policy": exit_policy,
-                "entry_pattern": (
-                    min1_engine.ENTRY_PATTERN_NAME if min1_mode else ENTRY_PATTERN_NAME
-                ),
-                "engine": "1min" if min1_mode else "fire_trade_engine",
-                "min1_batch": batch,
+                "profit_floor_pct": agent.get_profit_floor_pct(),
+                "profit_floor_mode": "fixed_tp_gross",
                 "trading_execution": (
                     "paper_simulation" if bybit_api.mode == "PAPER_TRADING" else "bybit_testnet"
                 ),

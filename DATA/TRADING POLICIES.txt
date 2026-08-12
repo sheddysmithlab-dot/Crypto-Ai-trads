@@ -1,36 +1,12 @@
 # Candle Brain — Active Entry / Exit Policies
 
-## Timeframe routing
-| TF | Engine | File |
-|----|--------|------|
-| **1M** | Fade opposite (Doji / Engulfing) | `backend/1min.py` |
-| **5M+** | Fire Engine v3.1 | `backend/fire_trade_engine.py` |
+## 15m / 1H / 1D — Fire Engine v3.1
+Entry: patterns + shadow + structure + tech ≥ ~0.72 · Exit: SL/TP 1:2
 
----
+## 1M / 5M — Scalp 4-point doctrine (`DATA/SCALP_4_POINTS.md`)
+1. Liquidity sweep (High>R & Close<R → SHORT; Low<S & Close>S → LONG)
+2. Weighted confluence scorecard ≥ 0.72
+3. ATR×1.5 SL · 50% @ 1R → BE → trail ~2R
+4. No-trade: ADX<20 · news ±15m · panic · HTF mid-range reject
 
-## 1M engine — ENTRY
-1. Closed 1m candle: detect **Doji** or **Bullish/Bearish Engulfing**
-2. Trade the **OPPOSITE** side (fade)
-3. Max **1 new trade per minute** (global)
-4. Hold up to **10** open trades
-5. No pattern that minute → skip
-
-## 1M engine — EXIT (batch only)
-- **No** per-trade SL/TP
-- **No** trailing profit-book / structure SL / TF hard-stop
-- When **10** trades are open AND combined **net P&L after broker fees ≥ +2% of batch capital** → **close all 10**
-- Reset batch baseline → open next 10 → repeat
-- Manual close + emergency sell-all still available
-
-Env: `MIN1_MAX_OPEN`, `MIN1_BATCH_PROFIT_PCT`, `MIN1_SIZE_FRAC`
-
----
-
-## Fire Engine (5M+) — ENTRY
-Patterns + shadow psych + market structure + EMA/MACD/ADX/RSI confluence
-
-## Fire Engine (5M+) — EXIT
-- SL = pattern extreme ± ATR pad
-- TP = 1:2 R:R
-- Auto-exit when mark hits SL or TP
-- Manual close + emergency sell-all still available
+Manual close + emergency sell-all still available.

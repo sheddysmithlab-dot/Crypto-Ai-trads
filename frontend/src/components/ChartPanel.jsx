@@ -153,15 +153,15 @@ export default function ChartPanel({
       <div ref={chartContainerRef} className="w-full h-80 lg:h-[28rem] relative">
         {botIsActive ? (
           <div className="absolute top-2 right-2 z-20 pointer-events-none flex flex-col items-end gap-1">
-            {String(timeframe).toUpperCase() === '1M' ? (
+            {String(timeframe).toUpperCase() === '1M' || String(timeframe).toUpperCase() === '5M' ? (
               <>
                 <div className="px-2 py-1 rounded-md bg-amber-950/80 border border-amber-500/50 text-[9px] font-black uppercase tracking-widest text-amber-200 shadow-lg">
-                  1M Fade Engine
+                  Scalp 1M/5M
                 </div>
                 <div className="text-[8px] text-amber-200/85 font-mono text-right leading-tight">
-                  Doji/Engulf → opposite
+                  HTF + sweep traps
                   <br />
-                  fire bar4 · 60s gap · batch +2%
+                  50%@1R → BE → trail
                 </div>
               </>
             ) : (

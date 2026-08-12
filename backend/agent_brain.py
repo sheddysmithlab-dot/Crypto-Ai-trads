@@ -1,22 +1,21 @@
-"""Agent brain — routes messaging for Fire Engine + 1M fade engine."""
+"""Agent brain — Fire Engine + liquidity-trap curriculum (1m/5m)."""
 from __future__ import annotations
 
 from typing import Any
 
 try:
-    from fire_engine_bridge import ENTRY_PATTERN_NAME as FIRE_ENTRY_NAME, entry_pattern_profile as fire_profile
+    from fire_engine_bridge import ENTRY_PATTERN_NAME, entry_pattern_profile
 except Exception:
-    FIRE_ENTRY_NAME = "FIRE_ENGINE_V3"
+    ENTRY_PATTERN_NAME = "FIRE_ENGINE_V3"
 
-    def fire_profile() -> dict[str, Any]:
-        return {"name": FIRE_ENTRY_NAME, "engine": "fire_trade_engine"}
+    def entry_pattern_profile() -> dict[str, Any]:
+        return {"name": ENTRY_PATTERN_NAME, "engine": "fire_trade_engine"}
 
 try:
-    import min1_engine
+    import scalp_1m5m as scalp
 except Exception:
-    min1_engine = None  # type: ignore
+    scalp = None  # type: ignore
 
-ENTRY_PATTERN_NAME = FIRE_ENTRY_NAME
 
 PIPELINE_STEPS = (
     "1_market_structure",
@@ -26,31 +25,53 @@ PIPELINE_STEPS = (
     "5_atr_sl_tp_fire",
 )
 
-PIPELINE_STEPS_1MIN = (
-    "1_detect_doji_or_engulfing",
-    "2_fade_opposite_side",
-    "3_stack_up_to_10",
-    "4_batch_exit_plus_2pct_net",
+# Trained trap pipeline (matches scalp_1m5m liquidity_trap_v1)
+SCALP_PIPELINE_STEPS = (
+    "1_recent_high_20",
+    "2_breakout_bait",
+    "3_sweep_reclaim",
+    "4_strong_rejection_wick_1_5x",
+    "5_short_sl_atr_tp_1_2",
+    "6_no_trade_filters",
 )
 
+LIQUIDITY_TRAP_CURRICULUM = """
+LIQUIDITY TRAP BRAIN (1m/5m) — do NOT buy the breakout; sell the trap.
 
-def entry_pattern_profile(timeframe_key: str | None = None) -> dict[str, Any]:
-    if min1_engine is not None and min1_engine.is_min1_timeframe(timeframe_key or ""):
-        return min1_engine.entry_pattern_profile()
-    return fire_profile()
+STEP 1: Recent_High = Highest(High, 20 prior candles)
+  → 90% retail plan breakout buys / stops above this line.
+
+STEP 2 BAIT: Breakout_Happen = Current_High > Recent_High
+
+STEP 3 TRAP: Reclaim_Happen = Current_Close < Recent_High
+  → price could not hold above the line.
+
+STEP 4 REJECTION: UpperShadow > Body * 1.5
+  → strong wick psychology (10% club confirmation).
+
+STEP 5 FIRE SHORT when all true:
+  SL = Current_High + ATR*0.5
+  TP = 1:2 R:R (then live manager: 50%@1R → BE → trail)
+
+LONG mirror: Recent_Low, Low < Low, Close > Low, lower wick > 1.5x body,
+  SL = Low - ATR*0.5.
+"""
 
 
 def enrich_signal(result: dict[str, Any], *, max_ml_chars: int = 900) -> dict[str, Any]:
     out = dict(result)
-    engine = result.get("engine") or ""
-    steps = list(PIPELINE_STEPS_1MIN) if engine == "1min" else list(PIPELINE_STEPS)
+    scalp_mode = bool(result.get("scalp") or (result.get("entry_pattern") == getattr(scalp, "ENTRY_PATTERN_NAME", "")))
     out["brain"] = {
-        "pipeline": steps,
+        "pipeline": list(SCALP_PIPELINE_STEPS if scalp_mode else PIPELINE_STEPS),
         "entry_pattern": result.get("entry_pattern") or ENTRY_PATTERN_NAME,
         "pattern_label": result.get("pattern"),
         "confidence": result.get("confidence") or result.get("strength"),
         "risk_reward": result.get("risk_reward"),
         "reasoning": result.get("reason"),
+        "scalp": scalp_mode,
+        "liquidity_sweep": result.get("liquidity_sweep"),
+        "scorecard": result.get("scorecard"),
+        "curriculum": "liquidity_trap_v1" if scalp_mode else None,
     }
     return out
 
@@ -58,35 +79,34 @@ def enrich_signal(result: dict[str, Any], *, max_ml_chars: int = 900) -> dict[st
 def brain_chat_summary(enriched: dict[str, Any]) -> str:
     action = enriched.get("action")
     pattern = enriched.get("pattern") or "n/a"
-    engine = enriched.get("engine") or ""
-    label = "1M-fade" if engine == "1min" else "FireEngine"
+    tag = "TrapBrain" if enriched.get("scalp") or enriched.get("entry_pattern") == getattr(
+        scalp, "ENTRY_PATTERN_NAME", None
+    ) else "FireEngine"
     if action in ("BUY", "SELL"):
+        ls = enriched.get("liquidity_sweep") or {}
+        steps = ""
+        if ls.get("sweep"):
+            steps = " [bait+reclaim+1.5xWick]"
         return (
-            f"{label}: {pattern} → {action} "
+            f"{tag}: {pattern}{steps} → {action} "
             f"(conf={enriched.get('confidence') or enriched.get('strength')})"
         )
-    return f"{label}: no setup — {enriched.get('reason', 'skip')}"
+    return f"{tag}: wait — {enriched.get('reason', 'no trap')}"
 
 
-def strategy_system_blurb(timeframe_key: str | None = None) -> str:
-    if min1_engine is not None and min1_engine.is_min1_timeframe(timeframe_key or "1m"):
-        return (
-            f"AI AGENT — {min1_engine.ENTRY_PATTERN_NAME} (1-minute fade):\n"
-            "1) Detect Doji/Engulfing on bar 1 of a 4-bar window.\n"
-            "2) Trade the OPPOSITE side (fade) — FIRE only when bar 4 closes.\n"
-            f"3) Global + per-coin: ≥{int(min1_engine.PAIR_GAP_SEC)}s wall-clock between fires; "
-            f"hold up to {min1_engine.MAX_OPEN}.\n"
-            f"EXIT: No per-trade SL/TP. When batch is full ({min1_engine.MAX_OPEN}) and "
-            f"combined net after fees ≥ +{min1_engine.BATCH_PROFIT_PCT}% of batch capital → close ALL.\n"
-            "Then open the next batch. Manual/emergency close still available.\n"
-            "Other TFs use Fire Engine (SL/TP 1:2)."
-        )
+def strategy_system_blurb() -> str:
     return (
-        f"AI AGENT — {ENTRY_PATTERN_NAME} (Live Fire Engine v3.1):\n"
-        "1) Market structure filter (skip sideways; soft-block weak retracement entries).\n"
-        "2) DETECT 15+ candlestick patterns + shadow psychology on closed bars.\n"
-        "3) EMA/MACD/ADX/RSI tech bias → weighted confluence gate.\n"
-        "4) FIRE LONG/SHORT with pattern-extreme SL + ATR pad, TP at 1:2 R:R.\n"
-        "EXIT: Auto-exit when mark hits SL or TP (manual/emergency still available).\n"
-        "Note: Select 1M timeframe to switch to the separate 1min fade engine + batch +2% exit."
+        f"AI AGENT — {ENTRY_PATTERN_NAME} + FIRE_SCALP_1M5M trap brain:\n"
+        "15m+: Fire Engine SL/TP 1:2.\n"
+        "1m/5m TRAINED:\n"
+        "1) Recent_High = Highest(High,20) — retail breakout magnet.\n"
+        "2) Bait: High > Recent_High.\n"
+        "3) Trap: Close < Recent_High (reclaim).\n"
+        "4) Rejection: upper wick > 1.5x body.\n"
+        "5) SHORT · SL=High+ATR*0.5 · TP 1:2 · then 50%@1R→BE→trail.\n"
+        "Also: ADX/news/panic/HTF no-trade filters. Manual/emergency OK."
     )
+
+
+def trap_curriculum_text() -> str:
+    return LIQUIDITY_TRAP_CURRICULUM.strip()

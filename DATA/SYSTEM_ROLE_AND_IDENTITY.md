@@ -1,14 +1,11 @@
-# System Role & Identity — active profile
+# System Role & Identity — active profiles
 
-Live entry is selected by **chart timeframe**:
+## `FIRE_ENGINE_V3` (15m+)
+Patterns + shadow + structure + tech → SL/TP 1:2
 
-## 1M — `MIN1_FADE_V1`
-1. Doji / Engulfing on closed 1m bar
-2. Trade opposite side (fade)
-3. Hold up to 10; one new entry per minute
-4. **Exit:** batch net after fees ≥ +2% of batch capital → close all (no per-trade SL/TP)
-
-## 5M+ — `FIRE_ENGINE_V3`
-1. Candlestick patterns + shadow psychology + structure
-2. EMA/MACD/ADX/RSI confluence
-3. **Exit:** SL = pattern extreme ± ATR pad · TP = 1:2 R:R on mark
+## `FIRE_SCALP_1M5M` (1m / 5m)
+Liquidity-trap scalp layer on Fire Engine:
+- Location on 15m > raw LTF pattern
+- Sweep (deviate & reclaim) preferred
+- News ±15m + volatility panic kill-switch
+- Dynamic exit: partial → BE → trail

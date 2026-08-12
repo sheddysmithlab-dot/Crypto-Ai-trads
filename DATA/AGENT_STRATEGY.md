@@ -1,18 +1,12 @@
 # Agent Strategy — active engines
 
-| TF | Profile | Engine |
-|----|---------|--------|
-| **1M** | `MIN1_FADE_V1` | [`backend/1min.py`](../backend/1min.py) — Doji/Engulf fade opposite |
-| **5M+** | `FIRE_ENGINE_V3` | [`backend/fire_trade_engine.py`](../backend/fire_trade_engine.py) |
+| TF | Profile | Doctrine |
+|----|---------|----------|
+| **1M / 5M** | `FIRE_SCALP_1M5M` | [SCALP_4_POINTS.md](SCALP_4_POINTS.md) |
+| **15M+** | `FIRE_ENGINE_V3` | Classic Fire SL/TP 1:2 |
 
-## 1M fade
 ```
-closed 1m → Doji|Engulfing → OPPOSITE side → stack to 10
-→ batch net after fees ≥ +2% of batch capital → close all → repeat
-```
-
-## Fire Engine
-```
-closed candle → patterns + structure + tech confluence → LONG/SHORT
-→ SL pattern±ATR · TP 1:2 → mark exit
+1m/5m: sweep reclaim → scorecard ≥0.72 → ATR×1.5 SL
+     → 50%@1R → BE → trail ~2R
+     (skip if ADX<20 / news / panic / mid-range)
 ```

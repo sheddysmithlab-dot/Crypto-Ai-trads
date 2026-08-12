@@ -18,6 +18,7 @@ export const TRADING_PAIRS = [
   { symbol: 'PEPE', icon: '🐸', color: '#3d9a3d', starred: false, price: 0.01 },
   { symbol: 'WIF', icon: 'W', color: '#d4a017', starred: false, price: 1.5 },
   { symbol: 'BONK', icon: 'B', color: '#f7931a', starred: false, price: 0.02 },
+  { symbol: 'XAUT', icon: 'Au', color: '#d4af37', starred: false, price: 4400 },
 ];
 
 // Bybit USDT perpetual (linear) — matches backend signal engine.
@@ -42,6 +43,7 @@ export const BYBIT_SYMBOL_MAP = {
   PEPE: '1000PEPEUSDT',
   WIF: 'WIFUSDT',
   BONK: '1000BONKUSDT',
+  XAUT: 'XAUTUSDT',
 };
 
 export function pairLabelForSymbol(symbol) {
