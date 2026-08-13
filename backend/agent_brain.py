@@ -151,6 +151,6 @@ def strategy_system_blurb() -> str:
         "1) Priority: smart-money traps (deviate & reclaim).\n"
         "2) Then strict 10-pattern bible recognition (shadow math, no color bias).\n"
         "3) Market structure filter (HH/HL, impulsive vs retracement, choppy = no trade).\n"
-        "4) Risk: ~1% account risk sizing guidance; SL beyond wick; min 1:2 R:R TP.\n"
-        "5) Auto exits on SL/TP; manual BUY/SELL + emergency sell-all still work."
+        "4) Exit policy (LONG & SHORT same): cut at −0.5% gross, book profit at +0.5% gross.\n"
+        "5) Manual BUY/SELL + emergency sell-all still work."
     )

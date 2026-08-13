@@ -342,7 +342,7 @@ export default function SystemLogModal({
             <div className="bg-[#161A1E] border border-cyan-800/50 rounded-xl p-2">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Entry Engine</div>
               <StatusPill ok label="BIBLE V1" />
-              <p className="text-[11px] text-gray-500 mt-2">Traps · 10 patterns · structure · 1:2 SL/TP</p>
+              <p className="text-[11px] text-gray-500 mt-2">Traps · 10 patterns · exit −0.5% / +0.5%</p>
             </div>
             <div className="bg-[#161A1E] border border-amber-700/40 rounded-xl p-2">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Bybit TESTNET</div>

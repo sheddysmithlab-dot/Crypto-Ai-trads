@@ -607,8 +607,11 @@ bybit_api = BybitAPIWrapper()
 # Manual-mode defaults (auto strategy wiped)
 MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "5"))
 MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "1"))
-AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Bible engine SL/TP
+AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Fixed ±0.5% gross exit (LONG/SHORT)
 INVERT_AUTO_TRADE_FIRE = False
+# Exit when price move vs entry hits these gross % levels (same both sides).
+FIXED_EXIT_LOSS_PCT = 0.5    # book loss / cut at ≤ -0.5%
+FIXED_EXIT_PROFIT_PCT = 0.5  # book profit at ≥ +0.5%
 BTC_REGIME_GATE = False
 _AUTO_BUY_TICKER_POLL = float(os.environ.get("MARKET_TICKER_POLL", "0.35"))
 _AUTO_BUY_BURST_POLL = float(os.environ.get("AUTO_BUY_BURST_POLL", "0.12"))
@@ -1302,18 +1305,22 @@ class AITradingAgent:
         entry_fee_usd = round(position_size * (entry_fee_pct / 100), 4)
 
         # Manual / future engine: keep SL+TP from signal when provided.
+        # Auto trades: force fixed ±0.5% gross exits (LONG/SHORT same).
         clean_sl = None
         clean_tp = None
-        if sl_price is not None:
-            try:
-                clean_sl = round(float(sl_price), price_decimals_for_mark(filled_price))
-            except (TypeError, ValueError):
-                clean_sl = None
-        if tp_price is not None:
-            try:
-                clean_tp = round(float(tp_price), price_decimals_for_mark(filled_price))
-            except (TypeError, ValueError):
-                clean_tp = None
+        if source == "auto":
+            clean_sl, clean_tp = self._fixed_exit_prices(filled_price, side)
+        else:
+            if sl_price is not None:
+                try:
+                    clean_sl = round(float(sl_price), price_decimals_for_mark(filled_price))
+                except (TypeError, ValueError):
+                    clean_sl = None
+            if tp_price is not None:
+                try:
+                    clean_tp = round(float(tp_price), price_decimals_for_mark(filled_price))
+                except (TypeError, ValueError):
+                    clean_tp = None
 
         self.trade_seq += 1
         trade = {
@@ -1346,7 +1353,7 @@ class AITradingAgent:
             "capital_reserved": capital_reserved,
             "season_id": self.ai_season_id,
             "timeframe_key": timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m"),
-            "exit_mode": "bible_sl_tp" if source == "auto" else "manual",
+            "exit_mode": "fixed_pm_0_5" if source == "auto" else "manual",
             "entry_pattern": ENTRY_PATTERN_NAME,
         }
         self.trades.append(trade)
@@ -1503,7 +1510,7 @@ class AITradingAgent:
             self.peak_net_pct = 0.0
             return
 
-        # Auto exits: Bible engine hard SL / TP on auto trades (manual untouched).
+        # Auto exits: fixed ±0.5% gross from entry (LONG/SHORT same; manual untouched).
         if AUTO_TRADE_AUTO_EXIT_ENABLED:
             still_open = []
             for trade in self.trades:
@@ -1516,7 +1523,7 @@ class AITradingAgent:
                 if mark is None or entry <= 0:
                     still_open.append(trade)
                     continue
-                reason = self._evaluate_bible_exit(trade, float(mark))
+                reason = self._evaluate_fixed_pct_exit(trade, float(mark))
                 if reason:
                     m = self._trade_metrics(trade)
                     if self._close_single_trade(trade, m, reason):
@@ -1526,30 +1533,48 @@ class AITradingAgent:
 
         self._sync_agent_trailing_lock_state()
 
-    def _evaluate_bible_exit(self, trade: dict, mark: float) -> str | None:
-        """Close auto trade when mark hits Bible SL or TP."""
-        side = trade.get("side")
-        sl = trade.get("sl_price")
-        tp = trade.get("tp_price")
-        try:
-            sl_f = float(sl) if sl is not None else None
-        except (TypeError, ValueError):
-            sl_f = None
-        try:
-            tp_f = float(tp) if tp is not None else None
-        except (TypeError, ValueError):
-            tp_f = None
-
+    def _fixed_exit_prices(self, entry: float, side: str) -> tuple[float | None, float | None]:
+        """SL/TP prices for ±FIXED_EXIT_*_PCT (same magnitude both sides)."""
+        if entry <= 0:
+            return None, None
+        loss = FIXED_EXIT_LOSS_PCT / 100.0
+        profit = FIXED_EXIT_PROFIT_PCT / 100.0
         if side == "LONG":
-            if sl_f is not None and mark <= sl_f:
-                return f"Bible SL: LONG mark {mark:.6f} ≤ SL {sl_f:.6f}"
-            if tp_f is not None and mark >= tp_f:
-                return f"Bible TP: LONG mark {mark:.6f} ≥ TP {tp_f:.6f}"
+            sl = entry * (1.0 - loss)
+            tp = entry * (1.0 + profit)
         elif side == "SHORT":
-            if sl_f is not None and mark >= sl_f:
-                return f"Bible SL: SHORT mark {mark:.6f} ≥ SL {sl_f:.6f}"
-            if tp_f is not None and mark <= tp_f:
-                return f"Bible TP: SHORT mark {mark:.6f} ≤ TP {tp_f:.6f}"
+            sl = entry * (1.0 + loss)
+            tp = entry * (1.0 - profit)
+        else:
+            return None, None
+        return (
+            round(sl, price_decimals_for_mark(entry)),
+            round(tp, price_decimals_for_mark(entry)),
+        )
+
+    def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
+        """Exit auto trade at -0.5% loss or +0.5% profit (gross vs entry). Same for LONG/SHORT."""
+        entry = float(trade.get("entry") or 0)
+        if entry <= 0:
+            return None
+        side = trade.get("side")
+        if side == "LONG":
+            gross_pct = ((mark - entry) / entry) * 100.0
+        elif side == "SHORT":
+            gross_pct = ((entry - mark) / entry) * 100.0
+        else:
+            return None
+
+        if gross_pct <= -FIXED_EXIT_LOSS_PCT:
+            return (
+                f"Loss exit −{FIXED_EXIT_LOSS_PCT:g}%: {side} gross {gross_pct:.3f}% "
+                f"(mark {mark:.6f} vs entry {entry:.6f})"
+            )
+        if gross_pct >= FIXED_EXIT_PROFIT_PCT:
+            return (
+                f"Profit book +{FIXED_EXIT_PROFIT_PCT:g}%: {side} gross {gross_pct:.3f}% "
+                f"(mark {mark:.6f} vs entry {entry:.6f})"
+            )
         return None
 
     def _close_single_trade(self, trade, metrics, reason) -> bool:
@@ -1923,7 +1948,8 @@ def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
         f"{ENTRY_PATTERN_NAME} — traps + 10 patterns + structure | "
-        "auto SL/TP at 1:2 R:R | manual BUY/SELL + emergency sell-all"
+        f"auto exit −{FIXED_EXIT_LOSS_PCT:g}% / +{FIXED_EXIT_PROFIT_PCT:g}% (LONG+SHORT) | "
+        "manual BUY/SELL + emergency sell-all"
     )
 
 
@@ -2116,6 +2142,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         )
         return False
 
+    fixed_sl, fixed_tp = agent._fixed_exit_prices(float(mark_px), side)
     trade = agent.open_trade(
         side=side,
         reason=detect.get("reason") or f"Bible {detect.get('pattern')}",
@@ -2127,9 +2154,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         pattern=detect.get("pattern"),
         signal_candle_time=close_time,
         taapi_action=detect["action"],
-        sl_price=detect.get("sl"),
-        tp_price=detect.get("tp"),
-        target_mult=detect.get("risk_reward"),
+        sl_price=fixed_sl,
+        tp_price=fixed_tp,
+        target_mult=FIXED_EXIT_PROFIT_PCT / FIXED_EXIT_LOSS_PCT,
         pair=pair,
         timeframe_key=timeframe_key,
     )
@@ -2139,7 +2166,13 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     system_log.push_agent_chat(
         brain_chat_summary(detect) + f" → FIRED {side} on {pair}",
         status="match",
-        details={"pair": pair, "trade_id": trade.get("id"), "sl": detect.get("sl"), "tp": detect.get("tp")},
+        details={
+            "pair": pair,
+            "trade_id": trade.get("id"),
+            "sl": trade.get("sl_price"),
+            "tp": trade.get("tp_price"),
+            "exit": f"±{FIXED_EXIT_PROFIT_PCT:g}%",
+        },
     )
     system_log.set_last_trade_fire(
         {
@@ -2149,13 +2182,13 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             "pattern": detect.get("pattern"),
             "pair": pair,
             "entry": mark_px,
-            "sl": detect.get("sl"),
-            "tp": detect.get("tp"),
+            "sl": trade.get("sl_price"),
+            "tp": trade.get("tp_price"),
         }
     )
     print(
         f"[BIBLE] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} "
-        f"SL={detect.get('sl')} TP={detect.get('tp')} RR={detect.get('risk_reward')}"
+        f"exit ±{FIXED_EXIT_PROFIT_PCT:g}% SL={trade.get('sl_price')} TP={trade.get('tp_price')}"
     )
     return True
 
@@ -2360,7 +2393,7 @@ async def start_bot():
         "entry_pattern_profile": entry_pattern_profile(),
         "message": (
             f"Bot active — {ENTRY_PATTERN_NAME}: traps + 10 patterns + structure. "
-            "Fires LONG/SHORT with wick/ATR SL and min 1:2 TP; auto-exits on SL/TP."
+            f"Auto exit −{FIXED_EXIT_LOSS_PCT:g}% loss / +{FIXED_EXIT_PROFIT_PCT:g}% profit (LONG & SHORT)."
         ),
         "open_positions": open_count,
         "trade_history_count": len(agent.trade_history),
