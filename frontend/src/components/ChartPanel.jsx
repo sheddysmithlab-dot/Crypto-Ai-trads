@@ -153,29 +153,14 @@ export default function ChartPanel({
       <div ref={chartContainerRef} className="w-full h-80 lg:h-[28rem] relative">
         {botIsActive ? (
           <div className="absolute top-2 right-2 z-20 pointer-events-none flex flex-col items-end gap-1">
-            {String(timeframe).toUpperCase() === '1M' || String(timeframe).toUpperCase() === '5M' ? (
-              <>
-                <div className="px-2 py-1 rounded-md bg-amber-950/80 border border-amber-500/50 text-[9px] font-black uppercase tracking-widest text-amber-200 shadow-lg">
-                  Scalp 1M/5M
-                </div>
-                <div className="text-[8px] text-amber-200/85 font-mono text-right leading-tight">
-                  HTF + sweep traps
-                  <br />
-                  50%@1R → BE → trail
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="px-2 py-1 rounded-md bg-emerald-950/80 border border-emerald-500/50 text-[9px] font-black uppercase tracking-widest text-emerald-200 shadow-lg">
-                  Fire Engine v3
-                </div>
-                <div className="text-[8px] text-emerald-300/80 font-mono text-right leading-tight">
-                  patterns + shadow psych
-                  <br />
-                  SL · 1:2 TP auto-exit
-                </div>
-              </>
-            )}
+            <div className="px-2 py-1 rounded-md bg-slate-900/80 border border-slate-500/40 text-[9px] font-black uppercase tracking-widest text-slate-200 shadow-lg">
+              Strategy wiped
+            </div>
+            <div className="text-[8px] text-slate-300/80 font-mono text-right leading-tight">
+              awaiting fresh entry
+              <br />
+              no auto SL / TP
+            </div>
           </div>
         ) : null}
         <div className="absolute left-2 bottom-1.5 flex items-center gap-1 pointer-events-none opacity-30 select-none z-10">

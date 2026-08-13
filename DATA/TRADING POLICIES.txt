@@ -1,12 +1,7 @@
-# Candle Brain — Active Entry / Exit Policies
+# Trading policies — wiped
 
-## 15m / 1H / 1D — Fire Engine v3.1
-Entry: patterns + shadow + structure + tech ≥ ~0.72 · Exit: SL/TP 1:2
+No active auto entry / exit policy.
 
-## 1M / 5M — Scalp 4-point doctrine (`DATA/SCALP_4_POINTS.md`)
-1. Liquidity sweep (High>R & Close<R → SHORT; Low<S & Close>S → LONG)
-2. Weighted confluence scorecard ≥ 0.72
-3. ATR×1.5 SL · 50% @ 1R → BE → trail ~2R
-4. No-trade: ADX<20 · news ±15m · panic · HTF mid-range reject
+Manual open/close + emergency sell-all only.
 
-Manual close + emergency sell-all still available.
+Awaiting new strategy.

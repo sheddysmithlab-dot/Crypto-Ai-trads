@@ -1,10 +1,9 @@
 const HOW_IT_WORKS = [
-  'Pick a coin pair and chart timeframe (1M, 5M, 15M, etc.).',
-  'Press START AI AUTOMATION — scanner runs on your watchlist closed candles.',
-  '1M/5M = Scalp mode: near 15m S/R + prefer liquidity sweeps; news/panic gates block bad entries.',
-  '1M/5M exits: book 50% at 1R, move SL to breakeven, trail the rest toward ~2R.',
-  '15M+ = Fire Engine v3.1 (patterns + structure + indicators → SL + 1:2 TP).',
-  'You can still manual-close or emergency sell-all anytime. PAPER / testnet as configured.',
+  'Pick a coin pair and chart timeframe.',
+  'START AI AUTOMATION arms the bot shell — entry strategy is currently wiped (awaiting fresh rules).',
+  'No auto entries, stop-loss, take-profit, or session schedule while wiped.',
+  'Manual BUY / SELL still open LONG / SHORT; emergency STOP closes everything.',
+  'PAPER simulates fills; testnet can send real orders when keys are set.',
 ];
 
 export default function BotHelpModal({ open, onClose }) {
@@ -39,7 +38,7 @@ export default function BotHelpModal({ open, onClose }) {
 
         <div className="px-5 py-4 max-h-[70vh] overflow-y-auto">
           <p className="text-sm text-gray-600 dark:text-gray-300 mb-4 leading-relaxed">
-            1M/5M scalp (HTF + sweeps + dynamic exits) or Fire Engine on higher TFs. Not financial advice.
+            Strategy wiped — shell ready for your next entry/exit doctrine. Not financial advice.
           </p>
           <ul className="space-y-2.5 text-sm text-gray-700 dark:text-gray-200 list-disc pl-5 leading-relaxed">
             {HOW_IT_WORKS.map((line) => (

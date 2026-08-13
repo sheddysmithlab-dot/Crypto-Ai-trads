@@ -51,8 +51,6 @@ from volume_spread_system import (
     reset_blue_box_state,
     build_blue_box_chart_overlay,
 )
-from fire_engine_bridge import evaluate_fire_engine
-import scalp_1m5m as scalp
 from bybit_executor import BybitAgent
 from ml_trading_memory import (
     fetch_ml,
@@ -224,7 +222,7 @@ class SettingsStore:
             print(f"[SETTINGS] Z.ai AI loaded (model={self.ai_model}, provider={self.ai_provider}).")
         else:
             print("[SETTINGS] Z.ai is the default AI provider — set ZAI_API_KEY to enable.")
-        print(f"[SETTINGS] Entry engine: {ENTRY_PATTERN_NAME} (Fire Engine v3).")
+        print(f"[SETTINGS] Entry engine: {ENTRY_PATTERN_NAME} (awaiting fresh strategy).")
 
     def save(self, payload: SettingsPayload):
         # Only overwrite secret fields if the user actually typed a new value
@@ -598,7 +596,7 @@ bybit_api = BybitAPIWrapper()
 # Manual-mode defaults (auto strategy wiped)
 MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "5"))
 MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "1"))
-AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Fire Engine SL/TP
+AUTO_TRADE_AUTO_EXIT_ENABLED = False  # Strategy wiped — no auto SL/TP/trail
 INVERT_AUTO_TRADE_FIRE = False
 BTC_REGIME_GATE = False
 _AUTO_BUY_TICKER_POLL = float(os.environ.get("MARKET_TICKER_POLL", "0.35"))
@@ -1337,31 +1335,8 @@ class AITradingAgent:
             "capital_reserved": capital_reserved,
             "season_id": self.ai_season_id,
             "timeframe_key": timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m"),
-            "exit_mode": (
-                "scalp_partial_be_trail"
-                if source == "auto" and scalp.is_scalp_timeframe(
-                    timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
-                )
-                else ("fire_engine_sl_tp" if source == "auto" else "manual")
-            ),
-            "entry_pattern": (
-                scalp.ENTRY_PATTERN_NAME
-                if source == "auto" and scalp.is_scalp_timeframe(
-                    timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
-                )
-                else ENTRY_PATTERN_NAME
-            ),
-            "scalp_partial_done": False,
-            "scalp_be_done": False,
-            "scalp_initial_risk": (
-                abs(float(filled_price) - float(clean_sl))
-                if source == "auto"
-                and clean_sl is not None
-                and scalp.is_scalp_timeframe(
-                    timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
-                )
-                else None
-            ),
+            "exit_mode": "manual",
+            "entry_pattern": ENTRY_PATTERN_NAME,
         }
         self.trades.append(trade)
         self.set_pair_mark(trade_pair, filled_price)
@@ -1517,212 +1492,8 @@ class AITradingAgent:
             self.peak_net_pct = 0.0
             return
 
-        # Auto exits: 1m/5m scalp (partial→BE→trail) or Fire Engine SL/TP.
-        if AUTO_TRADE_AUTO_EXIT_ENABLED:
-            news_blocked, _news_reason = scalp.check_news_block()
-            still_open = []
-            for trade in self.trades:
-                if trade.get("source") == "manual":
-                    still_open.append(trade)
-                    continue
-                trade_pair = trade.get("pair") or ""
-                mark = self.mark_price_for(trade_pair)
-                entry = float(trade.get("entry") or 0)
-                if mark is None or entry <= 0:
-                    still_open.append(trade)
-                    continue
-                if scalp.is_scalp_trade(trade):
-                    # News kill-switch: pull open scalp SL to breakeven while paused
-                    if news_blocked and not trade.get("scalp_be_done"):
-                        risk = float(trade.get("scalp_initial_risk") or 0)
-                        if risk <= 0 and trade.get("sl_price") is not None:
-                            risk = abs(entry - float(trade["sl_price"]))
-                            trade["scalp_initial_risk"] = risk
-                        if risk > 0:
-                            buf = risk * scalp.BE_BUFFER_R
-                            be_sl = entry + buf if trade.get("side") == "LONG" else entry - buf
-                            trade["sl_price"] = round(be_sl, price_decimals_for_mark(be_sl))
-                            trade["scalp_be_done"] = True
-                            system_log.push(
-                                "ai",
-                                f"#{trade['id']} news kill-switch → BE SL {trade['sl_price']}",
-                                {"pair": trade_pair},
-                            )
-                    kept = self._apply_scalp_exit_actions(trade, float(mark))
-                    if kept is not None:
-                        still_open.append(kept)
-                    continue
-                reason = self._evaluate_fire_engine_exit(trade, float(mark))
-                if reason:
-                    m = self._trade_metrics(trade)
-                    if self._close_single_trade(trade, m, reason):
-                        continue
-                still_open.append(trade)
-            self.trades = still_open
-
+        # Strategy wiped — no auto SL/TP/scalp/trail exits (manual + emergency only).
         self._sync_agent_trailing_lock_state()
-
-    def _apply_scalp_exit_actions(self, trade: dict, mark: float) -> dict | None:
-        """Run scalp dynamic exit. Returns updated trade to keep, or None if fully closed."""
-        action = scalp.evaluate_scalp_exit(trade, mark)
-        if not action:
-            return trade
-        kind = action.get("action")
-        if kind == "full_close":
-            m = self._trade_metrics(trade)
-            if self._close_single_trade(trade, m, action.get("reason") or "Scalp exit"):
-                return None
-            return trade
-        if kind == "partial":
-            ok = self._partial_close_trade(trade, float(action.get("frac") or 0.5), action.get("reason") or "Scalp partial")
-            if not ok:
-                return trade
-            trade["scalp_partial_done"] = True
-            if action.get("initial_risk"):
-                trade["scalp_initial_risk"] = float(action["initial_risk"])
-            # Immediately move toward BE on same tick when possible
-            if action.get("then_be") and not trade.get("scalp_be_done"):
-                risk = float(trade.get("scalp_initial_risk") or 0)
-                entry = float(trade.get("entry") or 0)
-                if risk > 0 and entry > 0:
-                    buf = risk * scalp.BE_BUFFER_R
-                    be_sl = entry + buf if trade.get("side") == "LONG" else entry - buf
-                    trade["sl_price"] = round(be_sl, price_decimals_for_mark(be_sl))
-                    trade["scalp_be_done"] = True
-                    system_log.push(
-                        "ai",
-                        f"#{trade['id']} {action.get('reason')} → BE SL {trade['sl_price']}",
-                        {"trade_id": trade["id"], "pair": trade.get("pair")},
-                    )
-            return trade
-        if kind == "update_sl":
-            new_sl = action.get("sl")
-            if new_sl is not None:
-                trade["sl_price"] = round(float(new_sl), price_decimals_for_mark(float(new_sl)))
-                if action.get("mark_be"):
-                    trade["scalp_be_done"] = True
-                system_log.push(
-                    "ai",
-                    f"#{trade['id']} {action.get('reason')}",
-                    {"trade_id": trade["id"], "sl": trade["sl_price"]},
-                )
-            return trade
-        return trade
-
-    def _partial_close_trade(self, trade: dict, frac: float, reason: str) -> bool:
-        """Book frac of position; leave remainder open. Returns True on success."""
-        frac = max(0.05, min(0.95, float(frac)))
-        pos = float(trade.get("position_size") or 0)
-        qty = trade.get("qty")
-        if pos <= 0:
-            return False
-        close_notional = round(pos * frac, 2)
-        close_qty = None
-        if qty is not None:
-            try:
-                close_qty = float(qty) * frac
-                bybit_symbol = trade.get("bybit_symbol") or get_bybit_symbol(trade.get("pair"))
-                snapped = snap_qty_to_step(close_qty, bybit_symbol) if bybit_symbol else close_qty
-                if snapped is not None:
-                    close_qty = snapped
-            except (TypeError, ValueError):
-                close_qty = None
-
-        # Build a slice trade for metrics/history
-        slice_trade = dict(trade)
-        slice_trade["position_size"] = close_notional
-        if close_qty is not None:
-            slice_trade["qty"] = close_qty
-        slice_trade["entry_fee_usd"] = round(float(trade.get("entry_fee_usd") or 0) * frac, 4)
-        metrics = self._trade_metrics(slice_trade, for_close=True)
-
-        if trade_uses_bybit_executor(trade):
-            ok, err = bybit_close_trade(trade, qty=close_qty)
-            if not ok:
-                notifications.push(
-                    f"Bybit partial close FAILED #{trade['id']}: {err or 'unknown'}",
-                    "error",
-                )
-                return False
-        else:
-            bybit_api.execute_market_close(
-                trade["pair"],
-                trade["side"],
-                f"{reason} | partial {frac:.0%} ${close_notional}",
-            )
-
-        # Credit capital for paper reserved slice
-        reserved = float(trade.get("capital_reserved") or 0)
-        if bybit_api.mode != "LIVE_TRADING" and reserved > 0:
-            release = round(reserved * frac, 2)
-            pnl = float(metrics.get("net_usd") or 0)
-            self.current_capital = round(self.current_capital + release + pnl, 2)
-            trade["capital_reserved"] = round(reserved - release, 2)
-
-        # Shrink remaining position
-        trade["position_size"] = round(pos - close_notional, 2)
-        if qty is not None and close_qty is not None:
-            try:
-                trade["qty"] = max(0.0, float(qty) - float(close_qty))
-            except (TypeError, ValueError):
-                pass
-        trade["entry_fee_usd"] = round(float(trade.get("entry_fee_usd") or 0) * (1.0 - frac), 4)
-        trade["margin"] = round(float(trade.get("position_size") or 0) / max(self.leverage, 1), 2)
-
-        # Keep live history row active; stamp partial metadata.
-        for row in self.trade_history:
-            if row.get("id") == trade["id"] and row.get("status") == "active":
-                row["position_size"] = trade["position_size"]
-                row["margin"] = trade["margin"]
-                row["partial_taken"] = True
-                row["last_partial_reason"] = reason
-                row["last_partial_net_usd"] = round(float(metrics.get("net_usd") or 0), 2)
-                break
-        try:
-            trade_db.upsert_open_trade(trade)
-        except Exception as exc:
-            print(f"[SCALP PARTIAL] db note: {exc}")
-        notifications.push(
-            f"Partial exit #{trade['id']} {trade.get('pair')} {frac:.0%} — {reason} "
-            f"(slice net ${float(metrics.get('net_usd') or 0):.2f})",
-            "success",
-        )
-        system_log.push(
-            "ai",
-            f"#{trade['id']} {reason}",
-            {
-                "partial_frac": frac,
-                "remain": trade["position_size"],
-                "slice_net": metrics.get("net_usd"),
-            },
-        )
-        return True
-
-    def _evaluate_fire_engine_exit(self, trade: dict, mark: float) -> str | None:
-        """Close auto trade when mark hits Fire Engine SL or TP."""
-        side = trade.get("side")
-        sl = trade.get("sl_price")
-        tp = trade.get("tp_price")
-        try:
-            sl_f = float(sl) if sl is not None else None
-        except (TypeError, ValueError):
-            sl_f = None
-        try:
-            tp_f = float(tp) if tp is not None else None
-        except (TypeError, ValueError):
-            tp_f = None
-
-        if side == "LONG":
-            if sl_f is not None and mark <= sl_f:
-                return f"Fire Engine SL: LONG mark {mark:.6f} ≤ SL {sl_f:.6f}"
-            if tp_f is not None and mark >= tp_f:
-                return f"Fire Engine TP: LONG mark {mark:.6f} ≥ TP {tp_f:.6f}"
-        elif side == "SHORT":
-            if sl_f is not None and mark >= sl_f:
-                return f"Fire Engine SL: SHORT mark {mark:.6f} ≥ SL {sl_f:.6f}"
-            if tp_f is not None and mark <= tp_f:
-                return f"Fire Engine TP: SHORT mark {mark:.6f} ≤ TP {tp_f:.6f}"
-        return None
 
     def _close_single_trade(self, trade, metrics, reason) -> bool:
         """Close one position. Returns True if closed locally (and on Bybit when applicable)."""
@@ -2094,10 +1865,9 @@ def get_bybit_executor_agent():
 def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
-        f"{ENTRY_PATTERN_NAME} + FIRE_SCALP_1M5M trap brain | "
-        "1m/5m: RecentHigh20 → bait → reclaim → wick>1.5xBody → SHORT "
-        "SL=High+ATR*0.5 TP1:2 · 50%@1R→BE→trail | "
-        "15m+: Fire Engine SL/TP 1:2"
+        f"{ENTRY_PATTERN_NAME} — no auto entry/exit engine | "
+        "manual BUY/SELL + emergency sell-all only | "
+        "awaiting fresh strategy"
     )
 
 
@@ -2205,22 +1975,15 @@ def compute_auto_trade_plan(
 
 
 def evaluate_entry(candles, timeframe_key: str, *, pair: str = "default", htf_candles=None):
-    """Fire Engine entry; 1m/5m = trap-primary scalp (won't stall on Fire-only)."""
-    result = evaluate_fire_engine(candles, timeframe_key, pair=pair)
-    if scalp.is_scalp_timeframe(timeframe_key):
-        out = scalp.evaluate_scalp_entry(
-            candles,
-            timeframe_key,
-            fire_result=result,
-            htf_candles=htf_candles,
-            pair=pair,
-        )
-        if out.get("action") in ("BUY", "SELL"):
-            return enrich_signal(out)
-        return out
-    if result.get("action") in ("BUY", "SELL"):
-        return enrich_signal(result)
-    return result
+    """Strategy wiped — no auto entries until a new engine is wired."""
+    return {
+        "action": "NO_TRADE",
+        "reason": "STRATEGY_WIPED — awaiting fresh entry strategy",
+        "engine": "none",
+        "entry_pattern": ENTRY_PATTERN_NAME,
+        "timeframe_key": timeframe_key,
+        "pair": pair,
+    }
 
 
 async def fetch_closed_candle_history(
@@ -2239,31 +2002,21 @@ async def fetch_closed_candle_history(
 
 
 async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
-    """Closed-candle Fire Engine scan → open auto trade with SL/TP (scalp path on 1m/5m)."""
+    """Closed-candle scan — strategy wiped, never opens auto trades."""
     bybit_symbol = get_bybit_symbol(pair)
     if not bybit_symbol:
         return False
 
-    lookback = max(MIN_CANDLES, 120) if scalp.is_scalp_timeframe(timeframe_key) else max(MIN_CANDLES, 80)
-    history = await fetch_closed_candle_history(client, bybit_symbol, timeframe_key, limit=lookback)
+    history = await fetch_closed_candle_history(client, bybit_symbol, timeframe_key, limit=max(MIN_CANDLES, 80))
     if len(history) < 20:
         return False
-
-    htf_history = None
-    if scalp.is_scalp_timeframe(timeframe_key):
-        try:
-            htf_history = await fetch_closed_candle_history(
-                client, bybit_symbol, scalp.HTF_KEY, limit=80
-            )
-        except Exception as exc:
-            print(f"[SCALP] HTF fetch failed {pair}: {exc}")
 
     close_time = int(history[-1]["close_time"])
     if close_time <= LAST_CANDLE_TIMESTAMPS.get(pair, 0):
         return False
     LAST_CANDLE_TIMESTAMPS[pair] = close_time
 
-    detect = evaluate_entry(history, timeframe_key, pair=pair, htf_candles=htf_history)
+    detect = evaluate_entry(history, timeframe_key, pair=pair)
     system_log.set_last_uvss_scan(
         pair,
         timeframe_key,
@@ -2275,70 +2028,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             "close_time": close_time,
         },
     )
-
-    engine_label = "Scalp1m5m" if scalp.is_scalp_timeframe(timeframe_key) else "FireEngine"
-    if detect.get("action") not in ("BUY", "SELL"):
-        system_log.push_agent_chat(
-            f"{engine_label} scan {pair} @ {timeframe_key}: {detect.get('reason', 'no setup')}",
-            status="scanning",
-            details={"pair": pair, "timeframe": timeframe_key, "scalp": detect.get("scalp_gates")},
-        )
-        return False
-
-    mark_px = agent.mark_price_for(pair) or float(detect.get("entry") or history[-1]["close"])
-    side = "LONG" if detect["action"] == "BUY" else "SHORT"
-    plan = compute_auto_trade_plan(agent, price=mark_px, pair=pair)
-    if plan is None:
-        system_log.push_agent_chat(
-            f"{engine_label} signal on {pair} but size plan failed",
-            status="no_match",
-            details={"pair": pair, "detect": detect},
-        )
-        return False
-
-    trade = agent.open_trade(
-        side=side,
-        reason=detect.get("reason") or f"{engine_label} {detect.get('pattern')}",
-        source="auto",
-        position_size_usd=plan["position_usd"],
-        qty=plan["qty"],
-        entry_price=mark_px,
-        bybit_symbol=bybit_symbol,
-        pattern=detect.get("pattern"),
-        signal_candle_time=close_time,
-        taapi_action=detect["action"],
-        sl_price=detect.get("sl"),
-        tp_price=detect.get("tp"),
-        target_mult=detect.get("risk_reward"),
-        pair=pair,
-        timeframe_key=timeframe_key,
-    )
-    if not trade:
-        return False
-
-    system_log.push_agent_chat(
-        brain_chat_summary(detect) + f" → FIRED {side} on {pair}",
-        status="match",
-        details={"pair": pair, "trade_id": trade.get("id"), "sl": detect.get("sl"), "tp": detect.get("tp")},
-    )
-    system_log.set_last_trade_fire(
-        {
-            "success": True,
-            "action": detect["action"],
-            "symbol": bybit_symbol,
-            "pattern": detect.get("pattern"),
-            "pair": pair,
-            "entry": mark_px,
-            "sl": detect.get("sl"),
-            "tp": detect.get("tp"),
-            "scalp": scalp.is_scalp_timeframe(timeframe_key),
-        }
-    )
-    print(
-        f"[{engine_label.upper()}] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} "
-        f"SL={detect.get('sl')} TP={detect.get('tp')} conf={detect.get('confidence')}"
-    )
-    return True
+    # No auto fire while strategy wiped
+    return False
 
 
 async def auto_buy_loop():
@@ -2489,27 +2180,17 @@ async def start_background_tasks():
     asyncio.create_task(self_ping_keepalive())
     asyncio.create_task(auto_buy_loop())
     asyncio.create_task(chart_24h_refresh_loop(BYBIT_SYMBOL_MAP))
-    asyncio.create_task(session_schedule_loop())
+    # session schedule wiped — force off
+    try:
+        schedule_store.set_enabled(False)
+    except Exception:
+        pass
 
 
 async def session_schedule_loop():
-    """Mon–Fri IST windows: auto start/stop AI automation without any browser session."""
-    print(
-        f"[SESSION SCHEDULE] Loop online (enabled={schedule_store.enabled}, "
-        f"want_active={schedule_store.status_dict().get('want_active')})."
-    )
-    while True:
-        try:
-            st = schedule_store.status_dict()
-            if schedule_store.enabled:
-                if st["want_active"] and not agent.is_active:
-                    labels = ", ".join(st["active_windows"]) or "session window"
-                    agent.schedule_auto_start(labels)
-                elif not st["want_active"] and agent.is_active:
-                    agent.schedule_soft_stop("outside Mon–Fri IST session windows")
-        except Exception as exc:
-            print(f"[SESSION SCHEDULE] loop error: {exc}")
-        await asyncio.sleep(20)
+    """Session schedule removed — no-op."""
+    return
+
 
 # ==========================================
 # 2. REST API COMMAND "WIRES"
@@ -2521,7 +2202,7 @@ async def start_bot():
     agent.daily_target_reached = False  # fresh session -> clear any prior daily-target halt
     agent.begin_ai_season()  # season P&L + kill-switch baseline = portfolio value right now
     agent.is_active = True
-    print("[PILLAR 2: BACKEND] Received 'START' from Frontend — Fire Engine v3 armed.")
+    print("[PILLAR 2: BACKEND] Received 'START' from Frontend — strategy wiped (no auto entries).")
     system_log.push(
         "ai",
         f"AI automation STARTED on {agent.active_pair} ({open_count} open position(s) preserved).",
@@ -2529,7 +2210,7 @@ async def start_bot():
     )
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     system_log.push_agent_chat(
-        f"Fire Engine armed on {agent.active_pair} ({tf_key}) — scan → fire → SL/TP.",
+        f"STRATEGY_WIPED on {agent.active_pair} ({tf_key}) — awaiting fresh entry/exit strategy.",
         status="active",
         details={
             "pair": agent.active_pair,
@@ -2879,27 +2560,33 @@ class SessionSchedulePayload(BaseModel):
 
 @app.get("/settings/session-schedule")
 async def get_session_schedule():
-    return schedule_store.status_dict()
+    return {
+        "enabled": False,
+        "removed": True,
+        "message": "Session schedule wiped",
+        "want_active": False,
+        "in_window": False,
+        "active_windows": [],
+        "windows": [],
+    }
 
 
 @app.post("/settings/session-schedule")
 async def set_session_schedule(payload: SessionSchedulePayload):
-    """Toggle Mon–Fri IST session auto on/off. Works without keeping the browser open."""
-    schedule_store.set_enabled(payload.enabled)
-    st = schedule_store.status_dict()
-    # Apply immediately so user doesn't wait for the 20s loop tick.
-    if schedule_store.enabled and st["want_active"] and not agent.is_active:
-        labels = ", ".join(st["active_windows"]) or "session window"
-        agent.schedule_auto_start(labels)
-    elif schedule_store.enabled and not st["want_active"] and agent.is_active:
-        agent.schedule_soft_stop("outside Mon–Fri IST session windows")
-    msg = (
-        "Session schedule ON — AI will auto-start in Morning / Peak Overlap / US Core (Mon–Fri IST)."
-        if schedule_store.enabled
-        else "Session schedule OFF — use START/STOP manually."
-    )
-    system_log.push("ai", msg, st)
-    return {"status": "success", "message": msg, "schedule": st}
+    """Schedule feature removed."""
+    schedule_store.set_enabled(False)
+    return {
+        "status": "success",
+        "message": "Session schedule removed — use START/STOP manually.",
+        "schedule": {
+            "enabled": False,
+            "removed": True,
+            "want_active": False,
+            "in_window": False,
+            "active_windows": [],
+            "windows": [],
+        },
+    }
 
 @app.get("/trades/statement")
 async def trades_statement(
@@ -3240,8 +2927,7 @@ async def portfolio_feed(websocket: WebSocket):
                     SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
                 ),
                 "session_schedule": schedule_store.status_dict(),
-                "scalp_1m5m": scalp.status_dict(),
-                "emergency": False,
+                                "emergency": False,
                 "risk_level_pct": agent.risk_level_pct,
                 "max_concurrent_trades": agent.max_concurrent_trades,
                 "profit_floor_pct": agent.get_profit_floor_pct(),

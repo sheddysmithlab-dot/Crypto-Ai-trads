@@ -1,11 +1,6 @@
-# System Role & Identity — active profiles
+# System Role — wiped
 
-## `FIRE_ENGINE_V3` (15m+)
-Patterns + shadow + structure + tech → SL/TP 1:2
+Live profile: **STRATEGY_WIPED**
 
-## `FIRE_SCALP_1M5M` (1m / 5m)
-Liquidity-trap scalp layer on Fire Engine:
-- Location on 15m > raw LTF pattern
-- Sweep (deviate & reclaim) preferred
-- News ±15m + volatility panic kill-switch
-- Dynamic exit: partial → BE → trail
+No Fire / scalp / trap / schedule intelligence active.
+Manual trading shell only until new strategy is installed.
