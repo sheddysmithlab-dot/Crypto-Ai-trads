@@ -829,10 +829,10 @@ def build_blue_box_chart_overlay(
 ) -> dict:
     decision = (last_scan or {}).get("decision") or {}
     if not is_active:
-        return {"engine": "fire_trade_engine", "active": False, "status": "idle"}
+        return {"engine": "none", "active": False, "status": "idle"}
     status = "signal" if decision.get("action") in ("BUY", "SELL") else "scanning"
     return {
-        "engine": "fire_trade_engine",
+        "engine": "none",
         "active": True,
         "status": status,
         "pair": pair,
@@ -840,5 +840,5 @@ def build_blue_box_chart_overlay(
         "last_pattern": decision.get("pattern"),
         "last_action": decision.get("action"),
         "strength": decision.get("strength") or decision.get("confidence"),
-        "note": "Fire Engine v3",
+        "note": "Strategy wiped — awaiting fresh engine",
     }

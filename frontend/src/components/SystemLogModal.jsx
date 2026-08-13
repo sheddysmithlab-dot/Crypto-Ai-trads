@@ -341,8 +341,8 @@ export default function SystemLogModal({
             </div>
             <div className="bg-[#161A1E] border border-cyan-800/50 rounded-xl p-2">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Entry Engine</div>
-              <StatusPill ok label="CANDLE BRAIN" />
-              <p className="text-[11px] text-gray-500 mt-2">PATTERN_2 · EMA + MACD/ADX · Bybit klines</p>
+              <StatusPill ok={false} label="WIPED" />
+              <p className="text-[11px] text-gray-500 mt-2">Fire / bible removed — awaiting fresh strategy</p>
             </div>
             <div className="bg-[#161A1E] border border-amber-700/40 rounded-xl p-2">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Bybit TESTNET</div>

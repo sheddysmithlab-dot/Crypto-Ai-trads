@@ -1290,7 +1290,7 @@ class AITradingAgent:
         entry_fee_pct = bybit_api.get_taker_fee_pct()
         entry_fee_usd = round(position_size * (entry_fee_pct / 100), 4)
 
-        # Fire Engine / manual: keep SL+TP from signal when provided.
+        # Manual / future engine: keep SL+TP from signal when provided.
         clean_sl = None
         clean_tp = None
         if sl_price is not None:
@@ -2033,8 +2033,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
 
 async def auto_buy_loop():
-    """Multi-pair Fire Engine scanner on each new closed candle."""
-    print(f"[AUTO BUY LOOP] {ENTRY_PATTERN_NAME} multi-pair fire engine online.")
+    """Multi-pair scanner stub (no entry engine until strategy is wired)."""
+    print(f"[AUTO BUY LOOP] {ENTRY_PATTERN_NAME} — scanner idle (no entry engine).")
     async with httpx.AsyncClient(timeout=8.0) as client:
         while True:
             try:
@@ -2045,7 +2045,7 @@ async def auto_buy_loop():
                         try:
                             await scan_and_maybe_fire_pair(client, pair, timeframe_key)
                         except Exception as exc:
-                            print(f"[FIRE ENGINE] scan error {pair}: {exc}")
+                            print(f"[SCAN] error {pair}: {exc}")
                 await asyncio.sleep(poll)
             except Exception as exc:
                 print(f"[AUTO BUY LOOP] error: {exc}")
@@ -2230,7 +2230,7 @@ async def start_bot():
         "entry_pattern": ENTRY_PATTERN_NAME,
         "entry_pattern_profile": entry_pattern_profile(),
         "message": (
-            f"Bot active — {ENTRY_PATTERN_NAME}: candlestick patterns + shadow psychology. "
+            f"Bot active — {ENTRY_PATTERN_NAME}: no entry engine (awaiting fresh strategy). "
             "Fires LONG/SHORT with ATR-padded SL and 1:2 TP; auto-exits on SL/TP."
         ),
         "open_positions": open_count,
@@ -2541,7 +2541,7 @@ async def get_agent_config():
 
 @app.get("/entry-pattern")
 async def get_entry_pattern():
-    """Active entry profile (Fire Engine v3)."""
+    """Active entry profile (wiped until new strategy)."""
     return {"status": "success", **entry_pattern_profile()}
 
 

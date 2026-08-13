@@ -61,7 +61,7 @@ export default function ChartPanel({
           {botIsActive && readouts.blueBoxStatus ? (
             <div
               className="flex items-center gap-1.5 px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-[10px] font-bold uppercase tracking-wide text-cyan-300"
-              title="AI candle brain: PATTERN_2 EMA + MACD/ADX → fire"
+              title="Strategy wiped — awaiting fresh entry engine"
             >
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
               {readouts.blueBoxStatus}

@@ -38,7 +38,7 @@ def brain_chat_summary(enriched: dict[str, Any]) -> str:
 def strategy_system_blurb() -> str:
     return (
         "AI AGENT — STRATEGY WIPED:\n"
-        "1) No Fire Engine / scalp / trap entry logic.\n"
+        "1) Fire Trade Engine / bible / scalp entry logic removed.\n"
         "2) No auto stop-loss / take-profit / trailing exits.\n"
         "3) No session schedule auto on/off.\n"
         "4) Manual BUY/SELL + emergency sell-all still work.\n"
