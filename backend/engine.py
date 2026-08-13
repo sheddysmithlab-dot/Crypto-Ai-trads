@@ -376,19 +376,27 @@ class StructureAnalyzer:
     @classmethod
     def analyze_structure(cls, df: pd.DataFrame, idx: int) -> MarketStructureState:
         """Determines Trend, Phase (Impulse/Retrace), and S/R."""
+        if idx < 0 or idx >= len(df):
+            return MarketStructureState(
+                trend=TrendDirection.CHOPPY,
+                phase=MarketPhase.EQUILIBRIUM,
+                resistance_level=0.0,
+                support_level=0.0,
+            )
+
         lookback = 50
         start = max(0, idx - lookback)
-        recent_df = df.iloc[start:idx+1]
-        
+        recent_df = df.iloc[start : idx + 1]
+        # find_swing_points returns indices relative to recent_df (0-based), not global df.
         sh_idxs, sl_idxs = cls.find_swing_points(recent_df, lookback=3)
-        sh_prices = [recent_df['High'].iloc[i - start] for i in sh_idxs] if sh_idxs else []
-        sl_prices = [recent_df['Low'].iloc[i - start] for i in sl_idxs] if sl_idxs else []
+        sh_prices = [float(recent_df["High"].iloc[i]) for i in sh_idxs] if sh_idxs else []
+        sl_prices = [float(recent_df["Low"].iloc[i]) for i in sl_idxs] if sl_idxs else []
         
         state = MarketStructureState(
             trend=TrendDirection.RANGING,
             phase=MarketPhase.EQUILIBRIUM,
-            resistance_level=recent_df['High'].max(),
-            support_level=recent_df['Low'].min(),
+            resistance_level=float(recent_df['High'].max()),
+            support_level=float(recent_df['Low'].min()),
             swing_highs=sh_prices,
             swing_lows=sl_prices
         )
@@ -405,15 +413,15 @@ class StructureAnalyzer:
 
         # PDF Rule: Choppy Market Filter (Page 68)
         # "zoom out on daily chart... lot of noise... clear indication of choppy market"
-        atr = recent_df['High'].subtract(recent_df['Low']).mean()
+        atr = float(recent_df['High'].subtract(recent_df['Low']).mean() or 0.0)
         range_size = state.resistance_level - state.support_level
         if atr > 0 and range_size < (atr * 2.5):
             state.trend = TrendDirection.CHOPPY
 
         # PDF Rule: Impulsive vs Retracement Move (Pages 54-57)
         if idx > 0:
-            curr_close = df['Close'].iloc[idx]
-            prev_close = df['Close'].iloc[idx-1]
+            curr_close = float(df['Close'].iloc[idx])
+            prev_close = float(df['Close'].iloc[idx-1])
             
             if state.trend == TrendDirection.UPTREND and curr_close > prev_close:
                 state.phase = MarketPhase.IMPULSIVE
@@ -583,7 +591,10 @@ class CandlestickTradingBibleEngine:
 
     def evaluate_candle(self, symbol: str, df: pd.DataFrame, idx: int) -> Optional[TradeSignal]:
         """Main evaluation loop ran on every closed candle."""
-        if idx < 20: return None # Need history for S/R
+        if df is None or len(df) < 21:
+            return None
+        if idx < 20 or idx >= len(df):
+            return None  # Need history for S/R; never iloc past end
 
         # 1. Prepare Data Structures
         c0 = self._build_anatomy(df, idx)
