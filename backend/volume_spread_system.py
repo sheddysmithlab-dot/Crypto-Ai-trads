@@ -840,5 +840,5 @@ def build_blue_box_chart_overlay(
         "last_pattern": decision.get("pattern"),
         "last_action": decision.get("action"),
         "strength": decision.get("strength") or decision.get("confidence"),
-        "note": "Strategy wiped — awaiting fresh engine",
+        "note": "Candlestick Trading Bible engine",
     }

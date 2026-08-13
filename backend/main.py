@@ -63,6 +63,7 @@ from agent_brain import (
     brain_chat_summary,
     enrich_signal,
     entry_pattern_profile,
+    evaluate_bible_entry,
     strategy_system_blurb,
 )
 
@@ -232,7 +233,7 @@ class SettingsStore:
             print(f"[SETTINGS] Z.ai AI loaded (model={self.ai_model}, provider={self.ai_provider}).")
         else:
             print("[SETTINGS] Z.ai is the default AI provider — set ZAI_API_KEY to enable.")
-        print(f"[SETTINGS] Entry engine: {ENTRY_PATTERN_NAME} (awaiting fresh strategy).")
+        print(f"[SETTINGS] Entry engine: {ENTRY_PATTERN_NAME} (Candlestick Trading Bible).")
 
     def save(self, payload: SettingsPayload):
         # Only overwrite secret fields if the user actually typed a new value
@@ -606,7 +607,7 @@ bybit_api = BybitAPIWrapper()
 # Manual-mode defaults (auto strategy wiped)
 MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "5"))
 MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "1"))
-AUTO_TRADE_AUTO_EXIT_ENABLED = False  # Strategy wiped — no auto SL/TP/trail
+AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Bible engine SL/TP
 INVERT_AUTO_TRADE_FIRE = False
 BTC_REGIME_GATE = False
 _AUTO_BUY_TICKER_POLL = float(os.environ.get("MARKET_TICKER_POLL", "0.35"))
@@ -1345,7 +1346,7 @@ class AITradingAgent:
             "capital_reserved": capital_reserved,
             "season_id": self.ai_season_id,
             "timeframe_key": timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m"),
-            "exit_mode": "manual",
+            "exit_mode": "bible_sl_tp" if source == "auto" else "manual",
             "entry_pattern": ENTRY_PATTERN_NAME,
         }
         self.trades.append(trade)
@@ -1502,8 +1503,54 @@ class AITradingAgent:
             self.peak_net_pct = 0.0
             return
 
-        # Strategy wiped — no auto SL/TP/scalp/trail exits (manual + emergency only).
+        # Auto exits: Bible engine hard SL / TP on auto trades (manual untouched).
+        if AUTO_TRADE_AUTO_EXIT_ENABLED:
+            still_open = []
+            for trade in self.trades:
+                if trade.get("source") == "manual":
+                    still_open.append(trade)
+                    continue
+                trade_pair = trade.get("pair") or ""
+                mark = self.mark_price_for(trade_pair)
+                entry = float(trade.get("entry") or 0)
+                if mark is None or entry <= 0:
+                    still_open.append(trade)
+                    continue
+                reason = self._evaluate_bible_exit(trade, float(mark))
+                if reason:
+                    m = self._trade_metrics(trade)
+                    if self._close_single_trade(trade, m, reason):
+                        continue
+                still_open.append(trade)
+            self.trades = still_open
+
         self._sync_agent_trailing_lock_state()
+
+    def _evaluate_bible_exit(self, trade: dict, mark: float) -> str | None:
+        """Close auto trade when mark hits Bible SL or TP."""
+        side = trade.get("side")
+        sl = trade.get("sl_price")
+        tp = trade.get("tp_price")
+        try:
+            sl_f = float(sl) if sl is not None else None
+        except (TypeError, ValueError):
+            sl_f = None
+        try:
+            tp_f = float(tp) if tp is not None else None
+        except (TypeError, ValueError):
+            tp_f = None
+
+        if side == "LONG":
+            if sl_f is not None and mark <= sl_f:
+                return f"Bible SL: LONG mark {mark:.6f} ≤ SL {sl_f:.6f}"
+            if tp_f is not None and mark >= tp_f:
+                return f"Bible TP: LONG mark {mark:.6f} ≥ TP {tp_f:.6f}"
+        elif side == "SHORT":
+            if sl_f is not None and mark >= sl_f:
+                return f"Bible SL: SHORT mark {mark:.6f} ≥ SL {sl_f:.6f}"
+            if tp_f is not None and mark <= tp_f:
+                return f"Bible TP: SHORT mark {mark:.6f} ≤ TP {tp_f:.6f}"
+        return None
 
     def _close_single_trade(self, trade, metrics, reason) -> bool:
         """Close one position. Returns True if closed locally (and on Bybit when applicable)."""
@@ -1875,9 +1922,8 @@ def get_bybit_executor_agent():
 def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
-        f"{ENTRY_PATTERN_NAME} — no auto entry/exit engine | "
-        "manual BUY/SELL + emergency sell-all only | "
-        "awaiting fresh strategy"
+        f"{ENTRY_PATTERN_NAME} — traps + 10 patterns + structure | "
+        "auto SL/TP at 1:2 R:R | manual BUY/SELL + emergency sell-all"
     )
 
 
@@ -1985,15 +2031,25 @@ def compute_auto_trade_plan(
 
 
 def evaluate_entry(candles, timeframe_key: str, *, pair: str = "default", htf_candles=None):
-    """Strategy wiped — no auto entries until a new engine is wired."""
-    return {
-        "action": "NO_TRADE",
-        "reason": "STRATEGY_WIPED — awaiting fresh entry strategy",
-        "engine": "none",
-        "entry_pattern": ENTRY_PATTERN_NAME,
-        "timeframe_key": timeframe_key,
-        "pair": pair,
-    }
+    """Candlestick Trading Bible entry (`backend/engine.py`)."""
+    balance = agent.get_available_capital() or agent.get_trading_capital_base() or 10000.0
+    risk_pct = max(float(getattr(agent, "risk_level_pct", 1.0) or 1.0), 0.5) / 100.0
+    # Cap at 2% per Bible money-management rule.
+    risk_pct = min(risk_pct, 0.02)
+    result = evaluate_bible_entry(
+        candles,
+        timeframe_key,
+        pair=pair,
+        account_balance=float(balance),
+        risk_pct=risk_pct,
+    )
+    if result.get("action") in ("BUY", "SELL"):
+        if INVERT_AUTO_TRADE_FIRE:
+            result = dict(result)
+            result["action"] = "SELL" if result["action"] == "BUY" else "BUY"
+            result["reason"] = f"INVERTED | {result.get('reason')}"
+        return enrich_signal(result)
+    return result
 
 
 async def fetch_closed_candle_history(
@@ -2012,13 +2068,15 @@ async def fetch_closed_candle_history(
 
 
 async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
-    """Closed-candle scan — strategy wiped, never opens auto trades."""
+    """Closed-candle Bible scan → open auto trade with SL/TP."""
     bybit_symbol = get_bybit_symbol(pair)
     if not bybit_symbol:
         return False
 
-    history = await fetch_closed_candle_history(client, bybit_symbol, timeframe_key, limit=max(MIN_CANDLES, 80))
-    if len(history) < 20:
+    history = await fetch_closed_candle_history(
+        client, bybit_symbol, timeframe_key, limit=max(MIN_CANDLES, 100)
+    )
+    if len(history) < 25:
         return False
 
     close_time = int(history[-1]["close_time"])
@@ -2038,13 +2096,73 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             "close_time": close_time,
         },
     )
-    # No auto fire while strategy wiped
-    return False
+
+    if detect.get("action") not in ("BUY", "SELL"):
+        system_log.push_agent_chat(
+            f"Bible scan {pair} @ {timeframe_key}: {detect.get('reason', 'no setup')}",
+            status="scanning",
+            details={"pair": pair, "timeframe": timeframe_key},
+        )
+        return False
+
+    mark_px = agent.mark_price_for(pair) or float(detect.get("entry") or history[-1]["close"])
+    side = "LONG" if detect["action"] == "BUY" else "SHORT"
+    plan = compute_auto_trade_plan(agent, price=mark_px, pair=pair)
+    if plan is None:
+        system_log.push_agent_chat(
+            f"Bible signal on {pair} but size plan failed",
+            status="no_match",
+            details={"pair": pair, "detect": detect},
+        )
+        return False
+
+    trade = agent.open_trade(
+        side=side,
+        reason=detect.get("reason") or f"Bible {detect.get('pattern')}",
+        source="auto",
+        position_size_usd=plan["position_usd"],
+        qty=plan["qty"],
+        entry_price=mark_px,
+        bybit_symbol=bybit_symbol,
+        pattern=detect.get("pattern"),
+        signal_candle_time=close_time,
+        taapi_action=detect["action"],
+        sl_price=detect.get("sl"),
+        tp_price=detect.get("tp"),
+        target_mult=detect.get("risk_reward"),
+        pair=pair,
+        timeframe_key=timeframe_key,
+    )
+    if not trade:
+        return False
+
+    system_log.push_agent_chat(
+        brain_chat_summary(detect) + f" → FIRED {side} on {pair}",
+        status="match",
+        details={"pair": pair, "trade_id": trade.get("id"), "sl": detect.get("sl"), "tp": detect.get("tp")},
+    )
+    system_log.set_last_trade_fire(
+        {
+            "success": True,
+            "action": detect["action"],
+            "symbol": bybit_symbol,
+            "pattern": detect.get("pattern"),
+            "pair": pair,
+            "entry": mark_px,
+            "sl": detect.get("sl"),
+            "tp": detect.get("tp"),
+        }
+    )
+    print(
+        f"[BIBLE] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} "
+        f"SL={detect.get('sl')} TP={detect.get('tp')} RR={detect.get('risk_reward')}"
+    )
+    return True
 
 
 async def auto_buy_loop():
-    """Multi-pair scanner stub (no entry engine until strategy is wired)."""
-    print(f"[AUTO BUY LOOP] {ENTRY_PATTERN_NAME} — scanner idle (no entry engine).")
+    """Multi-pair Bible engine scanner on each new closed candle."""
+    print(f"[AUTO BUY LOOP] {ENTRY_PATTERN_NAME} multi-pair bible engine online.")
     async with httpx.AsyncClient(timeout=8.0) as client:
         while True:
             try:
@@ -2055,7 +2173,7 @@ async def auto_buy_loop():
                         try:
                             await scan_and_maybe_fire_pair(client, pair, timeframe_key)
                         except Exception as exc:
-                            print(f"[SCAN] error {pair}: {exc}")
+                            print(f"[BIBLE] scan error {pair}: {exc}")
                 await asyncio.sleep(poll)
             except Exception as exc:
                 print(f"[AUTO BUY LOOP] error: {exc}")
@@ -2212,7 +2330,7 @@ async def start_bot():
     agent.daily_target_reached = False  # fresh session -> clear any prior daily-target halt
     agent.begin_ai_season()  # season P&L + kill-switch baseline = portfolio value right now
     agent.is_active = True
-    print("[PILLAR 2: BACKEND] Received 'START' from Frontend — strategy wiped (no auto entries).")
+    print("[PILLAR 2: BACKEND] Received 'START' from Frontend — Candlestick Bible engine online.")
     system_log.push(
         "ai",
         f"AI automation STARTED on {agent.active_pair} ({open_count} open position(s) preserved).",
@@ -2220,7 +2338,8 @@ async def start_bot():
     )
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     system_log.push_agent_chat(
-        f"STRATEGY_WIPED on {agent.active_pair} ({tf_key}) — awaiting fresh entry/exit strategy.",
+        f"Bot active — {ENTRY_PATTERN_NAME} on {agent.active_pair} ({tf_key}): "
+        f"traps + 10 patterns + structure + 1:2 SL/TP.",
         status="active",
         details={
             "pair": agent.active_pair,
@@ -2240,8 +2359,8 @@ async def start_bot():
         "entry_pattern": ENTRY_PATTERN_NAME,
         "entry_pattern_profile": entry_pattern_profile(),
         "message": (
-            f"Bot active — {ENTRY_PATTERN_NAME}: no entry engine (awaiting fresh strategy). "
-            "Fires LONG/SHORT with ATR-padded SL and 1:2 TP; auto-exits on SL/TP."
+            f"Bot active — {ENTRY_PATTERN_NAME}: traps + 10 patterns + structure. "
+            "Fires LONG/SHORT with wick/ATR SL and min 1:2 TP; auto-exits on SL/TP."
         ),
         "open_positions": open_count,
         "trade_history_count": len(agent.trade_history),
@@ -2551,7 +2670,7 @@ async def get_agent_config():
 
 @app.get("/entry-pattern")
 async def get_entry_pattern():
-    """Active entry profile (wiped until new strategy)."""
+    """Active entry profile (Candlestick Trading Bible)."""
     return {"status": "success", **entry_pattern_profile()}
 
 

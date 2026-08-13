@@ -1,9 +1,11 @@
-# Agent Strategy — wiped
+# Candlestick Trading Bible — live engine
 
-| Status | `STRATEGY_WIPED` |
-|--------|------------------|
-| Entry | none |
-| Exit | none (manual only) |
-| Schedule | removed |
+Active module: `backend/engine.py` (`CandlestickTradingBibleEngine`).
 
-Ready for fresh doctrine.
+Priority order:
+1. Smart-money traps (deviate & reclaim)
+2. Strict 10-pattern bible recognition
+3. Market structure / impulsive vs retracement / choppy filter
+4. Risk: ~1–2% guidance, SL beyond wick/ATR, min 1:2 R:R TP
+
+Auto exits hit hard SL/TP. Manual BUY/SELL and emergency sell-all remain available.
