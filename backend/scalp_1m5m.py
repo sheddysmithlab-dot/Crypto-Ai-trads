@@ -34,12 +34,13 @@ SWEEP_LOOKBACK = int(os.environ.get("SCALP_SWEEP_LOOKBACK", "20"))  # Recent_Hig
 # Shadow must be > body * this (10% club rejection wick)
 REJECTION_BODY_MULT = float(os.environ.get("SCALP_REJECTION_BODY_MULT", "1.5"))
 SWEEP_SCORE_BOOST = float(os.environ.get("SCALP_SWEEP_SCORE_BOOST", "0.12"))
-REQUIRE_SWEEP = os.environ.get("SCALP_REQUIRE_SWEEP", "1").strip().lower() in {
+REQUIRE_SWEEP = os.environ.get("SCALP_REQUIRE_SWEEP", "0").strip().lower() in {
     "1",
     "true",
     "yes",
     "on",
 }
+TRAP_CONFIDENCE = float(os.environ.get("SCALP_TRAP_CONFIDENCE", "0.80"))
 # SL pad beyond sweep wick (curriculum: High + ATR*0.5)
 ATR_SL_MULT = float(os.environ.get("SCALP_ATR_SL_MULT", "0.5"))
 ADX_MIN = float(os.environ.get("SCALP_ADX_MIN", "18"))
@@ -361,20 +362,25 @@ def detect_liquidity_sweep(
     candles: list[dict],
     side_hint: str | None = None,
 ) -> dict[str, Any]:
-    """Brain curriculum — liquidity trap (fake breakout → reclaim → rejection wick).
+    """Bull/Bear trap → REVERSE trade (never skip a confirmed trap).
 
-    SHORT (10% club vs retail breakout buyers):
-      STEP1 Recent_High = Highest(High, 20) prior candles
-      STEP2 Breakout_Happen = Current_High > Recent_High
-      STEP3 Reclaim_Happen = Current_Close < Recent_High
-      STEP4 Strong_Rejection = UpperShadow > Body * 1.5
-      STEP5 → SHORT · SL = High + ATR*pad · TP = 1:2 R
+    Resistance = Highest(High, 20 prior) · Support = Lowest(Low, 20 prior)
 
-    LONG mirror on Recent_Low / lower shadow.
+    BULL TRAP (retail buys breakout) → bot SHORTS:
+      High > Resistance AND Close < Resistance AND UpperWick > Body*1.5
+      Trap_Confidence ≈ 80%
+
+    BEAR TRAP (retail sells breakdown) → bot LONGS:
+      Low < Support AND Close > Support AND LowerWick > Body*1.5
+      Trap_Confidence ≈ 80%
     """
     empty: dict[str, Any] = {
         "sweep": False,
+        "trap": False,
+        "trap_type": None,
         "direction": None,
+        "execute_side": None,
+        "trap_confidence": 0.0,
         "boost": 0.0,
         "resistance": None,
         "support": None,
@@ -383,7 +389,7 @@ def detect_liquidity_sweep(
         "strong_rejection": False,
         "shadow_size": 0.0,
         "body_size": 0.0,
-        "curriculum": "liquidity_trap_v1",
+        "curriculum": "bull_bear_trap_reverse_v1",
     }
     n = max(5, SWEEP_LOOKBACK)
     if len(candles) < n + 1:
@@ -396,97 +402,131 @@ def detect_liquidity_sweep(
     c = float(last["close"])
     o = float(last["open"])
 
-    # STEP 1 — where 90% plan breakout buys / stops
-    recent_high = max(float(x["high"]) for x in prior)
-    recent_low = min(float(x["low"]) for x in prior)
-    empty["resistance"] = recent_high
-    empty["support"] = recent_low
+    resistance = max(float(x["high"]) for x in prior)
+    support = min(float(x["low"]) for x in prior)
+    empty["resistance"] = resistance
+    empty["support"] = support
 
     body = abs(c - o)
-    body_eff = max(body, abs(h - l) * 0.01, 1e-12)  # doji-safe
+    body_eff = max(body, abs(h - l) * 0.01, 1e-12)
     upper_shadow = h - max(o, c)
     lower_shadow = min(o, c) - l
 
-    # --- SHORT path (fake breakout above Recent_High) ---
-    breakout_up = h > recent_high  # STEP 2 bait
-    reclaim_down = c < recent_high  # STEP 3 trap
-    strong_upper = upper_shadow > (body_eff * REJECTION_BODY_MULT)  # STEP 4
-    bear = breakout_up and reclaim_down and strong_upper
+    # BULL TRAP → reverse SHORT (retail buying the fake breakout)
+    bull_trap = (
+        h > resistance
+        and c < resistance
+        and upper_shadow > (body_eff * REJECTION_BODY_MULT)
+    )
+    # BEAR TRAP → reverse LONG (retail selling the fake breakdown)
+    bear_trap = (
+        l < support
+        and c > support
+        and lower_shadow > (body_eff * REJECTION_BODY_MULT)
+    )
 
-    # --- LONG path (fake breakdown below Recent_Low) ---
-    breakout_dn = l < recent_low
-    reclaim_up = c > recent_low
-    strong_lower = lower_shadow > (body_eff * REJECTION_BODY_MULT)
-    bull = breakout_dn and reclaim_up and strong_lower
+    if bull_trap and bear_trap:
+        if upper_shadow >= lower_shadow:
+            bear_trap = False
+        else:
+            bull_trap = False
 
-    def _pack(direction: str, *, shadow: float, extreme: float, detail: str) -> dict[str, Any]:
+    # Optional side_hint only filters when both aren't set; traps ignore Fire buy/sell labels
+    if side_hint in ("BUY", "LONG") and bull_trap and not bear_trap:
+        pass  # still SHORT — reverse of retail buy
+    if side_hint in ("SELL", "SHORT") and bear_trap and not bull_trap:
+        pass  # still LONG — reverse of retail sell
+
+    if bull_trap:
+        print(
+            f"[TRAP] Bull Trap Detected! Retail is Buying, Bot is SHORTING. "
+            f"R={resistance:.6g} High={h:.6g} Close={c:.6g} conf={TRAP_CONFIDENCE:.0%}"
+        )
         return {
             "sweep": True,
-            "direction": direction,
+            "trap": True,
+            "trap_type": "bull_trap",
+            "direction": "bearish",  # price reject up → we short
+            "execute_side": "SHORT",
+            "trap_confidence": TRAP_CONFIDENCE,
             "boost": SWEEP_SCORE_BOOST,
-            "resistance": recent_high,
-            "support": recent_low,
-            "recent_high": recent_high,
-            "recent_low": recent_low,
-            "breakout_happen": breakout_up if direction == "bearish" else breakout_dn,
-            "reclaim_happen": reclaim_down if direction == "bearish" else reclaim_up,
+            "resistance": resistance,
+            "support": support,
+            "recent_high": resistance,
+            "recent_low": support,
+            "breakout_happen": True,
+            "reclaim_happen": True,
             "strong_rejection": True,
-            "shadow_size": shadow,
+            "shadow_size": upper_shadow,
             "body_size": body,
             "rejection_mult": REJECTION_BODY_MULT,
-            "detail": detail,
-            "sweep_extreme": extreme,
-            "curriculum": "liquidity_trap_v1",
+            "detail": (
+                f"BULL TRAP → SHORT: High>{resistance:.6g} Close<{resistance:.6g} "
+                f"upperWick>{REJECTION_BODY_MULT}xBody (retail buy, bot shorts)"
+            ),
+            "sweep_extreme": h,
+            "curriculum": "bull_bear_trap_reverse_v1",
             "steps": {
-                "1_recent_level": recent_high if direction == "bearish" else recent_low,
-                "2_breakout": True,
-                "3_reclaim": True,
-                "4_strong_rejection": True,
-                "5_side": "SHORT" if direction == "bearish" else "LONG",
+                "1_resistance": resistance,
+                "2_breakout_above": True,
+                "3_reclaim_below": True,
+                "4_upper_wick_1_5x": True,
+                "5_reverse": "SHORT",
+                "confidence": TRAP_CONFIDENCE,
             },
         }
 
-    if bull and bear and side_hint is None:
-        # Stronger rejection wick wins
-        if lower_shadow >= upper_shadow:
-            bull, bear = True, False
-        else:
-            bull, bear = False, True
-
-    if bull and (side_hint in (None, "BUY", "LONG")):
-        return _pack(
-            "bullish",
-            shadow=lower_shadow,
-            extreme=l,
-            detail=(
-                f"TRAP LONG: Low<{recent_low:.6g} Close>{recent_low:.6g} "
-                f"lowerWick {lower_shadow:.6g} > {REJECTION_BODY_MULT}x body"
-            ),
+    if bear_trap:
+        print(
+            f"[TRAP] Bear Trap Detected! Retail is Selling, Bot is BUYING. "
+            f"S={support:.6g} Low={l:.6g} Close={c:.6g} conf={TRAP_CONFIDENCE:.0%}"
         )
-    if bear and (side_hint in (None, "SELL", "SHORT")):
-        return _pack(
-            "bearish",
-            shadow=upper_shadow,
-            extreme=h,
-            detail=(
-                f"TRAP SHORT: High>{recent_high:.6g} Close<{recent_high:.6g} "
-                f"upperWick {upper_shadow:.6g} > {REJECTION_BODY_MULT}x body"
+        return {
+            "sweep": True,
+            "trap": True,
+            "trap_type": "bear_trap",
+            "direction": "bullish",  # price reject down → we long
+            "execute_side": "LONG",
+            "trap_confidence": TRAP_CONFIDENCE,
+            "boost": SWEEP_SCORE_BOOST,
+            "resistance": resistance,
+            "support": support,
+            "recent_high": resistance,
+            "recent_low": support,
+            "breakout_happen": True,
+            "reclaim_happen": True,
+            "strong_rejection": True,
+            "shadow_size": lower_shadow,
+            "body_size": body,
+            "rejection_mult": REJECTION_BODY_MULT,
+            "detail": (
+                f"BEAR TRAP → LONG: Low<{support:.6g} Close>{support:.6g} "
+                f"lowerWick>{REJECTION_BODY_MULT}xBody (retail sell, bot buys)"
             ),
-        )
+            "sweep_extreme": l,
+            "curriculum": "bull_bear_trap_reverse_v1",
+            "steps": {
+                "1_support": support,
+                "2_breakdown_below": True,
+                "3_reclaim_above": True,
+                "4_lower_wick_1_5x": True,
+                "5_reverse": "LONG",
+                "confidence": TRAP_CONFIDENCE,
+            },
+        }
 
-    # Partial diagnostics when bait printed but trap incomplete
-    empty["breakout_happen"] = breakout_up or breakout_dn
-    empty["reclaim_happen"] = (breakout_up and reclaim_down) or (breakout_dn and reclaim_up)
-    empty["strong_rejection"] = strong_upper or strong_lower
+    empty["breakout_happen"] = (h > resistance) or (l < support)
+    empty["reclaim_happen"] = (h > resistance and c < resistance) or (l < support and c > support)
+    empty["strong_rejection"] = (
+        upper_shadow > body_eff * REJECTION_BODY_MULT
+        or lower_shadow > body_eff * REJECTION_BODY_MULT
+    )
     empty["shadow_size"] = max(upper_shadow, lower_shadow)
     empty["body_size"] = body
-    if breakout_up and reclaim_down and not strong_upper:
-        empty["detail"] = (
-            f"bait+reclaim but weak rejection (upperWick {upper_shadow:.6g} "
-            f"<= {REJECTION_BODY_MULT}x body {body_eff:.6g})"
-        )
-    elif breakout_up and not reclaim_down:
-        empty["detail"] = f"breakout above {recent_high:.6g} but close held — no trap yet"
+    if h > resistance and c < resistance and not (upper_shadow > body_eff * REJECTION_BODY_MULT):
+        empty["detail"] = "bull bait+reclaim but wick < 1.5x body — no reverse yet"
+    elif l < support and c > support and not (lower_shadow > body_eff * REJECTION_BODY_MULT):
+        empty["detail"] = "bear bait+reclaim but wick < 1.5x body — no reverse yet"
     return empty
 
 
@@ -736,7 +776,7 @@ def apply_scalp_to_fire_result(
     timeframe_key: str,
     htf_candles: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """Trap-primary scalp path: clean sweep fires; Fire is confirmation only."""
+    """1m/5m: confirmed trap → ALWAYS reverse-fire; else normal Fire ≥0.72."""
     out = dict(result)
     out["scalp"] = True
     out["entry_pattern"] = ENTRY_PATTERN_NAME
@@ -754,79 +794,124 @@ def apply_scalp_to_fire_result(
         out["reason"] = f"Scalp gate: {gate.reason}"
         return out
 
-    # Detect trap WITHOUT Fire side_hint — trap direction is source of truth
     sweep = detect_liquidity_sweep(candles, side_hint=None)
     out["liquidity_sweep"] = sweep
-
     fire_action = result.get("action")
-    if sweep.get("sweep"):
-        # Prefer trap side (SHORT/LONG from reclaim) over Fire if they disagree
-        action = "BUY" if sweep["direction"] == "bullish" else "SELL"
-        if fire_action in ("BUY", "SELL") and fire_action != action:
-            out["reason"] = (
-                f"TRAP overrides Fire {fire_action}→{action}: {sweep.get('detail')}"
-            )
-        else:
-            out["reason"] = f"{result.get('reason', '')} | {sweep.get('detail')}".strip(" |")
-        out["action"] = action
-    else:
-        if REQUIRE_SWEEP:
-            out["action"] = "NO_TRADE"
-            out["reason"] = (
-                "Scalp: waiting for trap (High>RecentHigh + Close reclaim + wick>1.5x body) "
-                f"lookback={SWEEP_LOOKBACK}"
-                + (f" | note={sweep.get('detail')}" if sweep.get("detail") else "")
-            )
-            return out
-        if fire_action not in ("BUY", "SELL"):
-            out["action"] = "NO_TRADE"
-            out["reason"] = "No trap and no Fire signal"
-            return out
-        action = fire_action
-        out["action"] = action
-        out["reason"] = result.get("reason") or "Fire without trap (REQUIRE_SWEEP off)"
 
+    # --- PATH A: confirmed bull/bear trap → REVERSE, never skip ---
+    if sweep.get("trap") or sweep.get("sweep"):
+        exec_side = sweep.get("execute_side")
+        if exec_side == "SHORT" or sweep.get("trap_type") == "bull_trap":
+            action = "SELL"  # bot shorts while retail buys
+        elif exec_side == "LONG" or sweep.get("trap_type") == "bear_trap":
+            action = "BUY"  # bot longs while retail sells
+        else:
+            action = "BUY" if sweep.get("direction") == "bullish" else "SELL"
+
+        conf = float(sweep.get("trap_confidence") or TRAP_CONFIDENCE)
+        out["action"] = action
+        out["confidence"] = conf
+        out["strength"] = conf
+        out["trap_confidence"] = conf
+        out["trap_type"] = sweep.get("trap_type")
+        out["reason"] = sweep.get("detail") or f"Reverse trap → {action}"
+        if fire_action in ("BUY", "SELL") and fire_action != action:
+            out["reason"] += f" (Fire said {fire_action}, reverse wins)"
+
+        entry = float(result.get("entry") or candles[-1]["close"])
+        sl, tp, risk = apply_asymmetric_sl_tp(action, entry, candles, sweep)
+        if risk <= 0:
+            out["action"] = "NO_TRADE"
+            out["reason"] = "Trap seen but invalid SL/risk"
+            return out
+        out["entry"] = entry
+        out["sl"] = sl
+        out["tp"] = tp
+        out["risk_reward"] = TRAIL_RR
+        out["side"] = "LONG" if action == "BUY" else "SHORT"
+        out["scorecard"] = {
+            "total": conf,
+            "threshold": TRAP_CONFIDENCE,
+            "pass": True,
+            "trap_floor": True,
+            "mode": "reverse_trap",
+        }
+        out["scalp_plan"] = {
+            "partial_rr": PARTIAL_RR,
+            "trail_rr": TRAIL_RR,
+            "partial_frac": PARTIAL_FRAC,
+            "risk": risk,
+            "be_buffer_r": BE_BUFFER_R,
+            "atr_sl_mult": ATR_SL_MULT,
+            "mode": "reverse_trap",
+        }
+        out["pattern"] = sweep.get("trap_type") or f"trap_{'short' if action == 'SELL' else 'long'}"
+        return out
+
+    # --- PATH B: no trap → normal Fire Engine 0.72 score logic ---
+    if fire_action not in ("BUY", "SELL"):
+        out["action"] = "NO_TRADE"
+        out["reason"] = (
+            "No bull/bear trap — "
+            + (sweep.get("detail") or "waiting")
+            + f" | Fire: {result.get('reason', 'no 0.72 setup')}"
+        )
+        return out
+
+    if REQUIRE_SWEEP:
+        # Legacy hard mode: only trade traps (off by default now)
+        out["action"] = "NO_TRADE"
+        out["reason"] = "SCALP_REQUIRE_SWEEP=1 and no trap — skipping Fire fallback"
+        return out
+
+    action = fire_action
+    out["action"] = action
+    out["reason"] = f"No trap → Fire 0.72 path: {result.get('reason', action)}"
     htf_near = bool((gate.meta.get("htf") or {}).get("near"))
     adx_v = float((gate.meta.get("adx") or {}).get("value") or 0)
     scorecard = weighted_confluence_scorecard(
         out, sweep, adx_value=adx_v, htf_near=htf_near
     )
     need = MIN_CONFLUENCE
-    if not sweep.get("sweep"):
-        if not gate.meta.get("killzone", {}).get("active"):
-            need += KILLZONE_EXTRA_CONF
-        if 0 < adx_v < ADX_MIN:
-            need += 0.04
+    if not gate.meta.get("killzone", {}).get("active"):
+        need += KILLZONE_EXTRA_CONF
+    if 0 < adx_v < ADX_MIN:
+        need += 0.04
     scorecard = dict(scorecard)
     scorecard["threshold"] = round(need, 4)
-    if sweep.get("sweep") and TRAP_BYPASSES_SCORECARD:
-        scorecard["total"] = max(float(scorecard["total"]), need)
-        scorecard["pass"] = True
-        scorecard["trap_floor"] = True
-    else:
-        scorecard["pass"] = float(scorecard["total"]) >= need
-
+    scorecard["pass"] = float(scorecard["total"]) >= need
+    scorecard["mode"] = "fire_0_72"
     out["scorecard"] = scorecard
     out["confidence"] = float(scorecard["total"])
     out["strength"] = float(scorecard["total"])
     if not scorecard["pass"]:
-        out["action"] = "NO_TRADE"
-        out["reason"] = (
-            f"Scalp confluence {scorecard['total']:.3f} < {scorecard['threshold']:.3f}"
-        )
-        return out
+        # Fall back to raw Fire confidence if scorecard under-counts
+        fire_conf = float(result.get("confidence") or result.get("strength") or 0)
+        if fire_conf >= need:
+            out["confidence"] = fire_conf
+            out["strength"] = fire_conf
+            scorecard["pass"] = True
+            scorecard["total"] = fire_conf
+            scorecard["fire_conf_fallback"] = True
+        else:
+            out["action"] = "NO_TRADE"
+            out["reason"] = (
+                f"Fire fallback score {max(scorecard['total'], fire_conf):.3f} < {need:.3f}"
+            )
+            return out
 
     entry = float(result.get("entry") or candles[-1]["close"])
-    sl, tp, risk = apply_asymmetric_sl_tp(action, entry, candles, sweep if sweep.get("sweep") else {})
-    if risk <= 0 or sl == entry:
-        out["action"] = "NO_TRADE"
-        out["reason"] = "Scalp: invalid SL/risk after ATR pad"
-        return out
-
+    sl = result.get("sl")
+    tp = result.get("tp")
+    if sl is None or tp is None:
+        sl, tp, risk = apply_asymmetric_sl_tp(action, entry, candles, {})
+    else:
+        sl, tp = float(sl), float(tp)
+        risk = abs(entry - sl)
     out["entry"] = entry
     out["sl"] = sl
     out["tp"] = tp
-    out["risk_reward"] = TRAIL_RR
+    out["risk_reward"] = float(result.get("risk_reward") or TRAIL_RR)
     out["side"] = "LONG" if action == "BUY" else "SHORT"
     out["scalp_plan"] = {
         "partial_rr": PARTIAL_RR,
@@ -835,12 +920,10 @@ def apply_scalp_to_fire_result(
         "risk": risk,
         "be_buffer_r": BE_BUFFER_R,
         "atr_sl_mult": ATR_SL_MULT,
+        "mode": "fire_0_72",
     }
-    out["pattern"] = (
-        f"trap_{'short' if action == 'SELL' else 'long'}"
-        if sweep.get("sweep")
-        else (result.get("pattern") or "scalp_fire")
-    )
+    out["pattern"] = result.get("pattern") or "fire_0_72"
+    out["exit_mode"] = "scalp_partial_be_trail"
     return out
 
 
@@ -851,7 +934,7 @@ def try_sweep_only_entry(
     htf_candles: list[dict] | None = None,
     pair: str = "default",
 ) -> dict[str, Any]:
-    """Primary 1m/5m path: fire trap even when Fire Engine is quiet."""
+    """Fire reverse trade when bull/bear trap is confirmed (no Fire needed)."""
     sweep = detect_liquidity_sweep(candles, side_hint=None)
     base: dict[str, Any] = {
         "action": "NO_TRADE",
@@ -861,22 +944,21 @@ def try_sweep_only_entry(
         "timeframe_key": timeframe_key,
         "liquidity_sweep": sweep,
     }
-    if not sweep.get("sweep"):
-        base["reason"] = sweep.get("detail") or "No liquidity trap yet (bait+reclaim+1.5x wick)"
+    if not (sweep.get("trap") or sweep.get("sweep")):
+        base["reason"] = sweep.get("detail") or "No bull/bear trap"
         return base
 
-    action = "BUY" if sweep["direction"] == "bullish" else "SELL"
+    action = "SELL" if (
+        sweep.get("execute_side") == "SHORT" or sweep.get("trap_type") == "bull_trap"
+    ) else "BUY"
     entry = float(candles[-1]["close"])
     seed = {
         "action": action,
-        "confidence": 0.75,
-        "strength": 0.75,
-        "pattern": "liquidity_sweep",
-        "confluence": {
-            "score": 0.75,
-            "tech": {"adx": 0, "strong_trend": True},
-        },
-        "reason": f"Trap-only ({sweep.get('detail')})",
+        "confidence": float(sweep.get("trap_confidence") or TRAP_CONFIDENCE),
+        "strength": float(sweep.get("trap_confidence") or TRAP_CONFIDENCE),
+        "pattern": sweep.get("trap_type") or "liquidity_trap",
+        "confluence": {"score": float(sweep.get("trap_confidence") or TRAP_CONFIDENCE)},
+        "reason": sweep.get("detail"),
         "entry": entry,
     }
     return apply_scalp_to_fire_result(
@@ -892,15 +974,15 @@ def evaluate_scalp_entry(
     htf_candles: list[dict] | None = None,
     pair: str = "default",
 ) -> dict[str, Any]:
-    """Unified 1m/5m evaluator: trap first, then Fire-assist."""
-    # 1) Trap-only (curriculum primary)
+    """1m/5m law: trap → reverse NOW; else Run_Normal_0.72_Score_Logic()."""
+    # 1) Trap reverse (bull→SHORT / bear→LONG) — never skip when confirmed
     trap = try_sweep_only_entry(
         candles, timeframe_key=timeframe_key, htf_candles=htf_candles, pair=pair
     )
     if trap.get("action") in ("BUY", "SELL"):
         return trap
 
-    # 2) Fire signal filtered through scalp (only if REQUIRE_SWEEP allows non-trap)
+    # 2) No trap → normal Fire Engine ≥0.72
     if fire_result and fire_result.get("action") in ("BUY", "SELL"):
         return apply_scalp_to_fire_result(
             fire_result, candles, timeframe_key=timeframe_key, htf_candles=htf_candles
@@ -912,7 +994,11 @@ def evaluate_scalp_entry(
     out["entry_pattern"] = ENTRY_PATTERN_NAME
     out["liquidity_sweep"] = trap.get("liquidity_sweep")
     out["scalp_gates"] = trap.get("scalp_gates")
-    out["reason"] = trap.get("reason") or out.get("reason") or "No trap / no Fire"
+    out["reason"] = (
+        (trap.get("reason") or "No trap")
+        + " | "
+        + str((fire_result or {}).get("reason") or "no Fire 0.72 setup")
+    )
     return out
 
 

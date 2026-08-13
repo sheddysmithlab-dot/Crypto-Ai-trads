@@ -96,15 +96,14 @@ def brain_chat_summary(enriched: dict[str, Any]) -> str:
 
 def strategy_system_blurb() -> str:
     return (
-        f"AI AGENT — {ENTRY_PATTERN_NAME} + FIRE_SCALP_1M5M trap brain:\n"
+        f"AI AGENT — {ENTRY_PATTERN_NAME} + FIRE_SCALP_1M5M reverse-trap brain:\n"
         "15m+: Fire Engine SL/TP 1:2.\n"
-        "1m/5m TRAINED:\n"
-        "1) Recent_High = Highest(High,20) — retail breakout magnet.\n"
-        "2) Bait: High > Recent_High.\n"
-        "3) Trap: Close < Recent_High (reclaim).\n"
-        "4) Rejection: upper wick > 1.5x body.\n"
-        "5) SHORT · SL=High+ATR*0.5 · TP 1:2 · then 50%@1R→BE→trail.\n"
-        "Also: ADX/news/panic/HTF no-trade filters. Manual/emergency OK."
+        "1m/5m:\n"
+        "1) BULL TRAP (High>R, Close<R, wick>1.5x) → SHORT ~80% (retail buy, bot shorts).\n"
+        "2) BEAR TRAP (Low<S, Close>S, wick>1.5x) → LONG ~80% (retail sell, bot buys).\n"
+        "3) No trap → normal Fire score >= 0.72 (do not freeze).\n"
+        "4) SL=wick+/-ATR*0.5 · TP 1:2 · 50%@1R→BE→trail.\n"
+        "Never skip a confirmed trap — reverse it."
     )
 
 
