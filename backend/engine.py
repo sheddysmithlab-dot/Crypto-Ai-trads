@@ -411,14 +411,14 @@ class StructureAnalyzer:
             if is_hh and is_hl: state.trend = TrendDirection.UPTREND
             elif is_lh and is_ll: state.trend = TrendDirection.DOWNTREND
 
-        # PDF Rule: Choppy Market Filter (Page 68)
-        # "zoom out on daily chart... lot of noise... clear indication of choppy market"
+        # PDF Rule: Choppy Market Filter (Page 68) — soft tag only, do NOT block (exits are fixed ±0.5%).
         atr = float(recent_df['High'].subtract(recent_df['Low']).mean() or 0.0)
         range_size = state.resistance_level - state.support_level
         if atr > 0 and range_size < (atr * 2.5):
             state.trend = TrendDirection.CHOPPY
 
-        # PDF Rule: Impulsive vs Retracement Move (Pages 54-57)
+        # Impulsive vs Retracement — informational only. Retracement no longer hard-blocks
+        # (expert policy: traps/momentum can still fire in retracement with fixed ±0.5% exit).
         if idx > 0:
             curr_close = float(df['Close'].iloc[idx])
             prev_close = float(df['Close'].iloc[idx-1])
@@ -428,7 +428,7 @@ class StructureAnalyzer:
             elif state.trend == TrendDirection.DOWNTREND and curr_close < prev_close:
                 state.phase = MarketPhase.IMPULSIVE
             else:
-                state.phase = MarketPhase.RETRACEMENT # "Traders who buy here get caught"
+                state.phase = MarketPhase.RETRACEMENT
 
         return state
 
@@ -519,8 +519,8 @@ class CandlestickTradingBibleEngine:
         self.risk_manager = RiskManager(account_balance, risk_pct)
         self.psychology_mapper = PsychologyMapper()
         
-        # Strict Bible Confluence Requirements
-        self.min_confluences_required = 2
+        # Strict Bible Confluence Requirements — loosened for live 1m crypto (exits are fixed ±0.5%).
+        self.min_confluences_required = 1
 
     def _build_anatomy(self, df: pd.DataFrame, idx: int) -> CandlestickAnatomy:
         row = df.iloc[idx]
@@ -559,23 +559,13 @@ class CandlestickTradingBibleEngine:
 
     def _finalize_signal(self, symbol: str, c: CandlestickAnatomy, state: MarketStructureState, 
                          pattern_name: str, direction: str, sl: float, tp: float) -> Optional[TradeSignal]:
-        """Final Gatekeeper: Checks confluences and R:R before issuing a trade."""
+        """Final Gatekeeper: confluences only (retracement no longer hard-blocks)."""
         
         confluences = self._evaluate_confluences(c, state, direction)
         
-        # GATE 1: Must have enough confluences
-        if len([c for c in confluences if "High Risk" not in c]) < self.min_confluences_required:
+        # GATE 1: Must have enough confluences (loosened to 1).
+        if len([cf for cf in confluences if "High Risk" not in cf]) < self.min_confluences_required:
             return None
-            
-        # GATE 2: MUST NOT be in retracement phase (PDF strict rule)
-        if state.phase == MarketPhase.RETRACEMENT:
-            return None
-            
-        # GATE 3: Risk to Reward Check
-        if not self.risk_manager.calculate_take_profit(c.close, sl, direction, self.risk_manager.min_rr):
-            # If TP calculation drops below entry (invalid R:R), reject
-            rr = abs(tp - c.close) / abs(c.close - sl) if c.close != sl else 0
-            if rr < self.risk_manager.min_rr: return None
 
         pos_size = self.risk_manager.calculate_position_size(c.close, sl)
         rr = round(abs(tp - c.close) / abs(c.close - sl), 2) if c.close != sl else 0
@@ -605,7 +595,9 @@ class CandlestickTradingBibleEngine:
         resistance, support = self._get_dynamic_sr(df, idx, 20)
         atr = self.trap_detector.calculate_atr(df, 14)
         
-        if state.trend == TrendDirection.CHOPPY: return None # DO NOT TRADE CHOPPY
+        if state.trend == TrendDirection.CHOPPY:
+            # Choppy no longer hard-blocks; traps + momentum fallback can still fire.
+            pass
         if not self.detector._validate_anatomy(c0): return None
 
         # ====================================================================
@@ -615,10 +607,10 @@ class CandlestickTradingBibleEngine:
         if trap:
             sl = trap['sl']
             tp = self.risk_manager.calculate_take_profit(c0.close, sl, trap['action'], 2.0)
-            # Traps are so strong they bypass the "Impulsive Move" filter, but still need basic R:R
             pos_size = self.risk_manager.calculate_position_size(c0.close, sl)
             rr = round(abs(tp - c0.close) / abs(c0.close - sl), 2) if c0.close != sl else 0
-            if rr >= 2.0:
+            # Trap gate loosened: exits are fixed ±0.5%, so even sub-2 R:R traps are valid.
+            if rr >= 0.5:
                 return TradeSignal(
                     symbol, trap['action'], c0.close, sl, tp, trap['pattern'],
                     self.psychology_mapper.get_psychology(trap['pattern']), state.trend, state.phase,
@@ -689,7 +681,60 @@ class CandlestickTradingBibleEngine:
             tp = self.risk_manager.calculate_take_profit(c0.close, sl, "SHORT", 2.0)
             return self._finalize_signal(symbol, c0, state, "Tweezers Top", "SHORT", sl, tp)
 
+        # ====================================================================
+        # PRIORITY 3: EMA MOMENTUM SCALP FALLBACK (expert policy — keeps bot active)
+        # Guarantees trades fire on directional 1m momentum even when no bible
+        # pattern completes. Exit is fixed ±0.5% gross so risk is bounded.
+        # ====================================================================
+        mom = self._detect_momentum_scalp(df, idx, c0, atr)
+        if mom:
+            direction = mom["direction"]
+            sl = (c0.low - c0.total_range * 0.1) if direction == "LONG" else (c0.high + c0.total_range * 0.1)
+            tp = self.risk_manager.calculate_take_profit(c0.close, sl, direction, 1.0)
+            pos_size = self.risk_manager.calculate_position_size(c0.close, sl)
+            rr = round(abs(tp - c0.close) / abs(c0.close - sl), 2) if c0.close != sl else 0
+            confs = [mom["reason"], f"EMA20 {mom['ema_side']}"]
+            return TradeSignal(
+                symbol, direction, c0.close, sl, tp, mom["pattern"],
+                self.psychology_mapper.get_psychology(mom["pattern"]), state.trend, state.phase,
+                confs, rr, pos_size, c0.timestamp
+            )
+
         return None # No high-probability Bible setup found
+
+    def _detect_momentum_scalp(
+        self, df: pd.DataFrame, idx: int, c0: CandlestickAnatomy, atr: float
+    ) -> Optional[Dict]:
+        """EMA20 momentum scalp fallback. Fires on strong body in EMA direction."""
+        if atr <= 0 or len(df) < 21:
+            return None
+        window = df["Close"].iloc[max(0, idx - 19) : idx + 1]
+        if len(window) < 20:
+            return None
+        ema20 = float(window.ewm(span=20, adjust=False).mean().iloc[-1])
+        body = c0.absolute_body_size
+        rng = c0.total_range
+        if rng <= 0 or body <= 0:
+            return None
+        body_ratio = body / rng
+        # Strong body (>= 55% of range) closing in EMA direction.
+        if body_ratio < 0.55:
+            return None
+        if c0.close > c0.open and c0.close > ema20:
+            return {
+                "direction": "LONG",
+                "pattern": "Bullish Momentum Scalp",
+                "reason": "Strong bullish body above EMA20",
+                "ema_side": "above",
+            }
+        if c0.close < c0.open and c0.close < ema20:
+            return {
+                "direction": "SHORT",
+                "pattern": "Bearish Momentum Scalp",
+                "reason": "Strong bearish body below EMA20",
+                "ema_side": "below",
+            }
+        return None
 
     def run_backtest(self, symbol: str, df: pd.DataFrame) -> List[TradeSignal]:
         signals = []

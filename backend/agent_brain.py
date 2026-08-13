@@ -152,5 +152,6 @@ def strategy_system_blurb() -> str:
         "2) Then strict 10-pattern bible recognition (shadow math, no color bias).\n"
         "3) Market structure filter (HH/HL, impulsive vs retracement, choppy = no trade).\n"
         "4) Exit policy (LONG & SHORT same): cut at −0.5% gross, book profit at +0.5% gross.\n"
-        "5) Manual BUY/SELL + emergency sell-all still work."
+        "5) Entry gates loosened for live 1m: traps + 10 patterns + EMA20 momentum fallback.\n"
+        "6) Manual BUY/SELL + emergency sell-all still work."
     )
