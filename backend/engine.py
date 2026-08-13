@@ -20,6 +20,9 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Dict, Any
 from enum import Enum
 
+# Pattern confirmation bar — user set to 50% (more signals, still directional).
+PATTERN_CONFIRM_PCT = 0.50
+
 # ==========================================
 # 1. ENUMERATIONS & DATA STRUCTURES
 # ==========================================
@@ -195,10 +198,14 @@ class BiblePatternDetector:
         if not cls._validate_anatomy(c): return False
         
         # Rule: Open, High, Close roughly same (Body must be at absolute top)
-        is_body_at_top = c.upper_shadow <= (c.total_range * 0.05) # Less than 5% tolerance
+        is_body_at_top = c.upper_shadow <= (c.total_range * PATTERN_CONFIRM_PCT * 0.3)  # ~15% @ 50%
         
-        # Rule: "Long lower tail that shows the resistance of buyers"
-        has_long_tail = c.lower_shadow > (c.absolute_body_size * 2.0) if c.absolute_body_size > 0 else c.lower_shadow > (c.total_range * 0.6)
+        # Rule: long lower tail — loosened to ~1.5× body / 50% of range
+        has_long_tail = (
+            c.lower_shadow > (c.absolute_body_size * 1.5)
+            if c.absolute_body_size > 0
+            else c.lower_shadow > (c.total_range * PATTERN_CONFIRM_PCT)
+        )
         
         return is_body_at_top and has_long_tail
 
@@ -211,10 +218,14 @@ class BiblePatternDetector:
         if not cls._validate_anatomy(c): return False
         
         # Rule: Open, Low, Close roughly same (Body must be at absolute bottom)
-        is_body_at_bottom = c.lower_shadow <= (c.total_range * 0.05)
+        is_body_at_bottom = c.lower_shadow <= (c.total_range * PATTERN_CONFIRM_PCT * 0.3)
         
-        # Rule: "Long upper tail... testing a powerful supply or resistance area"
-        has_long_tail = c.upper_shadow > (c.absolute_body_size * 2.0) if c.absolute_body_size > 0 else c.upper_shadow > (c.total_range * 0.6)
+        # Rule: long upper tail — loosened to ~1.5× body / 50% of range
+        has_long_tail = (
+            c.upper_shadow > (c.absolute_body_size * 1.5)
+            if c.absolute_body_size > 0
+            else c.upper_shadow > (c.total_range * PATTERN_CONFIRM_PCT)
+        )
         
         return is_body_at_bottom and has_long_tail
 
@@ -231,8 +242,8 @@ class BiblePatternDetector:
         is_c1_bearish = c1.close < c1.open
         c1_midpoint = (c1.body_top + c1.body_bottom) / 2.0
         
-        # Candle 2 conditions (Indecision)
-        is_c2_small = c2.absolute_body_size < (c1.absolute_body_size * 0.3)
+        # Candle 2 conditions (Indecision) — loosened to 50% of mother body
+        is_c2_small = c2.absolute_body_size < (c1.absolute_body_size * PATTERN_CONFIRM_PCT)
         
         # Candle 3 conditions (Bullish reversal confirmation)
         is_c3_bullish = c3.close > c3.open
@@ -252,7 +263,7 @@ class BiblePatternDetector:
         is_c1_bullish = c1.close > c1.open
         c1_midpoint = (c1.body_top + c1.body_bottom) / 2.0
         
-        is_c2_small = c2.absolute_body_size < (c1.absolute_body_size * 0.3)
+        is_c2_small = c2.absolute_body_size < (c1.absolute_body_size * PATTERN_CONFIRM_PCT)
         
         is_c3_bearish = c3.close < c3.open
         closes_below_midpoint = c3.close < c1_midpoint
@@ -268,14 +279,14 @@ class BiblePatternDetector:
         """
         if not cls._validate_anatomy(c): return False
         
-        # Rule: Open, High, Close roughly same -> Body at top
-        is_body_at_top = c.upper_shadow <= (c.total_range * 0.15)
+        # Rule: body near top — up to 25% upper wick allowed at 50% confirm
+        is_body_at_top = c.upper_shadow <= (c.total_range * 0.25)
         
-        # Rule: Shadow 2x length of real body
+        # Rule: Shadow ≥ 1.5× body OR ≥ 50% of range
         if c.absolute_body_size == 0:
-            has_tail = c.lower_shadow >= (c.total_range * 0.6)
+            has_tail = c.lower_shadow >= (c.total_range * PATTERN_CONFIRM_PCT)
         else:
-            has_tail = c.lower_shadow >= (c.absolute_body_size * 2.0)
+            has_tail = c.lower_shadow >= (c.absolute_body_size * 1.5)
             
         return is_body_at_top and has_tail
 
@@ -287,14 +298,14 @@ class BiblePatternDetector:
         """
         if not cls._validate_anatomy(c): return False
         
-        # Rule: Open, Low, Close roughly same -> Body at bottom
-        is_body_at_bottom = c.lower_shadow <= (c.total_range * 0.15)
+        # Rule: body near bottom — up to 25% lower wick allowed at 50% confirm
+        is_body_at_bottom = c.lower_shadow <= (c.total_range * 0.25)
         
-        # Rule: Shadow 2x length of real body
+        # Rule: Shadow ≥ 1.5× body OR ≥ 50% of range
         if c.absolute_body_size == 0:
-            has_tail = c.upper_shadow >= (c.total_range * 0.6)
+            has_tail = c.upper_shadow >= (c.total_range * PATTERN_CONFIRM_PCT)
         else:
-            has_tail = c.upper_shadow >= (c.absolute_body_size * 2.0)
+            has_tail = c.upper_shadow >= (c.absolute_body_size * 1.5)
             
         return is_body_at_bottom and has_tail
 
@@ -457,8 +468,9 @@ class SmartMoneyTrapDetector:
         
         # 1. Bull Trap (Retail Buy -> Bot Short)
         # Price went above Resistance, but CLOSED BELOW it. Long upper wick.
+        # Trap wick confirm loosened to 1.0× body (was 1.5×) — 50% confirmation policy
         if c.high > resistance and c.close < resistance:
-            if c.upper_shadow > (c.absolute_body_size * 1.5):
+            if c.upper_shadow > (c.absolute_body_size * 1.0):
                 return {
                     "action": "SHORT",
                     "pattern": "80% Bull Trap",
@@ -469,7 +481,7 @@ class SmartMoneyTrapDetector:
         # 2. Bear Trap (Retail Sell -> Bot Long)
         # Price went below Support, but CLOSED ABOVE it. Long lower wick.
         if c.low < support and c.close > support:
-            if c.lower_shadow > (c.absolute_body_size * 1.5):
+            if c.lower_shadow > (c.absolute_body_size * 1.0):
                 return {
                     "action": "LONG",
                     "pattern": "80% Bear Trap",
@@ -717,8 +729,8 @@ class CandlestickTradingBibleEngine:
         if rng <= 0 or body <= 0:
             return None
         body_ratio = body / rng
-        # Strong body (>= 55% of range) closing in EMA direction.
-        if body_ratio < 0.55:
+        # Body ≥ 50% of range closing in EMA direction (PATTERN_CONFIRM_PCT).
+        if body_ratio < PATTERN_CONFIRM_PCT:
             return None
         if c0.close > c0.open and c0.close > ema20:
             return {

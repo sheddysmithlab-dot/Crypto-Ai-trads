@@ -62,7 +62,9 @@ def _signal_to_dict(sig: TradeSignal, *, timeframe_key: str, pair: str) -> dict[
         "sl": float(sig.stop_loss),
         "tp": float(sig.take_profit),
         "risk_reward": float(sig.risk_reward_ratio),
-        "confidence": 0.8 if "Trap" in (sig.pattern_name or "") else 0.72,
+        "confidence": 0.5 if "Momentum" in (sig.pattern_name or "") else (
+            0.55 if "Trap" in (sig.pattern_name or "") else 0.50
+        ),
         "confluences": list(sig.confluences or []),
         "psychology": psych,
         "market_structure": trend,
@@ -152,6 +154,6 @@ def strategy_system_blurb() -> str:
         "2) Then strict 10-pattern bible recognition (shadow math, no color bias).\n"
         "3) Market structure filter (HH/HL, impulsive vs retracement, choppy = no trade).\n"
         "4) Exit policy (LONG & SHORT same): cut at −0.5% gross, book profit at +0.5% gross.\n"
-        "5) Entry gates loosened for live 1m: traps + 10 patterns + EMA20 momentum fallback.\n"
+        "5) Entry gates at 50% pattern confirmation: traps + 10 patterns + EMA20 momentum fallback.\n"
         "6) Manual BUY/SELL + emergency sell-all still work."
     )
