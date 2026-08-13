@@ -29,7 +29,6 @@ from bybit_public import (
     sanitize_price as _sanitize_market_price,
 )
 from session_schedule import schedule_store
-from timeframe_profiles import capital_pct_fraction, get_timeframe_profile
 import trade_db
 from api_secrets import (
     get_taapi_exchange,
@@ -70,6 +69,17 @@ from agent_brain import (
 from pathlib import Path
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "DATA"
+
+# Minimal TF profile stub (timeframe_profiles.py removed — flat defaults until new strategy).
+def get_timeframe_profile(timeframe_key: str) -> dict:
+    key = (timeframe_key or "1m").strip()
+    aliases = {"1M": "1m", "5M": "5m", "15M": "15m", "1H": "1h", "1D": "1D"}
+    key = aliases.get(key, key)
+    return {"timeframe": key, "win_rate": 50, "lose_rate": 50, "capital_pct": 5.0}
+
+
+def capital_pct_fraction(timeframe_key: str) -> float:
+    return get_timeframe_profile(timeframe_key)["capital_pct"] / 100.0
 
 # Load backend/.env before any credential reads (cwd-safe path).
 load_dotenv(Path(__file__).resolve().parent / ".env")
