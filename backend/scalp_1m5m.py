@@ -1,8 +1,10 @@
 """AI TRADING AGENT — MASTER BRAIN (1M entry / 5M direction).
 
-Strict doctrine only. No extra patterns, EMA stacks, or bible compare.
-Read market → confirm → LONG / SHORT / NO TRADE.
-Exits: fixed ±0.5% in main.py.
+Execute LONG or SHORT every market situation unless exactly one of:
+  (1) Buyer Pressure and Seller Pressure are balanced
+  (2) Buy Volume and Sell Volume are balanced
+  (3) overall signal confidence is low
+No other NO TRADE reasons. Exits: ±0.5% in main.py.
 """
 from __future__ import annotations
 
@@ -15,17 +17,18 @@ SCALP_TFS = frozenset({"1m", "5m", "30s", "1M", "5M", "30S"})
 LOOKBACK = 5
 MIN_1M = 16
 MIN_5M = 12
-MIN_CONFIDENCE = 60
-MIN_CONFIRMS = 3
+MIN_CONFIDENCE = 45  # below this = NO TRADE reason (3) only
 EPS = 0.015
 EXIT_LOSS_PCT = 0.5
 EXIT_PROFIT_PCT = 0.5
+BALANCE_EPS = 0.08  # |buy-sell| / total < 8% → balanced
 
 BRAIN_MEMORY = (
-    "5M determines dominant direction. 1M determines entry timing only. "
-    "Never trade every candle. Never decide from one condition. "
-    "Sequence: 5M TREND → 1M SETUP → BUY/SELL ACTIVITY → VOLUME → PRICE → SIGNAL → ENTRY. "
-    "Strong confirmation = Trade. Weak = NO TRADE. Conflict = WAIT. Protect capital first."
+    "Always LONG or SHORT unless exactly: (1) buyer/seller pressure balanced, "
+    "(2) buy/sell volume balanced, or (3) confidence low. "
+    "5M = dominant direction, 1M = entry timing. "
+    "Conflict → pick stronger Price+Volume+Pressure side. Never skip for sideways, "
+    "weak candle, conflict, low volume, or uncertainty outside the three reasons."
 )
 
 
@@ -72,18 +75,19 @@ def _up(now: float, prev: float, thr: float = EPS) -> bool:
     return (now - prev) / prev >= thr
 
 
-def _dn(now: float, prev: float, thr: float = EPS) -> bool:
-    if prev <= 0:
-        return False
-    return (prev - now) / prev >= thr
-
-
 def _lvl(ratio: float) -> str:
     if ratio >= 1.25:
         return "HIGH"
     if ratio >= 1.05:
         return "MEDIUM"
     return "LOW"
+
+
+def _balanced(a: float, b: float) -> bool:
+    tot = a + b
+    if tot <= 1e-12:
+        return True
+    return abs(a - b) / tot < BALANCE_EPS
 
 
 def _window(candles: list[dict]) -> dict | None:
@@ -98,28 +102,21 @@ def _window(candles: list[dict]) -> dict | None:
     seller_act = sum(b["seller_act"] for b in bars)
     px0 = first["c"] or first["o"] or 1e-12
     price_chg = (last["c"] - px0) / px0
-    avg_rng = sum(b["rng"] for b in bars) / len(bars)
-    avg_str = sum(b["strength"] for b in bars) / len(bars)
     return {
         "price_chg": price_chg,
         "price_up": price_chg > EPS,
         "price_dn": price_chg < -EPS,
-        "price_flat": abs(price_chg) <= EPS,
         "buy_vol": buy_vol,
         "sell_vol": sell_vol,
         "total": total,
         "buyer_act": buyer_act,
         "seller_act": seller_act,
-        "buy_dom": buy_vol > sell_vol * 1.08,
-        "sell_dom": sell_vol > buy_vol * 1.08,
-        "balanced_vol": abs(buy_vol - sell_vol) / max(buy_vol + sell_vol, 1e-12) < 0.08,
+        "buy_dom": buy_vol > sell_vol * (1.0 + BALANCE_EPS),
+        "sell_dom": sell_vol > buy_vol * (1.0 + BALANCE_EPS),
         "strength": last["strength"],
-        "avg_strength": avg_str,
-        "avg_rng": avg_rng,
         "last": last,
         "bull_count": sum(1 for b in bars if b["bull"]),
         "bear_count": sum(1 for b in bars if b["bear"]),
-        "bars": bars,
     }
 
 
@@ -132,89 +129,76 @@ def _delta(cur: dict, prev: dict) -> dict:
         "buy_vol_up": _up(cur["buy_vol"], prev["buy_vol"]),
         "sell_vol_up": _up(cur["sell_vol"], prev["sell_vol"]),
         "total_up": _up(cur["total"], prev["total"]),
-        "total_low": cur["total"] < prev["total"] * 0.55 if prev["total"] > 0 else False,
     }
 
 
 def _m5_trend(c5: list[dict]) -> str:
-    """STEP 1 — 5M dominant direction. Never overridden by weak 1M."""
     cur = _window(c5[-LOOKBACK:])
     if not cur:
         return "NEUTRAL"
-    votes_long = 0
-    votes_short = 0
+    long_v = short_v = 0
     if cur["price_up"]:
-        votes_long += 2
+        long_v += 2
     if cur["price_dn"]:
-        votes_short += 2
+        short_v += 2
     if cur["buy_dom"]:
-        votes_long += 1
+        long_v += 1
     if cur["sell_dom"]:
-        votes_short += 1
-    if cur["buyer_act"] > cur["seller_act"] * 1.08:
-        votes_long += 1
-    if cur["seller_act"] > cur["buyer_act"] * 1.08:
-        votes_short += 1
+        short_v += 1
+    if cur["buyer_act"] > cur["seller_act"]:
+        long_v += 1
+    if cur["seller_act"] > cur["buyer_act"]:
+        short_v += 1
     if cur["bull_count"] > cur["bear_count"]:
-        votes_long += 1
+        long_v += 1
     if cur["bear_count"] > cur["bull_count"]:
-        votes_short += 1
-    if cur["avg_strength"] >= 0.45 and cur["price_up"]:
-        votes_long += 1
-    if cur["avg_strength"] >= 0.45 and cur["price_dn"]:
-        votes_short += 1
-    if votes_long >= 3 and votes_long > votes_short:
+        short_v += 1
+    if long_v > short_v:
         return "BULLISH"
-    if votes_short >= 3 and votes_short > votes_long:
+    if short_v > long_v:
         return "BEARISH"
     return "NEUTRAL"
 
 
 def _m1_signal(cur: dict, d: dict) -> str:
-    """STEP 2 — 1M entry timing from current vs previous 3–5 candles."""
-    long_pts = 0
-    short_pts = 0
+    long_p = short_p = 0
     if cur["price_up"]:
-        long_pts += 1
+        long_p += 1
     if cur["price_dn"]:
-        short_pts += 1
+        short_p += 1
     if d["buyer_up"]:
-        long_pts += 1
+        long_p += 1
     if d["seller_up"]:
-        short_pts += 1
+        short_p += 1
     if d["buy_vol_up"]:
-        long_pts += 1
+        long_p += 1
     if d["sell_vol_up"]:
-        short_pts += 1
+        short_p += 1
     if cur["last"]["bull"]:
-        long_pts += 1
+        long_p += 1
     if cur["last"]["bear"]:
-        short_pts += 1
+        short_p += 1
     if cur["buy_dom"]:
-        long_pts += 1
+        long_p += 1
     if cur["sell_dom"]:
-        short_pts += 1
-    if long_pts >= 3 and long_pts > short_pts:
+        short_p += 1
+    if long_p > short_p:
         return "BULLISH"
-    if short_pts >= 3 and short_pts > long_pts:
+    if short_p > long_p:
         return "BEARISH"
     return "NEUTRAL"
 
 
 def _pressure_lvl(cur: dict, prev: dict, side: str) -> str:
     if side == "BUY":
-        ratio = cur["buyer_act"] / max(prev["buyer_act"], 1e-12)
-    else:
-        ratio = cur["seller_act"] / max(prev["seller_act"], 1e-12)
-    return _lvl(ratio)
+        return _lvl(cur["buyer_act"] / max(prev["buyer_act"], 1e-12))
+    return _lvl(cur["seller_act"] / max(prev["seller_act"], 1e-12))
 
 
 def _vol_lvl(cur: dict, prev: dict, side: str) -> str:
     if side == "BUY":
-        ratio = cur["buy_vol"] / max(prev["buy_vol"], 1e-12)
-    else:
-        ratio = cur["sell_vol"] / max(prev["sell_vol"], 1e-12)
-    return _lvl(ratio)
+        return _lvl(cur["buy_vol"] / max(prev["buy_vol"], 1e-12))
+    return _lvl(cur["sell_vol"] / max(prev["sell_vol"], 1e-12))
 
 
 def _no_trade(
@@ -256,231 +240,31 @@ def _no_trade(
     }
 
 
-def evaluate_scalp_entry(
-    candles: list[dict],
-    timeframe_key: str,
+def _fire(
+    pick: str,
     *,
-    pair: str = "default",
-    htf_candles: list[dict] | None = None,
-    candles_1m: list[dict] | None = None,
-    candles_5m: list[dict] | None = None,
+    timeframe_key: str,
+    pair: str,
+    last: dict,
+    score: int,
+    m5: str,
+    m1: str,
+    buy_p: str,
+    sell_p: str,
+    buy_v: str,
+    sell_v: str,
+    confirms: list[str],
 ) -> dict[str, Any]:
-    if not is_scalp_timeframe(timeframe_key):
-        return _no_trade("scalp engine only for 1m/5m", timeframe_key, pair)
-
-    tf = (timeframe_key or "1m").strip().lower()
-    c1 = candles_1m or (candles if tf in ("1m", "30s") else None)
-    c5 = candles_5m or htf_candles or (candles if tf == "5m" else None)
-
-    if not c1 or len(c1) < MIN_1M:
-        return _no_trade(f"Need {MIN_1M}+ 1m candles", timeframe_key, pair)
-    if not c5 or len(c5) < MIN_5M:
-        return _no_trade(f"Need {MIN_5M}+ 5m candles", timeframe_key, pair)
-    if len(c1) < LOOKBACK * 2:
-        return _no_trade("Need previous 3–5 candles to compare", timeframe_key, pair)
-
-    # STEP 1 — 5M
-    m5 = _m5_trend(c5)
-
-    # STEP 2 — 1M current vs previous window
-    cur = _window(c1[-LOOKBACK:])
-    prev = _window(c1[-LOOKBACK * 2 : -LOOKBACK])
-    if not cur or not prev:
-        return _no_trade("Unable to compare 1m windows", timeframe_key, pair)
-
-    d = _delta(cur, prev)
-    m1 = _m1_signal(cur, d)
-    buy_p = _pressure_lvl(cur, prev, "BUY")
-    sell_p = _pressure_lvl(cur, prev, "SELL")
-    buy_v = _vol_lvl(cur, prev, "BUY")
-    sell_v = _vol_lvl(cur, prev, "SELL")
-    last = cur["last"]
-
-    long_c: list[str] = []
-    short_c: list[str] = []
-
-    # STEP 3 — Buying pressure
-    if d["buyer_up"] and d["buy_vol_up"] and d["total_up"] and cur["price_up"]:
-        long_c.append("buying_pressure")
-        if d["buyer_strong"] and buy_v == "HIGH":
-            long_c.append("strong_long")
-
-    # STEP 4 — Selling pressure
-    if d["seller_up"] and d["sell_vol_up"] and d["total_up"] and cur["price_dn"]:
-        short_c.append("selling_pressure")
-        if d["seller_strong"] and sell_v == "HIGH":
-            short_c.append("strong_short")
-
-    # STEP 5 — Buyer exhaustion / trap
-    if d["buyer_strong"] and not cur["price_up"] and not d["buy_vol_up"]:
-        short_c.append("buyer_trap")
-
-    # STEP 6 — Seller exhaustion / trap
-    if d["seller_strong"] and not cur["price_dn"] and not d["sell_vol_up"]:
-        long_c.append("seller_trap")
-
-    # STEP 7 — Volume–price conflict (absorption) — need extra confirm later
-    absorb_short = d["buy_vol_up"] and cur["price_dn"]
-    absorb_long = d["sell_vol_up"] and cur["price_up"]
-    if absorb_short:
-        short_c.append("buy_vol_up_price_dn")
-    if absorb_long:
-        long_c.append("sell_vol_up_price_up")
-
-    # STEP 8 — Who creates volume?
-    if cur["buy_dom"]:
-        long_c.append("buy_volume_dominates")
-    elif cur["sell_dom"]:
-        short_c.append("sell_volume_dominates")
-
-    if m5 == "BULLISH":
-        long_c.append("5m_bullish")
-    elif m5 == "BEARISH":
-        short_c.append("5m_bearish")
-    if m1 == "BULLISH":
-        long_c.append("1m_bullish")
-    elif m1 == "BEARISH":
-        short_c.append("1m_bearish")
-
-    long_c = list(dict.fromkeys(long_c))
-    short_c = list(dict.fromkeys(short_c))
-
-    # STEP 9 — 5M + 1M confirmation / WAIT
-    if m5 == "BULLISH" and m1 == "BEARISH":
-        return _no_trade(
-            "WAIT: 5M bullish vs 1M bearish",
-            timeframe_key, pair,
-            m5=m5, m1=m1, buy_p=buy_p, sell_p=sell_p, buy_v=buy_v, sell_v=sell_v,
-        )
-    if m5 == "BEARISH" and m1 == "BULLISH":
-        return _no_trade(
-            "WAIT: 5M bearish vs 1M bullish",
-            timeframe_key, pair,
-            m5=m5, m1=m1, buy_p=buy_p, sell_p=sell_p, buy_v=buy_v, sell_v=sell_v,
-        )
-
-    # STEP 11 — NO TRADE filters
-    if cur["balanced_vol"] and abs(cur["buyer_act"] - cur["seller_act"]) / max(
-        cur["buyer_act"] + cur["seller_act"], 1e-12
-    ) < 0.08:
-        return _no_trade(
-            "NO TRADE: buyer/seller and volume balanced",
-            timeframe_key, pair,
-            m5=m5, m1=m1, buy_p=buy_p, sell_p=sell_p, buy_v=buy_v, sell_v=sell_v,
-        )
-    if d["total_low"]:
-        return _no_trade(
-            "NO TRADE: unusually low volume",
-            timeframe_key, pair,
-            m5=m5, m1=m1, buy_p=buy_p, sell_p=sell_p, buy_v=buy_v, sell_v=sell_v,
-        )
-    if cur["price_flat"] and last["strength"] < 0.35:
-        return _no_trade(
-            "NO TRADE: sideways / candle too small",
-            timeframe_key, pair,
-            m5=m5, m1=m1, buy_p=buy_p, sell_p=sell_p, buy_v=buy_v, sell_v=sell_v,
-        )
-    if m5 == "NEUTRAL" and m1 == "NEUTRAL":
-        return _no_trade(
-            "NO TRADE: 5M and 1M neutral",
-            timeframe_key, pair,
-            m5=m5, m1=m1, buy_p=buy_p, sell_p=sell_p, buy_v=buy_v, sell_v=sell_v,
-        )
-
-    # STEP 12 — Confidence 0–100
-    def _score(side: str) -> int:
-        confirms = long_c if side == "LONG" else short_c
-        pts = 0
-        if (side == "LONG" and m5 == "BULLISH") or (side == "SHORT" and m5 == "BEARISH"):
-            pts += 22
-        if (side == "LONG" and m1 == "BULLISH") or (side == "SHORT" and m1 == "BEARISH"):
-            pts += 18
-        if (side == "LONG" and cur["price_up"]) or (side == "SHORT" and cur["price_dn"]):
-            pts += 14
-        if (side == "LONG" and cur["buy_dom"]) or (side == "SHORT" and cur["sell_dom"]):
-            pts += 14
-        if d["total_up"] and (
-            (side == "LONG" and cur["buy_dom"]) or (side == "SHORT" and cur["sell_dom"])
-        ):
-            pts += 10
-        if (side == "LONG" and d["buyer_up"]) or (side == "SHORT" and d["seller_up"]):
-            pts += 12
-        if last["strength"] >= 0.45 and (
-            (side == "LONG" and last["bull"]) or (side == "SHORT" and last["bear"])
-        ):
-            pts += 10
-        if side == "LONG" and ("seller_trap" in confirms or absorb_long):
-            pts += 6
-        if side == "SHORT" and ("buyer_trap" in confirms or absorb_short):
-            pts += 6
-        return min(100, pts)
-
-    long_score = _score("LONG")
-    short_score = _score("SHORT")
-
-    # STEP 10 — Entry logic (5M + 1M + activity + volume + price)
-    pick = None
-    if (
-        m5 == "BULLISH"
-        and m1 == "BULLISH"
-        and d["buy_vol_up"]
-        and d["buyer_up"]
-        and (cur["price_up"] or last["bull"])
-        and long_score >= MIN_CONFIDENCE
-        and len(long_c) >= MIN_CONFIRMS
-    ):
-        pick = "LONG"
-    elif (
-        m5 == "BEARISH"
-        and m1 == "BEARISH"
-        and d["sell_vol_up"]
-        and d["seller_up"]
-        and (cur["price_dn"] or last["bear"])
-        and short_score >= MIN_CONFIDENCE
-        and len(short_c) >= MIN_CONFIRMS
-    ):
-        pick = "SHORT"
-    # Strong trap/absorption may fire with aligned 5M even if 1M was WAIT-blocked above
-    elif (
-        m5 == "BULLISH"
-        and "seller_trap" in long_c
-        and long_score >= MIN_CONFIDENCE
-        and len(long_c) >= MIN_CONFIRMS
-        and m1 != "BEARISH"
-    ):
-        pick = "LONG"
-    elif (
-        m5 == "BEARISH"
-        and "buyer_trap" in short_c
-        and short_score >= MIN_CONFIDENCE
-        and len(short_c) >= MIN_CONFIRMS
-        and m1 != "BULLISH"
-    ):
-        pick = "SHORT"
-
-    if pick is None:
-        return _no_trade(
-            (
-                f"NO TRADE: weak confirmation L{long_score}/S{short_score} "
-                f"(need {MIN_CONFIDENCE}+ and {MIN_CONFIRMS}+ confirms)"
-            ),
-            timeframe_key, pair,
-            m5=m5, m1=m1, buy_p=buy_p, sell_p=sell_p, buy_v=buy_v, sell_v=sell_v,
-            confidence=max(long_score, short_score),
-        )
-
-    score = long_score if pick == "LONG" else short_score
-    confirms = long_c if pick == "LONG" else short_c
-    action = "BUY" if pick == "LONG" else "SELL"
     entry = last["c"]
     loss = EXIT_LOSS_PCT / 100.0
     profit = EXIT_PROFIT_PCT / 100.0
     if pick == "LONG":
         sl, tp = entry * (1.0 - loss), entry * (1.0 + profit)
+        action = "BUY"
     else:
         sl, tp = entry * (1.0 + loss), entry * (1.0 - profit)
-
-    reason = f"{pick} via 5M {m5} + 1M {m1}; {' / '.join(confirms[:4])}"
+        action = "SELL"
+    reason = f"{pick} stronger side | 5M={m5} 1M={m1}; {' / '.join(confirms[:5]) or 'imbalance'}"
     return {
         "action": action,
         "reason": reason,
@@ -512,3 +296,199 @@ def evaluate_scalp_entry(
             f"SIGNAL: {pick} | CONFIDENCE: {score} | REASON: {reason}"
         ),
     }
+
+
+def evaluate_scalp_entry(
+    candles: list[dict],
+    timeframe_key: str,
+    *,
+    pair: str = "default",
+    htf_candles: list[dict] | None = None,
+    candles_1m: list[dict] | None = None,
+    candles_5m: list[dict] | None = None,
+) -> dict[str, Any]:
+    # Non-scalp TF is routing, not a market NO TRADE — return neutral skip for router.
+    if not is_scalp_timeframe(timeframe_key):
+        return _no_trade("scalp engine only for 1m/5m", timeframe_key, pair)
+
+    tf = (timeframe_key or "1m").strip().lower()
+    c1 = candles_1m or (candles if tf in ("1m", "30s") else None)
+    c5 = candles_5m or htf_candles or (candles if tf == "5m" else None)
+
+    # Bootstrap with whatever is available (never invent a 4th NO TRADE for market).
+    if not c1 or len(c1) < 4:
+        c1 = candles or c1
+    if not c5 or len(c5) < 4:
+        c5 = htf_candles or candles_5m or c1
+    if not c1 or len(c1) < 4 or not c5 or len(c5) < 4:
+        # Not enough ticks yet — treat as low confidence (allowed reason 3).
+        return _no_trade(
+            "NO TRADE: overall signal confidence is low (insufficient bars)",
+            timeframe_key, pair, confidence=0,
+        )
+
+    n = min(LOOKBACK, max(2, len(c1) // 2))
+    m5 = _m5_trend(c5)
+    cur = _window(c1[-n:])
+    prev = _window(c1[-n * 2 : -n]) if len(c1) >= n * 2 else _window(c1[: max(1, len(c1) - n)])
+    if not cur:
+        return _no_trade(
+            "NO TRADE: overall signal confidence is low (no readable window)",
+            timeframe_key, pair, confidence=0,
+        )
+    if not prev:
+        prev = cur
+
+    d = _delta(cur, prev)
+    m1 = _m1_signal(cur, d)
+    buy_p = _pressure_lvl(cur, prev, "BUY")
+    sell_p = _pressure_lvl(cur, prev, "SELL")
+    buy_v = _vol_lvl(cur, prev, "BUY")
+    sell_v = _vol_lvl(cur, prev, "SELL")
+    last = cur["last"]
+
+    # ——— ONLY THREE NO TRADE CHECKS ———
+    # (1) Buyer Pressure and Seller Pressure balanced
+    pressure_balanced = _balanced(cur["buyer_act"], cur["seller_act"])
+    # (2) Buy Volume and Sell Volume balanced
+    volume_balanced = _balanced(cur["buy_vol"], cur["sell_vol"])
+
+    long_c: list[str] = []
+    short_c: list[str] = []
+
+    # Buying pressure
+    if d["buyer_up"] and d["buy_vol_up"] and cur["price_up"]:
+        long_c.append("buyer+buy_vol+price")
+    if d["buyer_up"] and d["buy_vol_up"] and d["total_up"] and cur["price_up"]:
+        long_c.append("buying_pressure")
+
+    # Selling pressure
+    if d["seller_up"] and d["sell_vol_up"] and cur["price_dn"]:
+        short_c.append("seller+sell_vol+price")
+    if d["seller_up"] and d["sell_vol_up"] and d["total_up"] and cur["price_dn"]:
+        short_c.append("selling_pressure")
+
+    # Buyer trap → SHORT
+    if d["buyer_strong"] and not cur["price_up"] and not d["buy_vol_up"]:
+        short_c.append("buyer_trap")
+    # Seller trap → LONG
+    if d["seller_strong"] and not cur["price_dn"] and not d["sell_vol_up"]:
+        long_c.append("seller_trap")
+
+    # Volume–price conflict
+    if d["buy_vol_up"] and cur["price_dn"]:
+        short_c.append("buy_vol_up_price_dn")
+    if d["sell_vol_up"] and cur["price_up"]:
+        long_c.append("sell_vol_up_price_up")
+
+    # Who dominates volume / pressure
+    if cur["buy_dom"]:
+        long_c.append("buy_volume_dominates")
+    if cur["sell_dom"]:
+        short_c.append("sell_volume_dominates")
+    if cur["buyer_act"] > cur["seller_act"] * (1.0 + BALANCE_EPS):
+        long_c.append("buyer_pressure_dominates")
+    if cur["seller_act"] > cur["buyer_act"] * (1.0 + BALANCE_EPS):
+        short_c.append("seller_pressure_dominates")
+
+    if m5 == "BULLISH":
+        long_c.append("5m_bullish")
+    elif m5 == "BEARISH":
+        short_c.append("5m_bearish")
+    if m1 == "BULLISH":
+        long_c.append("1m_bullish")
+    elif m1 == "BEARISH":
+        short_c.append("1m_bearish")
+
+    # Price tilt as soft vote when everything else is thin
+    if cur["price_up"]:
+        long_c.append("price_up")
+    if cur["price_dn"]:
+        short_c.append("price_dn")
+    if last["bull"]:
+        long_c.append("bull_candle")
+    if last["bear"]:
+        short_c.append("bear_candle")
+
+    long_c = list(dict.fromkeys(long_c))
+    short_c = list(dict.fromkeys(short_c))
+
+    def _score(side: str) -> int:
+        confirms = long_c if side == "LONG" else short_c
+        pts = min(40, len(confirms) * 6)  # base from stacked confirms
+        if (side == "LONG" and m5 == "BULLISH") or (side == "SHORT" and m5 == "BEARISH"):
+            pts += 18
+        if (side == "LONG" and m1 == "BULLISH") or (side == "SHORT" and m1 == "BEARISH"):
+            pts += 14
+        if (side == "LONG" and cur["price_up"]) or (side == "SHORT" and cur["price_dn"]):
+            pts += 12
+        if (side == "LONG" and cur["buy_dom"]) or (side == "SHORT" and cur["sell_dom"]):
+            pts += 12
+        if (side == "LONG" and d["buyer_up"]) or (side == "SHORT" and d["seller_up"]):
+            pts += 10
+        if d["total_up"] and (
+            (side == "LONG" and cur["buy_dom"]) or (side == "SHORT" and cur["sell_dom"])
+        ):
+            pts += 8
+        if side == "LONG" and "seller_trap" in confirms:
+            pts += 6
+        if side == "SHORT" and "buyer_trap" in confirms:
+            pts += 6
+        return min(100, pts)
+
+    long_score = _score("LONG")
+    short_score = _score("SHORT")
+    best = max(long_score, short_score)
+
+    meta = dict(m5=m5, m1=m1, buy_p=buy_p, sell_p=sell_p, buy_v=buy_v, sell_v=sell_v)
+
+    if pressure_balanced:
+        return _no_trade(
+            "NO TRADE: Buyer Pressure and Seller Pressure are balanced",
+            timeframe_key, pair, confidence=best, **meta,
+        )
+    if volume_balanced:
+        return _no_trade(
+            "NO TRADE: Buy Volume and Sell Volume are balanced",
+            timeframe_key, pair, confidence=best, **meta,
+        )
+    if best < MIN_CONFIDENCE:
+        return _no_trade(
+            f"NO TRADE: overall signal confidence is low ({best}<{MIN_CONFIDENCE})",
+            timeframe_key, pair, confidence=best, **meta,
+        )
+
+    # Always pick stronger side (conflict OK — no WAIT)
+    if long_score > short_score:
+        pick = "LONG"
+    elif short_score > long_score:
+        pick = "SHORT"
+    elif m5 == "BULLISH":
+        pick = "LONG"
+    elif m5 == "BEARISH":
+        pick = "SHORT"
+    elif m1 == "BULLISH":
+        pick = "LONG"
+    elif m1 == "BEARISH":
+        pick = "SHORT"
+    elif cur["price_up"] or last["bull"]:
+        pick = "LONG"
+    else:
+        pick = "SHORT"
+
+    score = long_score if pick == "LONG" else short_score
+    confirms = long_c if pick == "LONG" else short_c
+    return _fire(
+        pick,
+        timeframe_key=timeframe_key,
+        pair=pair,
+        last=last,
+        score=score,
+        m5=m5,
+        m1=m1,
+        buy_p=buy_p,
+        sell_p=sell_p,
+        buy_v=buy_v,
+        sell_v=sell_v,
+        confirms=confirms,
+    )

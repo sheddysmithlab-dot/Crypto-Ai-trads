@@ -212,9 +212,9 @@ def brain_chat_summary(enriched: dict[str, Any]) -> str:
 def strategy_system_blurb() -> str:
     return (
         "AI AGENT — MASTER BRAIN:\n"
-        "1) 5M = dominant direction. 1M = entry timing only.\n"
-        "2) Sequence: 5M TREND → 1M SETUP → ACTIVITY → VOLUME → PRICE → SIGNAL → ENTRY.\n"
-        "3) Strong confirm = LONG/SHORT. Weak = NO TRADE. Conflict = WAIT.\n"
-        "4) Never trade every candle. Never one-condition entries. Capital first.\n"
-        "5) 15m+ Bible. Exit −0.5% / +0.5%. Manual + emergency work."
+        "1) Always LONG or SHORT unless exactly 3 NO TRADE reasons:\n"
+        "   (1) buyer/seller pressure balanced (2) buy/sell volume balanced (3) confidence low.\n"
+        "2) 5M = direction, 1M = timing. Conflict → stronger Price+Volume+Pressure side.\n"
+        "3) Never skip for sideways, weak candle, conflict, low volume, or uncertainty.\n"
+        "4) 15m+ Bible. Exit −0.5% / +0.5%. Manual + emergency work."
     )
