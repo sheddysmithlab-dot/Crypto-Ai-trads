@@ -215,5 +215,5 @@ def strategy_system_blurb() -> str:
         "2) Compare last 3–5 bars: price, buyer/seller activity, buy/sell/total volume, strength.\n"
         "3) Price+Volume first, buy/sell volume second, activity third. Traps/absorption flip side.\n"
         "4) 5M+1M aligned to trade; conflict = WAIT unless strong reversal. Confidence 0–100, min 60.\n"
-        "5) 15m/1h/1D BIBLE unchanged. Exit −0.5% / +0.5%. Manual + emergency still work."
+        "5) Exit unchanged: LONG & SHORT cut at −0.5% gross, book profit at +0.5% gross. Manual + emergency still work."
     )

@@ -17,6 +17,9 @@ MIN_5M_BARS = 16
 MIN_CONFIRMS = 3
 MIN_CONFIDENCE = 60  # 0–100; capital protection > frequency
 EPS = 0.02  # 2% relative increase counts as "up"
+# Same exit policy as main.py (LONG/SHORT identical).
+EXIT_LOSS_PCT = 0.5
+EXIT_PROFIT_PCT = 0.5
 
 BRAIN_MEMORY = (
     "Disciplined short-term engine: 5M sets dominant direction, 1M is entry timing only. "
@@ -389,12 +392,14 @@ def evaluate_scalp_entry(
     confirms = long_confirms if pick == "LONG" else short_confirms
     score = long_score if pick == "LONG" else short_score
     action = "BUY" if pick == "LONG" else "SELL"
-    pad = max(last["rng"] * 0.1, 1e-12)
+    entry = last["c"]
+    loss = EXIT_LOSS_PCT / 100.0
+    profit = EXIT_PROFIT_PCT / 100.0
     if pick == "LONG":
-        sl, tp = last["l"] - pad, last["c"] + abs(last["c"] - (last["l"] - pad))
+        sl, tp = entry * (1.0 - loss), entry * (1.0 + profit)
         pattern = "1m5m LONG confluence"
     else:
-        sl, tp = last["h"] + pad, last["c"] - abs((last["h"] + pad) - last["c"])
+        sl, tp = entry * (1.0 + loss), entry * (1.0 - profit)
         pattern = "1m5m SHORT confluence"
 
     return {
@@ -406,10 +411,10 @@ def evaluate_scalp_entry(
         "engine": ENGINE_NAME,
         "entry_pattern": ENTRY_PATTERN_NAME,
         "pattern": pattern,
-        "entry": last["c"],
+        "entry": entry,
         "sl": sl,
         "tp": tp,
-        "risk_reward": 1.0,
+        "risk_reward": EXIT_PROFIT_PCT / EXIT_LOSS_PCT,
         "confidence": score,
         "timeframe_key": timeframe_key,
         "pair": pair,
