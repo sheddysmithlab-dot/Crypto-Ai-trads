@@ -25,12 +25,12 @@ PIPELINE_STEPS: tuple[str, ...] = (
 )
 
 SCALP_PIPELINE: tuple[str, ...] = (
-    "5m_dominant_direction",
-    "1m_entry_timing",
-    "price_volume_first",
-    "buy_sell_volume",
-    "buyer_seller_activity",
-    "multi_confirm_confidence",
+    "5m_trend",
+    "1m_setup",
+    "buy_sell_activity",
+    "volume",
+    "price_confirmation",
+    "signal_entry",
 )
 
 
@@ -40,9 +40,8 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> dict[str, Any]:
             "name": SCALP_ENTRY_NAME,
             "engine": SCALP_ENGINE_NAME,
             "description": (
-                "1m/5m brain: 5M direction, 1M timing only. Price+volume first, "
-                "buy/sell volume second, activity third. Multi-confirm, confidence 0–100, "
-                "NO TRADE unless aligned. Exit ±0.5%."
+                "Master brain: 5M direction, 1M timing only. Read pressure/volume/price. "
+                "Strong confirm = trade. Weak = NO TRADE. Conflict = WAIT. Exit ±0.5%."
             ),
             "timeframes": ["1m", "5m"],
         }
@@ -202,6 +201,8 @@ def enrich_signal(result: dict[str, Any], *, max_ml_chars: int = 900) -> dict[st
 
 
 def brain_chat_summary(enriched: dict[str, Any]) -> str:
+    if enriched.get("output"):
+        return str(enriched["output"])
     action = enriched.get("action", "NO_TRADE")
     pattern = enriched.get("pattern") or "—"
     tag = "Scalp" if enriched.get("engine") == SCALP_ENGINE_NAME or enriched.get("scalp") else "Bible"
@@ -210,10 +211,10 @@ def brain_chat_summary(enriched: dict[str, Any]) -> str:
 
 def strategy_system_blurb() -> str:
     return (
-        "AI AGENT — SPLIT ENGINES:\n"
-        "1) 1m/5m BRAIN: 5M = direction, 1M = entry timing only. Never every candle.\n"
-        "2) Compare last 3–5 bars: price, buyer/seller activity, buy/sell/total volume, strength.\n"
-        "3) Price+Volume first, buy/sell volume second, activity third. Traps/absorption flip side.\n"
-        "4) 5M+1M aligned to trade; conflict = WAIT unless strong reversal. Confidence 0–100, min 60.\n"
-        "5) Exit unchanged: LONG & SHORT cut at −0.5% gross, book profit at +0.5% gross. Manual + emergency still work."
+        "AI AGENT — MASTER BRAIN:\n"
+        "1) 5M = dominant direction. 1M = entry timing only.\n"
+        "2) Sequence: 5M TREND → 1M SETUP → ACTIVITY → VOLUME → PRICE → SIGNAL → ENTRY.\n"
+        "3) Strong confirm = LONG/SHORT. Weak = NO TRADE. Conflict = WAIT.\n"
+        "4) Never trade every candle. Never one-condition entries. Capital first.\n"
+        "5) 15m+ Bible. Exit −0.5% / +0.5%. Manual + emergency work."
     )

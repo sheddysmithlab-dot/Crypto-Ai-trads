@@ -1948,7 +1948,7 @@ def get_bybit_executor_agent():
 def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
-        "1m/5m BRAIN (5M direction, 1M timing, multi-confirm) | 15m+ BIBLE | "
+        "1m/5m MASTER BRAIN (5M dir → 1M entry, multi-confirm) | 15m+ BIBLE | "
         f"auto exit −{FIXED_EXIT_LOSS_PCT:g}% / +{FIXED_EXIT_PROFIT_PCT:g}% (LONG+SHORT) | "
         "manual BUY/SELL + emergency sell-all"
     )
