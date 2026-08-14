@@ -63,7 +63,9 @@ from agent_brain import (
     brain_chat_summary,
     enrich_signal,
     entry_pattern_profile,
-    evaluate_bible_entry,
+    evaluate_live_entry,
+    htf_key_for,
+    is_scalp_timeframe,
     strategy_system_blurb,
 )
 
@@ -233,7 +235,7 @@ class SettingsStore:
             print(f"[SETTINGS] Z.ai AI loaded (model={self.ai_model}, provider={self.ai_provider}).")
         else:
             print("[SETTINGS] Z.ai is the default AI provider — set ZAI_API_KEY to enable.")
-        print(f"[SETTINGS] Entry engine: {ENTRY_PATTERN_NAME} (Candlestick Trading Bible).")
+        print("[SETTINGS] Entry engines: 1m/5m SCALP + 15m/1h/1D BIBLE.")
 
     def save(self, payload: SettingsPayload):
         # Only overwrite secret fields if the user actually typed a new value
@@ -1947,7 +1949,7 @@ def get_bybit_executor_agent():
 def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
-        f"{ENTRY_PATTERN_NAME} — traps + 10 patterns + structure | "
+        "1m/5m SCALP (sweep/engulf/pin/EMA) | 15m+ BIBLE | "
         f"auto exit −{FIXED_EXIT_LOSS_PCT:g}% / +{FIXED_EXIT_PROFIT_PCT:g}% (LONG+SHORT) | "
         "manual BUY/SELL + emergency sell-all"
     )
@@ -2057,15 +2059,15 @@ def compute_auto_trade_plan(
 
 
 def evaluate_entry(candles, timeframe_key: str, *, pair: str = "default", htf_candles=None):
-    """Candlestick Trading Bible entry (`backend/engine.py`)."""
+    """1m/5m scalp engine; 15m+ Bible engine."""
     balance = agent.get_available_capital() or agent.get_trading_capital_base() or 10000.0
     risk_pct = max(float(getattr(agent, "risk_level_pct", 1.0) or 1.0), 0.5) / 100.0
-    # Cap at 2% per Bible money-management rule.
     risk_pct = min(risk_pct, 0.02)
-    result = evaluate_bible_entry(
+    result = evaluate_live_entry(
         candles,
         timeframe_key,
         pair=pair,
+        htf_candles=htf_candles,
         account_balance=float(balance),
         risk_pct=risk_pct,
     )
@@ -2094,23 +2096,35 @@ async def fetch_closed_candle_history(
 
 
 async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
-    """Closed-candle Bible scan → open auto trade with SL/TP."""
+    """Closed-candle scan → open auto trade with ±0.5% SL/TP."""
     bybit_symbol = get_bybit_symbol(pair)
     if not bybit_symbol:
         return False
 
+    scalp = is_scalp_timeframe(timeframe_key)
+    lookback = max(MIN_CANDLES, 80) if scalp else max(MIN_CANDLES, 100)
     history = await fetch_closed_candle_history(
-        client, bybit_symbol, timeframe_key, limit=max(MIN_CANDLES, 100)
+        client, bybit_symbol, timeframe_key, limit=lookback
     )
-    if len(history) < 25:
+    min_bars = 30 if scalp else 25
+    if len(history) < min_bars:
         return False
+
+    htf_history = None
+    if scalp:
+        try:
+            htf_history = await fetch_closed_candle_history(
+                client, bybit_symbol, htf_key_for(timeframe_key), limit=80
+            )
+        except Exception as exc:
+            print(f"[SCALP] HTF fetch failed {pair}: {exc}")
 
     close_time = int(history[-1]["close_time"])
     if close_time <= LAST_CANDLE_TIMESTAMPS.get(pair, 0):
         return False
     LAST_CANDLE_TIMESTAMPS[pair] = close_time
 
-    detect = evaluate_entry(history, timeframe_key, pair=pair)
+    detect = evaluate_entry(history, timeframe_key, pair=pair, htf_candles=htf_history)
     system_log.set_last_uvss_scan(
         pair,
         timeframe_key,
@@ -2123,11 +2137,12 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         },
     )
 
+    engine_label = "Scalp1m5m" if scalp else "Bible"
     if detect.get("action") not in ("BUY", "SELL"):
         system_log.push_agent_chat(
-            f"Bible scan {pair} @ {timeframe_key}: {detect.get('reason', 'no setup')}",
+            f"{engine_label} scan {pair} @ {timeframe_key}: {detect.get('reason', 'no setup')}",
             status="scanning",
-            details={"pair": pair, "timeframe": timeframe_key},
+            details={"pair": pair, "timeframe": timeframe_key, "engine": detect.get("engine")},
         )
         return False
 
@@ -2136,7 +2151,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     plan = compute_auto_trade_plan(agent, price=mark_px, pair=pair)
     if plan is None:
         system_log.push_agent_chat(
-            f"Bible signal on {pair} but size plan failed",
+            f"{engine_label} signal on {pair} but size plan failed",
             status="no_match",
             details={"pair": pair, "detect": detect},
         )
@@ -2145,7 +2160,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     fixed_sl, fixed_tp = agent._fixed_exit_prices(float(mark_px), side)
     trade = agent.open_trade(
         side=side,
-        reason=detect.get("reason") or f"Bible {detect.get('pattern')}",
+        reason=detect.get("reason") or f"{engine_label} {detect.get('pattern')}",
         source="auto",
         position_size_usd=plan["position_usd"],
         qty=plan["qty"],
@@ -2187,15 +2202,15 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         }
     )
     print(
-        f"[BIBLE] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} "
+        f"[{engine_label.upper()}] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} "
         f"exit ±{FIXED_EXIT_PROFIT_PCT:g}% SL={trade.get('sl_price')} TP={trade.get('tp_price')}"
     )
     return True
 
 
 async def auto_buy_loop():
-    """Multi-pair Bible engine scanner on each new closed candle."""
-    print(f"[AUTO BUY LOOP] {ENTRY_PATTERN_NAME} multi-pair bible engine online.")
+    """Multi-pair scanner: 1m/5m scalp, 15m+ Bible."""
+    print("[AUTO BUY LOOP] split engines online — 1m/5m scalp, 15m+ bible.")
     async with httpx.AsyncClient(timeout=8.0) as client:
         while True:
             try:
@@ -2206,7 +2221,7 @@ async def auto_buy_loop():
                         try:
                             await scan_and_maybe_fire_pair(client, pair, timeframe_key)
                         except Exception as exc:
-                            print(f"[BIBLE] scan error {pair}: {exc}")
+                            print(f"[SCAN] error {pair}: {exc}")
                 await asyncio.sleep(poll)
             except Exception as exc:
                 print(f"[AUTO BUY LOOP] error: {exc}")
@@ -2363,21 +2378,26 @@ async def start_bot():
     agent.daily_target_reached = False  # fresh session -> clear any prior daily-target halt
     agent.begin_ai_season()  # season P&L + kill-switch baseline = portfolio value right now
     agent.is_active = True
-    print("[PILLAR 2: BACKEND] Received 'START' from Frontend — Candlestick Bible engine online.")
+    print("[PILLAR 2: BACKEND] Received 'START' — 1m/5m scalp, 15m+ Bible.")
     system_log.push(
         "ai",
         f"AI automation STARTED on {agent.active_pair} ({open_count} open position(s) preserved).",
         {"open_positions": open_count, "timeframe_seconds": agent.timeframe_seconds},
     )
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+    profile = entry_pattern_profile(tf_key)
+    engine_note = (
+        "1m/5m scalp: sweep-reclaim + engulf + pin + EMA9/21"
+        if is_scalp_timeframe(tf_key)
+        else "15m+ Bible: traps + 10 patterns + structure"
+    )
     system_log.push_agent_chat(
-        f"Bot active — {ENTRY_PATTERN_NAME} on {agent.active_pair} ({tf_key}): "
-        f"traps + 10 patterns + structure + 1:2 SL/TP.",
+        f"Bot active — {profile['name']} on {agent.active_pair} ({tf_key}): {engine_note}.",
         status="active",
         details={
             "pair": agent.active_pair,
             "timeframe": tf_key,
-            "entry_pattern": entry_pattern_profile(),
+            "entry_pattern": profile,
         },
     )
     if open_count:
@@ -2389,11 +2409,11 @@ async def start_bot():
         notifications.push(f"AI Agent STARTED - now monitoring {agent.active_pair} live.", "success")
     return {
         "status": "success",
-        "entry_pattern": ENTRY_PATTERN_NAME,
-        "entry_pattern_profile": entry_pattern_profile(),
+        "entry_pattern": profile["name"],
+        "entry_pattern_profile": profile,
         "message": (
-            f"Bot active — {ENTRY_PATTERN_NAME}: traps + 10 patterns + structure. "
-            f"Auto exit −{FIXED_EXIT_LOSS_PCT:g}% loss / +{FIXED_EXIT_PROFIT_PCT:g}% profit (LONG & SHORT)."
+            f"Bot active — {profile['name']} ({tf_key}). {engine_note}. "
+            f"Auto exit −{FIXED_EXIT_LOSS_PCT:g}% / +{FIXED_EXIT_PROFIT_PCT:g}% (LONG & SHORT)."
         ),
         "open_positions": open_count,
         "trade_history_count": len(agent.trade_history),
@@ -2697,14 +2717,17 @@ async def get_agent_config():
         "daily_profit_pct": agent.daily_profit_target_pct,
         "max_concurrent_trades": agent.max_concurrent_trades,
         "entry_pattern": ENTRY_PATTERN_NAME,
-        "entry_pattern_profile": entry_pattern_profile(),
+        "entry_pattern_profile": entry_pattern_profile(
+            SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+        ),
     }
 
 
 @app.get("/entry-pattern")
 async def get_entry_pattern():
-    """Active entry profile (Candlestick Trading Bible)."""
-    return {"status": "success", **entry_pattern_profile()}
+    """Active entry profile for the current chart timeframe."""
+    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+    return {"status": "success", "timeframe": tf_key, **entry_pattern_profile(tf_key)}
 
 
 # ==========================================

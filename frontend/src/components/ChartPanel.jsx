@@ -61,7 +61,11 @@ export default function ChartPanel({
           {botIsActive && readouts.blueBoxStatus ? (
             <div
               className="flex items-center gap-1.5 px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-[10px] font-bold uppercase tracking-wide text-cyan-300"
-              title="Candlestick Trading Bible — traps + 10 patterns + structure"
+              title={
+                timeframe === '1M' || timeframe === '5M'
+                  ? '1m/5m scalp — sweep, engulf, pin, EMA9/21'
+                  : 'Bible engine — traps + 10 patterns (15m+)'
+              }
             >
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
               {readouts.blueBoxStatus}

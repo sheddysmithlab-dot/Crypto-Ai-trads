@@ -1,4 +1,4 @@
-"""Agent brain — Candlestick Trading Bible engine (`engine.py`)."""
+"""Agent brain — routes 1m/5m scalp vs Bible (15m+)."""
 from __future__ import annotations
 
 from typing import Any
@@ -6,6 +6,13 @@ from typing import Any
 import pandas as pd
 
 from engine import CandlestickTradingBibleEngine, TradeSignal
+from scalp_1m5m import (
+    ENTRY_PATTERN_NAME as SCALP_ENTRY_NAME,
+    ENGINE_NAME as SCALP_ENGINE_NAME,
+    evaluate_scalp_entry,
+    htf_key_for,
+    is_scalp_timeframe,
+)
 
 ENTRY_PATTERN_NAME = "CANDLESTICK_BIBLE_V1"
 ENGINE_NAME = "candlestick_bible"
@@ -17,14 +24,33 @@ PIPELINE_STEPS: tuple[str, ...] = (
     "risk_1to2",
 )
 
+SCALP_PIPELINE: tuple[str, ...] = (
+    "liquidity_sweep_reclaim",
+    "fast_engulf",
+    "pin_bar_50pct",
+    "ema9_21_momentum",
+)
 
-def entry_pattern_profile() -> dict[str, Any]:
+
+def entry_pattern_profile(timeframe_key: str | None = None) -> dict[str, Any]:
+    if is_scalp_timeframe(timeframe_key):
+        return {
+            "name": SCALP_ENTRY_NAME,
+            "engine": SCALP_ENGINE_NAME,
+            "description": (
+                "1m/5m scalp: sweep-reclaim traps → engulf → pin bar → EMA9/21 momentum. "
+                "HTF bias filter. Exit ±0.5%."
+            ),
+            "timeframes": ["1m", "5m"],
+        }
     return {
         "name": ENTRY_PATTERN_NAME,
         "engine": ENGINE_NAME,
         "description": (
-            "Candlestick Trading Bible: traps → 10 patterns → structure/phase → 1:2 R:R SL/TP."
+            "Candlestick Trading Bible on 15m/1h/1D: traps → 10 patterns → structure. "
+            "Exit ±0.5%."
         ),
+        "timeframes": ["15m", "1h", "1D"],
     }
 
 
@@ -124,11 +150,38 @@ def evaluate_bible_entry(
     return _signal_to_dict(sig, timeframe_key=timeframe_key, pair=pair)
 
 
+def evaluate_live_entry(
+    candles: list[dict],
+    timeframe_key: str,
+    *,
+    pair: str = "default",
+    htf_candles: list[dict] | None = None,
+    account_balance: float = 10000.0,
+    risk_pct: float = 0.01,
+) -> dict[str, Any]:
+    """1m/5m → scalp engine; 15m+ → Bible engine."""
+    if is_scalp_timeframe(timeframe_key):
+        return evaluate_scalp_entry(
+            candles,
+            timeframe_key,
+            pair=pair,
+            htf_candles=htf_candles,
+        )
+    return evaluate_bible_entry(
+        candles,
+        timeframe_key,
+        pair=pair,
+        account_balance=account_balance,
+        risk_pct=risk_pct,
+    )
+
+
 def enrich_signal(result: dict[str, Any], *, max_ml_chars: int = 900) -> dict[str, Any]:
     out = dict(result)
+    scalp = bool(result.get("scalp") or result.get("engine") == SCALP_ENGINE_NAME)
     out["brain"] = {
-        "pipeline": list(PIPELINE_STEPS),
-        "entry_pattern": ENTRY_PATTERN_NAME,
+        "pipeline": list(SCALP_PIPELINE if scalp else PIPELINE_STEPS),
+        "entry_pattern": result.get("entry_pattern") or ENTRY_PATTERN_NAME,
         "pattern_label": result.get("pattern"),
         "confidence": result.get("confidence"),
         "risk_reward": result.get("risk_reward"),
@@ -136,7 +189,7 @@ def enrich_signal(result: dict[str, Any], *, max_ml_chars: int = 900) -> dict[st
         "psychology": result.get("psychology"),
         "market_structure": result.get("market_structure"),
         "market_phase": result.get("market_phase"),
-        "scalp": False,
+        "scalp": scalp,
     }
     return out
 
@@ -144,16 +197,16 @@ def enrich_signal(result: dict[str, Any], *, max_ml_chars: int = 900) -> dict[st
 def brain_chat_summary(enriched: dict[str, Any]) -> str:
     action = enriched.get("action", "NO_TRADE")
     pattern = enriched.get("pattern") or "—"
-    return f"Bible {action}: {pattern} — {enriched.get('reason', '')}"
+    tag = "Scalp" if enriched.get("engine") == SCALP_ENGINE_NAME or enriched.get("scalp") else "Bible"
+    return f"{tag} {action}: {pattern} — {enriched.get('reason', '')}"
 
 
 def strategy_system_blurb() -> str:
     return (
-        "AI AGENT — CANDLESTICK TRADING BIBLE:\n"
-        "1) Priority: smart-money traps (deviate & reclaim).\n"
-        "2) Then strict 10-pattern bible recognition (shadow math, no color bias).\n"
-        "3) Market structure filter (HH/HL, impulsive vs retracement, choppy = no trade).\n"
+        "AI AGENT — SPLIT ENGINES:\n"
+        "1) 1m/5m SCALP: liquidity sweep-reclaim, fast engulf, pin bar, EMA9/21 momentum.\n"
+        "2) 15m/1h/1D BIBLE: traps + 10 candlestick patterns + structure.\n"
+        "3) HTF bias on scalp (1m uses 5m, 5m uses 15m) — no counter-trend fires.\n"
         "4) Exit policy (LONG & SHORT same): cut at −0.5% gross, book profit at +0.5% gross.\n"
-        "5) Entry gates at 50% pattern confirmation: traps + 10 patterns + EMA20 momentum fallback.\n"
-        "6) Manual BUY/SELL + emergency sell-all still work."
+        "5) Pattern confirmation 50%. Manual BUY/SELL + emergency sell-all still work."
     )
