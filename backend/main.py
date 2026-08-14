@@ -64,7 +64,6 @@ from agent_brain import (
     enrich_signal,
     entry_pattern_profile,
     evaluate_live_entry,
-    htf_key_for,
     is_scalp_timeframe,
     strategy_system_blurb,
 )
@@ -1949,7 +1948,7 @@ def get_bybit_executor_agent():
 def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
-        "1m/5m SCALP (sweep/engulf/pin/EMA) | 15m+ BIBLE | "
+        "1m/5m BRAIN (5M direction, 1M timing, multi-confirm) | 15m+ BIBLE | "
         f"auto exit −{FIXED_EXIT_LOSS_PCT:g}% / +{FIXED_EXIT_PROFIT_PCT:g}% (LONG+SHORT) | "
         "manual BUY/SELL + emergency sell-all"
     )
@@ -2058,8 +2057,16 @@ def compute_auto_trade_plan(
     }
 
 
-def evaluate_entry(candles, timeframe_key: str, *, pair: str = "default", htf_candles=None):
-    """1m/5m scalp engine; 15m+ Bible engine."""
+def evaluate_entry(
+    candles,
+    timeframe_key: str,
+    *,
+    pair: str = "default",
+    htf_candles=None,
+    candles_1m=None,
+    candles_5m=None,
+):
+    """1m/5m scalp brain; 15m+ Bible engine."""
     balance = agent.get_available_capital() or agent.get_trading_capital_base() or 10000.0
     risk_pct = max(float(getattr(agent, "risk_level_pct", 1.0) or 1.0), 0.5) / 100.0
     risk_pct = min(risk_pct, 0.02)
@@ -2068,6 +2075,8 @@ def evaluate_entry(candles, timeframe_key: str, *, pair: str = "default", htf_ca
         timeframe_key,
         pair=pair,
         htf_candles=htf_candles,
+        candles_1m=candles_1m,
+        candles_5m=candles_5m or htf_candles,
         account_balance=float(balance),
         risk_pct=risk_pct,
     )
@@ -2102,29 +2111,36 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return False
 
     scalp = is_scalp_timeframe(timeframe_key)
-    lookback = max(MIN_CANDLES, 80) if scalp else max(MIN_CANDLES, 100)
-    history = await fetch_closed_candle_history(
-        client, bybit_symbol, timeframe_key, limit=lookback
-    )
-    min_bars = 30 if scalp else 25
-    if len(history) < min_bars:
-        return False
-
-    htf_history = None
     if scalp:
-        try:
-            htf_history = await fetch_closed_candle_history(
-                client, bybit_symbol, htf_key_for(timeframe_key), limit=80
-            )
-        except Exception as exc:
-            print(f"[SCALP] HTF fetch failed {pair}: {exc}")
-
-    close_time = int(history[-1]["close_time"])
-    if close_time <= LAST_CANDLE_TIMESTAMPS.get(pair, 0):
-        return False
-    LAST_CANDLE_TIMESTAMPS[pair] = close_time
-
-    detect = evaluate_entry(history, timeframe_key, pair=pair, htf_candles=htf_history)
+        candles_1m = await fetch_closed_candle_history(client, bybit_symbol, "1m", limit=80)
+        candles_5m = await fetch_closed_candle_history(client, bybit_symbol, "5m", limit=80)
+        if len(candles_1m) < 20 or len(candles_5m) < 16:
+            return False
+        history = candles_1m
+        close_time = int(history[-1]["close_time"])
+        if close_time <= LAST_CANDLE_TIMESTAMPS.get(pair, 0):
+            return False
+        LAST_CANDLE_TIMESTAMPS[pair] = close_time
+        detect = evaluate_entry(
+            history,
+            timeframe_key,
+            pair=pair,
+            htf_candles=candles_5m,
+            candles_1m=candles_1m,
+            candles_5m=candles_5m,
+        )
+    else:
+        lookback = max(MIN_CANDLES, 100)
+        history = await fetch_closed_candle_history(
+            client, bybit_symbol, timeframe_key, limit=lookback
+        )
+        if len(history) < 25:
+            return False
+        close_time = int(history[-1]["close_time"])
+        if close_time <= LAST_CANDLE_TIMESTAMPS.get(pair, 0):
+            return False
+        LAST_CANDLE_TIMESTAMPS[pair] = close_time
+        detect = evaluate_entry(history, timeframe_key, pair=pair)
     system_log.set_last_uvss_scan(
         pair,
         timeframe_key,
@@ -2215,7 +2231,7 @@ async def auto_buy_loop():
         while True:
             try:
                 timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
-                poll = 0.5 if timeframe_key in ("1m", "30s") else 1.0
+                poll = 0.5 if (timeframe_key in ("1m", "30s") or is_scalp_timeframe(timeframe_key)) else 1.0
                 if agent.is_active and not agent.emergency_triggered:
                     for pair in agent.get_scan_pairs():
                         try:
@@ -2378,7 +2394,7 @@ async def start_bot():
     agent.daily_target_reached = False  # fresh session -> clear any prior daily-target halt
     agent.begin_ai_season()  # season P&L + kill-switch baseline = portfolio value right now
     agent.is_active = True
-    print("[PILLAR 2: BACKEND] Received 'START' — 1m/5m scalp, 15m+ Bible.")
+    print("[PILLAR 2: BACKEND] Received 'START' — 1m/5m brain (5M dir / 1M timing), 15m+ Bible.")
     system_log.push(
         "ai",
         f"AI automation STARTED on {agent.active_pair} ({open_count} open position(s) preserved).",
@@ -2387,7 +2403,7 @@ async def start_bot():
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     profile = entry_pattern_profile(tf_key)
     engine_note = (
-        "1m/5m scalp: sweep-reclaim + engulf + pin + EMA9/21"
+        "1m/5m brain: 5M direction + 1M timing, multi-confirm, conf 60+"
         if is_scalp_timeframe(tf_key)
         else "15m+ Bible: traps + 10 patterns + structure"
     )

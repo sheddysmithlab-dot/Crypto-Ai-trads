@@ -63,7 +63,7 @@ export default function ChartPanel({
               className="flex items-center gap-1.5 px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-[10px] font-bold uppercase tracking-wide text-cyan-300"
               title={
                 timeframe === '1M' || timeframe === '5M'
-                  ? '1m/5m scalp — sweep, engulf, pin, EMA9/21'
+                  ? '1m/5m brain — 5M direction, 1M timing, multi-confirm'
                   : 'Bible engine — traps + 10 patterns (15m+)'
               }
             >

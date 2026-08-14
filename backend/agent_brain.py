@@ -25,10 +25,12 @@ PIPELINE_STEPS: tuple[str, ...] = (
 )
 
 SCALP_PIPELINE: tuple[str, ...] = (
-    "liquidity_sweep_reclaim",
-    "fast_engulf",
-    "pin_bar_50pct",
-    "ema9_21_momentum",
+    "5m_dominant_direction",
+    "1m_entry_timing",
+    "price_volume_first",
+    "buy_sell_volume",
+    "buyer_seller_activity",
+    "multi_confirm_confidence",
 )
 
 
@@ -38,8 +40,9 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> dict[str, Any]:
             "name": SCALP_ENTRY_NAME,
             "engine": SCALP_ENGINE_NAME,
             "description": (
-                "1m/5m scalp: sweep-reclaim traps → engulf → pin bar → EMA9/21 momentum. "
-                "HTF bias filter. Exit ±0.5%."
+                "1m/5m brain: 5M direction, 1M timing only. Price+volume first, "
+                "buy/sell volume second, activity third. Multi-confirm, confidence 0–100, "
+                "NO TRADE unless aligned. Exit ±0.5%."
             ),
             "timeframes": ["1m", "5m"],
         }
@@ -156,16 +159,20 @@ def evaluate_live_entry(
     *,
     pair: str = "default",
     htf_candles: list[dict] | None = None,
+    candles_1m: list[dict] | None = None,
+    candles_5m: list[dict] | None = None,
     account_balance: float = 10000.0,
     risk_pct: float = 0.01,
 ) -> dict[str, Any]:
-    """1m/5m → scalp engine; 15m+ → Bible engine."""
+    """1m/5m → scalp brain (5M direction / 1M timing); 15m+ → Bible engine."""
     if is_scalp_timeframe(timeframe_key):
         return evaluate_scalp_entry(
             candles,
             timeframe_key,
             pair=pair,
             htf_candles=htf_candles,
+            candles_1m=candles_1m,
+            candles_5m=candles_5m or htf_candles,
         )
     return evaluate_bible_entry(
         candles,
@@ -204,9 +211,9 @@ def brain_chat_summary(enriched: dict[str, Any]) -> str:
 def strategy_system_blurb() -> str:
     return (
         "AI AGENT — SPLIT ENGINES:\n"
-        "1) 1m/5m SCALP: liquidity sweep-reclaim, fast engulf, pin bar, EMA9/21 momentum.\n"
-        "2) 15m/1h/1D BIBLE: traps + 10 candlestick patterns + structure.\n"
-        "3) HTF bias on scalp (1m uses 5m, 5m uses 15m) — no counter-trend fires.\n"
-        "4) Exit policy (LONG & SHORT same): cut at −0.5% gross, book profit at +0.5% gross.\n"
-        "5) Pattern confirmation 50%. Manual BUY/SELL + emergency sell-all still work."
+        "1) 1m/5m BRAIN: 5M = direction, 1M = entry timing only. Never every candle.\n"
+        "2) Compare last 3–5 bars: price, buyer/seller activity, buy/sell/total volume, strength.\n"
+        "3) Price+Volume first, buy/sell volume second, activity third. Traps/absorption flip side.\n"
+        "4) 5M+1M aligned to trade; conflict = WAIT unless strong reversal. Confidence 0–100, min 60.\n"
+        "5) 15m/1h/1D BIBLE unchanged. Exit −0.5% / +0.5%. Manual + emergency still work."
     )
