@@ -67,6 +67,7 @@ from agent_brain import (
     is_scalp_timeframe,
     strategy_system_blurb,
 )
+from brain_adapter import evaluate_live_entry_async as _brain_evaluate_async
 
 from pathlib import Path
 
@@ -2166,23 +2167,23 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         except Exception:
             htf_candles = None
 
-    # brain.py is CPU-bound — run off the event loop.
+    # AI-driven brain: brain.py analyses → AI API decides BUY/SELL/HOLD.
     balance = agent.get_available_capital() or agent.get_trading_capital_base() or 10000.0
     risk_pct = max(float(getattr(agent, "risk_level_pct", 1.0) or 1.0), 0.5) / 100.0
     risk_pct = min(risk_pct, 0.02)
 
     try:
-        detect = await asyncio.to_thread(
-            evaluate_live_entry,
+        detect = await _brain_evaluate_async(
             history,
             timeframe_key,
             pair=pair,
             htf_candles=htf_candles,
             account_balance=float(balance),
             risk_pct=risk_pct,
+            settings=settings_store,
         )
     except Exception as exc:
-        print(f"[BRAIN] evaluate error on {pair}: {exc}")
+        print(f"[AI-BRAIN] evaluate error on {pair}: {exc}")
         return False
 
     if detect.get("action") in ("BUY", "SELL"):
@@ -2202,9 +2203,10 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
     if detect.get("action") not in ("BUY", "SELL"):
         system_log.push_agent_chat(
-            f"Brain scan {pair} @ {timeframe_key}: {detect.get('reason', 'HOLD')}",
+            f"AI-Brain scan {pair} @ {timeframe_key}: {detect.get('reason', 'HOLD')}",
             status="scanning",
-            details={"pair": pair, "timeframe": timeframe_key, "engine": detect.get("engine")},
+            details={"pair": pair, "timeframe": timeframe_key, "engine": detect.get("engine"),
+                     "ai_driven": detect.get("ai_driven"), "brain_verdict": detect.get("brain_verdict")},
         )
         return False
 
