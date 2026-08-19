@@ -322,14 +322,24 @@ async def consult_ai_provider(context):
     else:
         headers["Authorization"] = f"Bearer {settings_store.ai_api_key}"
 
+    pair = str(context.get("pair") or "unknown")
+    timeframe = str(context.get("timeframe") or "unknown")
+    action = str(context.get("action") or "BUY").upper()
+    reason = str(context.get("reason") or "no-reason")
+    confidence = context.get("confidence")
+    current_price = context.get("current_price")
+    candle_volume = context.get("candle_volume")
+    prev_candle_volume = context.get("prev_candle_volume")
+    candle_height = context.get("candle_height")
+    prev_candle_height = context.get("prev_candle_height")
+
     prompt = (
         "You are a risk-confirmation layer for an algorithmic crypto trading bot. "
-        f"A rule-based volume-anomaly signal just fired on {context['pair']} "
-        f"[Condition {context['condition']}]: current candle volume {context['candle_volume']:.1f} "
-        f"vs previous candle {context['prev_candle_volume']:.1f} (2x+ trigger), candle height "
-        f"{context['candle_height']:.2f} vs previous {context['prev_candle_height']:.2f}, "
-        f"current price {context['current_price']:.2f}. "
-        "Reply with ONLY the single word YES to confirm this BUY signal, or NO to reject it."
+        f"A strategy signal fired on {pair} ({timeframe}). Proposed action: {action}. "
+        f"Reason: {reason}. Confidence: {confidence}. Current price: {current_price}. "
+        f"Candle volume: {candle_volume}, previous candle volume: {prev_candle_volume}, "
+        f"candle height: {candle_height}, previous candle height: {prev_candle_height}. "
+        f"Reply with ONLY the single word YES to confirm this {action} signal, or NO to reject it."
     )
 
     messages = []
@@ -1554,26 +1564,53 @@ class AITradingAgent:
         )
 
     def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
-        """Exit auto trade at -0.5% loss or +0.5% profit (gross vs entry). Same for LONG/SHORT."""
+        """Exit an auto trade when brain-driven SL/TP is hit, or fall back to fixed %.
+
+        Priority:
+          1. Brain-derived sl_price / tp_price stored on the trade at open.
+          2. Fixed FIXED_EXIT_LOSS_PCT / FIXED_EXIT_PROFIT_PCT as safety net.
+        """
         entry = float(trade.get("entry") or 0)
         if entry <= 0:
             return None
         side = trade.get("side")
+        if side not in ("LONG", "SHORT"):
+            return None
+
+        sl_price = trade.get("sl_price")
+        tp_price = trade.get("tp_price")
+
+        # Brain-driven exit (preferred).
+        if sl_price and tp_price:
+            sl = float(sl_price)
+            tp = float(tp_price)
+            if sl > 0 and tp > 0:
+                if side == "LONG":
+                    if mark <= sl:
+                        return f"Brain SL hit: LONG mark {mark:.6f} <= sl {sl:.6f}"
+                    if mark >= tp:
+                        return f"Brain TP hit: LONG mark {mark:.6f} >= tp {tp:.6f}"
+                elif side == "SHORT":
+                    if mark >= sl:
+                        return f"Brain SL hit: SHORT mark {mark:.6f} >= sl {sl:.6f}"
+                    if mark <= tp:
+                        return f"Brain TP hit: SHORT mark {mark:.6f} <= tp {tp:.6f}"
+                return None   # SL/TP not reached yet
+
+        # Fallback: fixed percentage exit.
         if side == "LONG":
             gross_pct = ((mark - entry) / entry) * 100.0
-        elif side == "SHORT":
-            gross_pct = ((entry - mark) / entry) * 100.0
         else:
-            return None
+            gross_pct = ((entry - mark) / entry) * 100.0
 
         if gross_pct <= -FIXED_EXIT_LOSS_PCT:
             return (
-                f"Loss exit −{FIXED_EXIT_LOSS_PCT:g}%: {side} gross {gross_pct:.3f}% "
+                f"Fixed loss exit −{FIXED_EXIT_LOSS_PCT:g}%: {side} gross {gross_pct:.3f}% "
                 f"(mark {mark:.6f} vs entry {entry:.6f})"
             )
         if gross_pct >= FIXED_EXIT_PROFIT_PCT:
             return (
-                f"Profit book +{FIXED_EXIT_PROFIT_PCT:g}%: {side} gross {gross_pct:.3f}% "
+                f"Fixed profit book +{FIXED_EXIT_PROFIT_PCT:g}%: {side} gross {gross_pct:.3f}% "
                 f"(mark {mark:.6f} vs entry {entry:.6f})"
             )
         return None
@@ -1948,8 +1985,8 @@ def get_bybit_executor_agent():
 def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
-        "1m/5m MASTER BRAIN (5M dir → 1M entry, multi-confirm) | 15m+ BIBLE | "
-        f"auto exit −{FIXED_EXIT_LOSS_PCT:g}% / +{FIXED_EXIT_PROFIT_PCT:g}% (LONG+SHORT) | "
+        "CANDLESTICK BRAIN v2 | patterns + market structure + trap & reverse (10th-man) + ML bias | "
+        "brain-driven SL/TP (fallback ±fixed%) | "
         "manual BUY/SELL + emergency sell-all"
     )
 
@@ -2066,7 +2103,7 @@ def evaluate_entry(
     candles_1m=None,
     candles_5m=None,
 ):
-    """1m/5m scalp brain; 15m+ Bible engine."""
+    """brain.py unified engine — covers all timeframes (1m through 1d)."""
     balance = agent.get_available_capital() or agent.get_trading_capital_base() or 10000.0
     risk_pct = max(float(getattr(agent, "risk_level_pct", 1.0) or 1.0), 0.5) / 100.0
     risk_pct = min(risk_pct, 0.02)
@@ -2074,9 +2111,7 @@ def evaluate_entry(
         candles,
         timeframe_key,
         pair=pair,
-        htf_candles=htf_candles,
-        candles_1m=candles_1m,
-        candles_5m=candles_5m or htf_candles,
+        htf_candles=htf_candles or candles_5m,
         account_balance=float(balance),
         risk_pct=risk_pct,
     )
@@ -2105,42 +2140,54 @@ async def fetch_closed_candle_history(
 
 
 async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
-    """Closed-candle scan → open auto trade with ±0.5% SL/TP."""
+    """Closed-candle scan → open auto trade with brain.py-driven SL/TP."""
     bybit_symbol = get_bybit_symbol(pair)
     if not bybit_symbol:
         return False
 
-    scalp = is_scalp_timeframe(timeframe_key)
-    if scalp:
-        candles_1m = await fetch_closed_candle_history(client, bybit_symbol, "1m", limit=80)
-        candles_5m = await fetch_closed_candle_history(client, bybit_symbol, "5m", limit=80)
-        if len(candles_1m) < 20 or len(candles_5m) < 16:
-            return False
-        history = candles_1m
-        close_time = int(history[-1]["close_time"])
-        if close_time <= LAST_CANDLE_TIMESTAMPS.get(pair, 0):
-            return False
-        LAST_CANDLE_TIMESTAMPS[pair] = close_time
-        detect = evaluate_entry(
+    # Always fetch primary TF candles plus one higher TF for top-down alignment.
+    lookback = max(MIN_CANDLES, 100)
+    history = await fetch_closed_candle_history(client, bybit_symbol, timeframe_key, limit=lookback)
+    if len(history) < MIN_CANDLES:
+        return False
+
+    close_time = int(history[-1]["close_time"])
+    if close_time <= LAST_CANDLE_TIMESTAMPS.get(pair, 0):
+        return False
+    LAST_CANDLE_TIMESTAMPS[pair] = close_time
+
+    # Determine a higher-TF series for brain top-down alignment.
+    _HTF_MAP = {"1m": "5m", "5m": "15m", "15m": "1h", "1h": "1D", "30s": "5m"}
+    htf_key = _HTF_MAP.get(timeframe_key.lower())
+    htf_candles = None
+    if htf_key:
+        try:
+            htf_candles = await fetch_closed_candle_history(client, bybit_symbol, htf_key, limit=60)
+        except Exception:
+            htf_candles = None
+
+    # brain.py is CPU-bound — run off the event loop.
+    balance = agent.get_available_capital() or agent.get_trading_capital_base() or 10000.0
+    risk_pct = max(float(getattr(agent, "risk_level_pct", 1.0) or 1.0), 0.5) / 100.0
+    risk_pct = min(risk_pct, 0.02)
+
+    try:
+        detect = await asyncio.to_thread(
+            evaluate_live_entry,
             history,
             timeframe_key,
             pair=pair,
-            htf_candles=candles_5m,
-            candles_1m=candles_1m,
-            candles_5m=candles_5m,
+            htf_candles=htf_candles,
+            account_balance=float(balance),
+            risk_pct=risk_pct,
         )
-    else:
-        lookback = max(MIN_CANDLES, 100)
-        history = await fetch_closed_candle_history(
-            client, bybit_symbol, timeframe_key, limit=lookback
-        )
-        if len(history) < 25:
-            return False
-        close_time = int(history[-1]["close_time"])
-        if close_time <= LAST_CANDLE_TIMESTAMPS.get(pair, 0):
-            return False
-        LAST_CANDLE_TIMESTAMPS[pair] = close_time
-        detect = evaluate_entry(history, timeframe_key, pair=pair)
+    except Exception as exc:
+        print(f"[BRAIN] evaluate error on {pair}: {exc}")
+        return False
+
+    if detect.get("action") in ("BUY", "SELL"):
+        detect = enrich_signal(detect)
+
     system_log.set_last_uvss_scan(
         pair,
         timeframe_key,
@@ -2153,30 +2200,69 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         },
     )
 
-    engine_label = "Scalp1m5m" if scalp else "Bible"
     if detect.get("action") not in ("BUY", "SELL"):
         system_log.push_agent_chat(
-            f"{engine_label} scan {pair} @ {timeframe_key}: {detect.get('reason', 'no setup')}",
+            f"Brain scan {pair} @ {timeframe_key}: {detect.get('reason', 'HOLD')}",
             status="scanning",
             details={"pair": pair, "timeframe": timeframe_key, "engine": detect.get("engine")},
         )
         return False
+
+    # AI provider consulted for observability — never blocks execution.
+    ai_decision = None
+    try:
+        ai_decision = await consult_ai_provider(
+            {
+                "pair": pair,
+                "timeframe": timeframe_key,
+                "action": detect.get("action"),
+                "reason": detect.get("reason"),
+                "confidence": detect.get("confidence"),
+                "current_price": history[-1].get("close"),
+                "candle_volume": history[-1].get("volume"),
+                "prev_candle_volume": history[-2].get("volume") if len(history) >= 2 else None,
+                "candle_height": history[-1].get("high", 0) - history[-1].get("low", 0),
+                "prev_candle_height": (
+                    history[-2].get("high", 0) - history[-2].get("low", 0)
+                    if len(history) >= 2 else None
+                ),
+            }
+        )
+    except Exception as exc:
+        print(f"[AI AGENT] consult_ai_provider error on {pair}: {exc}")
+
+    ai_note = "YES" if ai_decision is True else "NO" if ai_decision is False else "SKIP"
+    detect = dict(detect)
+    detect["ai_confirmation"] = ai_note
+    if ai_note != "SKIP":
+        detect["reason"] = f"{detect.get('reason', '')} | AI={ai_note}"
 
     mark_px = agent.mark_price_for(pair) or float(detect.get("entry") or history[-1]["close"])
     side = "LONG" if detect["action"] == "BUY" else "SHORT"
     plan = compute_auto_trade_plan(agent, price=mark_px, pair=pair)
     if plan is None:
         system_log.push_agent_chat(
-            f"{engine_label} signal on {pair} but size plan failed",
+            f"Brain signal on {pair} but size plan failed",
             status="no_match",
             details={"pair": pair, "detect": detect},
         )
         return False
 
-    fixed_sl, fixed_tp = agent._fixed_exit_prices(float(mark_px), side)
+    # Use brain-driven SL/TP when available; fall back to fixed %.
+    brain_sl = detect.get("sl")
+    brain_tp = detect.get("tp")
+    if brain_sl and brain_tp and float(brain_sl) > 0 and float(brain_tp) > 0:
+        sl_price = round(float(brain_sl), price_decimals_for_mark(mark_px))
+        tp_price = round(float(brain_tp), price_decimals_for_mark(mark_px))
+        exit_label = f"brain SL={sl_price} TP={tp_price}"
+    else:
+        sl_price, tp_price = agent._fixed_exit_prices(float(mark_px), side)
+        exit_label = f"fixed ±{FIXED_EXIT_PROFIT_PCT:g}% SL={sl_price} TP={tp_price}"
+
+    rr = detect.get("risk_reward") or (FIXED_EXIT_PROFIT_PCT / FIXED_EXIT_LOSS_PCT)
     trade = agent.open_trade(
         side=side,
-        reason=detect.get("reason") or f"{engine_label} {detect.get('pattern')}",
+        reason=detect.get("reason") or f"Brain {detect.get('pattern')}",
         source="auto",
         position_size_usd=plan["position_usd"],
         qty=plan["qty"],
@@ -2185,9 +2271,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         pattern=detect.get("pattern"),
         signal_candle_time=close_time,
         taapi_action=detect["action"],
-        sl_price=fixed_sl,
-        tp_price=fixed_tp,
-        target_mult=FIXED_EXIT_PROFIT_PCT / FIXED_EXIT_LOSS_PCT,
+        sl_price=sl_price,
+        tp_price=tp_price,
+        target_mult=float(rr),
         pair=pair,
         timeframe_key=timeframe_key,
     )
@@ -2202,7 +2288,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             "trade_id": trade.get("id"),
             "sl": trade.get("sl_price"),
             "tp": trade.get("tp_price"),
-            "exit": f"±{FIXED_EXIT_PROFIT_PCT:g}%",
+            "exit": exit_label,
         },
     )
     system_log.set_last_trade_fire(
@@ -2217,21 +2303,18 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             "tp": trade.get("tp_price"),
         }
     )
-    print(
-        f"[{engine_label.upper()}] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} "
-        f"exit ±{FIXED_EXIT_PROFIT_PCT:g}% SL={trade.get('sl_price')} TP={trade.get('tp_price')}"
-    )
+    print(f"[BRAIN] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} {exit_label}")
     return True
 
 
 async def auto_buy_loop():
-    """Multi-pair scanner: 1m/5m scalp, 15m+ Bible."""
-    print("[AUTO BUY LOOP] split engines online — 1m/5m scalp, 15m+ bible.")
+    """Multi-pair scanner powered by brain.py (all timeframes unified)."""
+    print("[AUTO BUY LOOP] brain.py unified engine online.")
     async with httpx.AsyncClient(timeout=8.0) as client:
         while True:
             try:
                 timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
-                poll = 0.5 if (timeframe_key in ("1m", "30s") or is_scalp_timeframe(timeframe_key)) else 1.0
+                poll = 0.5 if timeframe_key in ("1m", "30s") else 1.0
                 if agent.is_active and not agent.emergency_triggered:
                     for pair in agent.get_scan_pairs():
                         try:
@@ -2394,7 +2477,7 @@ async def start_bot():
     agent.daily_target_reached = False  # fresh session -> clear any prior daily-target halt
     agent.begin_ai_season()  # season P&L + kill-switch baseline = portfolio value right now
     agent.is_active = True
-    print("[PILLAR 2: BACKEND] Received 'START' — 1m/5m brain (5M dir / 1M timing), 15m+ Bible.")
+    print("[PILLAR 2: BACKEND] Received 'START' — Candlestick Brain v2 (brain.py).")
     system_log.push(
         "ai",
         f"AI automation STARTED on {agent.active_pair} ({open_count} open position(s) preserved).",
@@ -2403,9 +2486,8 @@ async def start_bot():
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     profile = entry_pattern_profile(tf_key)
     engine_note = (
-        "1m/5m brain: 5M direction + 1M timing, multi-confirm, conf 60+"
-        if is_scalp_timeframe(tf_key)
-        else "15m+ Bible: traps + 10 patterns + structure"
+        "Candlestick Brain v2: pattern scan + market structure + trap & reverse (10th-man) + ML bias. "
+        "Brain-driven SL/TP (fallback ±fixed%)."
     )
     system_log.push_agent_chat(
         f"Bot active — {profile['name']} on {agent.active_pair} ({tf_key}): {engine_note}.",
@@ -2428,8 +2510,7 @@ async def start_bot():
         "entry_pattern": profile["name"],
         "entry_pattern_profile": profile,
         "message": (
-            f"Bot active — {profile['name']} ({tf_key}). {engine_note}. "
-            f"Auto exit −{FIXED_EXIT_LOSS_PCT:g}% / +{FIXED_EXIT_PROFIT_PCT:g}% (LONG & SHORT)."
+            f"Bot active — {profile['name']} ({tf_key}). {engine_note}"
         ),
         "open_positions": open_count,
         "trade_history_count": len(agent.trade_history),

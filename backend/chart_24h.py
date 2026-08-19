@@ -1,152 +1,81 @@
-"""Persist rolling 24-hour chart snapshots (high/low + 5m candles) on the backend.
+"""24-hour OHLC chart data cache for the frontend chart panel.
 
-Each refresh fetches the latest 24h window from Bybit for every mapped pair,
-replaces the on-disk file entirely (old data removed), and runs every 24 hours.
+Fetches and caches Bybit 1h klines for the last 24 hours per pair.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import time
-from pathlib import Path
+from typing import Dict, Any
 
 import httpx
 
-from bybit_public import kline_url, ticker_url
+from bybit_public import fetch_kline_rows
 
-DATA_DIR = Path(__file__).parent / "data"
-DATA_FILE = DATA_DIR / "chart_24h.json"
-REFRESH_INTERVAL_SECONDS = 24 * 3600
-KLINE_INTERVAL = "5"
-KLINE_LIMIT = 288  # 5m bars ~= 24 hours
+_INTERVAL = "60"       # 1h Bybit kline interval
+_LIMIT = 25            # 24 candles + 1 forming bar
+_REFRESH_SECS = 300    # refresh cache every 5 minutes
 
 
 class Chart24hStore:
     def __init__(self):
-        self._data: dict = {"updated_at": None, "pairs": {}}
-        self._load()
+        self._cache: Dict[str, dict] = {}
+        self.updated_at: float | None = None
 
-    @property
-    def updated_at(self):
-        return self._data.get("updated_at")
+    def get_pair(self, pair_label: str) -> dict:
+        return self._cache.get(pair_label, {})
 
-    def _load(self):
-        if not DATA_FILE.exists():
-            return
-        try:
-            with open(DATA_FILE, encoding="utf-8") as fh:
-                loaded = json.load(fh)
-            if isinstance(loaded, dict) and "pairs" in loaded:
-                self._data = loaded
-        except Exception as exc:
-            print(f"[CHART 24H] Could not load {DATA_FILE}: {exc}")
-
-    def _save(self):
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        with open(DATA_FILE, "w", encoding="utf-8") as fh:
-            json.dump(self._data, fh)
-
-    def is_stale(self) -> bool:
-        ts = self._data.get("updated_at")
-        if not ts:
-            return True
-        return (time.time() - float(ts)) >= REFRESH_INTERVAL_SECONDS
-
-    def pairs_mismatch(self, bybit_symbol_map: dict) -> bool:
-        """ True when the stored snapshot's pair set differs from the current
-        symbol map - e.g. right after the app's trading-pair list is changed.
-        Without this check, a fresh (<24h) snapshot of the OLD pairs would
-        leave every NEW pair without chart data until the next daily refresh. """
-        expected = {f"{base}/USDT" for base in bybit_symbol_map}
-        return expected != set(self._data.get("pairs", {}).keys())
-
-    def get_pair(self, pair_label: str):
-        return self._data.get("pairs", {}).get(pair_label)
-
-    def get_snapshot(self):
-        return self._data
-
-    async def ensure_pair(self, pair_label: str, bybit_symbol: str):
-        """Return cached 24h stats for a pair, fetching live from Bybit on miss."""
-        existing = self.get_pair(pair_label)
-        if existing:
-            return existing
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            entry = await self._fetch_pair(client, pair_label, bybit_symbol)
-        self._data.setdefault("pairs", {})[pair_label] = entry
-        return entry
-
-    async def _fetch_pair(self, client: httpx.AsyncClient, pair_label: str, bybit_symbol: str):
-        ticker_resp = await client.get(ticker_url(bybit_symbol))
-        ticker_resp.raise_for_status()
-        ticker_item = ticker_resp.json().get("result", {}).get("list", [{}])[0]
-
-        kline_resp = await client.get(
-            kline_url(bybit_symbol, KLINE_INTERVAL, KLINE_LIMIT)
-        )
-        kline_resp.raise_for_status()
-        raw_candles = kline_resp.json().get("result", {}).get("list", [])
-
-        cutoff = int(time.time()) - 86400
-        candles = []
-        for row in reversed(raw_candles):
-            bar_time = int(int(row[0]) / 1000)
-            if bar_time < cutoff:
-                continue
-            candles.append({
-                "time": bar_time,
-                "open": float(row[1]),
-                "high": float(row[2]),
-                "low": float(row[3]),
-                "close": float(row[4]),
-                "volume": float(row[5]),
-            })
-
-        high = float(ticker_item.get("highPrice24h") or 0)
-        low = float(ticker_item.get("lowPrice24h") or 0)
-        last = float(ticker_item.get("lastPrice") or 0)
-
-        if candles:
-            high = max(high, max(c["high"] for c in candles))
-            low = min(low, min(c["low"] for c in candles)) if low > 0 else min(c["low"] for c in candles)
-
+    def get_snapshot(self) -> dict:
         return {
-            "pair": pair_label,
-            "high": high,
-            "low": low,
-            "last_price": last,
-            "candles": candles,
+            "updated_at": self.updated_at,
+            "pairs": {k: v for k, v in self._cache.items()},
         }
 
-    async def refresh_all(self, bybit_symbol_map: dict):
-        """Fetch latest 24h data for all pairs and replace stored snapshot."""
-        new_pairs = {}
-        errors = []
+    async def ensure_pair(self, pair_label: str, bybit_symbol: str) -> dict:
+        if pair_label in self._cache:
+            return self._cache[pair_label]
+        return await self._fetch_pair(pair_label, bybit_symbol)
 
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            for base, bybit_symbol in bybit_symbol_map.items():
-                pair_label = f"{base}/USDT"
-                try:
-                    new_pairs[pair_label] = await self._fetch_pair(client, pair_label, bybit_symbol)
-                except Exception as exc:
-                    errors.append(f"{pair_label}: {exc}")
-                    print(f"[CHART 24H] Failed to refresh {pair_label}: {exc}")
-
-        self._data = {"updated_at": time.time(), "pairs": new_pairs}
-        self._save()
-        print(
-            f"[CHART 24H] Snapshot saved ({len(new_pairs)} pairs). "
-            f"Next refresh in {REFRESH_INTERVAL_SECONDS // 3600}h."
-            + (f" Errors: {len(errors)}" if errors else "")
-        )
+    async def _fetch_pair(self, pair_label: str, bybit_symbol: str) -> dict:
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                rows = await fetch_kline_rows(client, bybit_symbol, _INTERVAL, _LIMIT)
+            if not rows:
+                return {}
+            candles = []
+            for r in reversed(rows[1:]):   # drop forming bar, reverse to oldest-first
+                candles.append({
+                    "close_time": int(r[0]),
+                    "open": float(r[1]),
+                    "high": float(r[2]),
+                    "low": float(r[3]),
+                    "close": float(r[4]),
+                    "volume": float(r[5]) if len(r) > 5 else 0.0,
+                })
+            entry = {
+                "pair": pair_label,
+                "symbol": bybit_symbol,
+                "candles": candles,
+                "fetched_at": time.time(),
+            }
+            self._cache[pair_label] = entry
+            self.updated_at = time.time()
+            return entry
+        except Exception as exc:
+            print(f"[CHART-24H] fetch error for {bybit_symbol}: {exc}")
+            return {}
 
 
 chart_24h_store = Chart24hStore()
 
 
-async def chart_24h_refresh_loop(bybit_symbol_map: dict):
-    if chart_24h_store.is_stale() or chart_24h_store.pairs_mismatch(bybit_symbol_map):
-        await chart_24h_store.refresh_all(bybit_symbol_map)
+async def chart_24h_refresh_loop(symbol_map: dict) -> None:
+    """Background task: keep 24h cache fresh for all mapped pairs."""
     while True:
-        await asyncio.sleep(REFRESH_INTERVAL_SECONDS)
-        await chart_24h_store.refresh_all(bybit_symbol_map)
+        for pair_label, bybit_symbol in symbol_map.items():
+            try:
+                await chart_24h_store._fetch_pair(pair_label, bybit_symbol)
+            except Exception as exc:
+                print(f"[CHART-24H] refresh error {pair_label}: {exc}")
+            await asyncio.sleep(0.5)
+        await asyncio.sleep(_REFRESH_SECS)
