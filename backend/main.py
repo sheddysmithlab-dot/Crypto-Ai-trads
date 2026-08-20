@@ -73,16 +73,7 @@ from pathlib import Path
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "DATA"
 
-# Minimal TF profile stub (timeframe_profiles.py removed — flat defaults until new strategy).
-def get_timeframe_profile(timeframe_key: str) -> dict:
-    key = (timeframe_key or "1m").strip()
-    aliases = {"1M": "1m", "5M": "5m", "15M": "15m", "1H": "1h", "1D": "1D"}
-    key = aliases.get(key, key)
-    return {"timeframe": key, "win_rate": 50, "lose_rate": 50, "capital_pct": 5.0}
-
-
-def capital_pct_fraction(timeframe_key: str) -> float:
-    return get_timeframe_profile(timeframe_key)["capital_pct"] / 100.0
+from timeframe_profiles import capital_pct_fraction, get_timeframe_profile
 
 # Load backend/.env before any credential reads (cwd-safe path).
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -1216,7 +1207,7 @@ class AITradingAgent:
     ):
         """ RULE 1: Opens a position as a Market Order (RULE 7) with simulated minor slippage.
         Manual entries default to 1% margin x 100x leverage. Auto entries pass
-        `position_size_usd` + `qty` from compute_auto_trade_plan() (10% of available capital).
+        `position_size_usd` + `qty` from compute_auto_trade_plan() (TF capital %).
         `skip_exchange_open=True` when Bybit TESTNET already filled the order (FIX 4).
         `pair` stamps the trade onto that coin (watchlist multi-pair); defaults to active chart pair. """
         if self.emergency_triggered:
