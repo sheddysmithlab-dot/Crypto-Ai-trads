@@ -3,6 +3,7 @@ import { useAuth } from './hooks/useAuth.jsx';
 import { authFetch } from './config/api';
 import { debugLog } from './config/debug';
 import { useApiStatus } from './hooks/useApiStatus';
+import { useMarketFeed } from './hooks/useMarketFeed';
 import { usePairSelector } from './hooks/usePairSelector';
 import { useTrades } from './hooks/useTrades';
 import { useNotifications } from './hooks/useNotifications';
@@ -62,6 +63,7 @@ function persistLauncherSlots(slots) {
 export default function App() {
   const { logout, username } = useAuth();
   const { status: apiStatus, setConnected } = useApiStatus();
+  useMarketFeed(setConnected);
   const pairSelector = usePairSelector();
   const { trades, activeCount, activePair: activeTradesPair, closeTrade, entryCandles, patternNeon } = useTrades(setConnected);
   const { notifications, unreadCount, markAllRead } = useNotifications();

@@ -929,7 +929,6 @@ export function useTradingChart({
 
       ws.onopen = () => {
         debugLog('[BACKEND WS] Connected to backend market feed');
-        setConnected?.('market', true);
       };
 
       ws.onmessage = (event) => {
@@ -966,7 +965,6 @@ export function useTradingChart({
 
       ws.onclose = () => {
         console.warn('[BACKEND WS] Connection closed. Reconnecting in 2s...');
-        setConnected?.('market', false);
         marketReconnectTimer = setTimeout(connectMarketWS, 2000);
       };
     }

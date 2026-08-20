@@ -21,15 +21,22 @@ export function usePortfolio(setConnected) {
     blueBoxOverlay: null,
     sessionSchedule: null,
   });
+  const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
+  const stopped = useRef(false);
 
   useEffect(() => {
+    stopped.current = false;
+
     function connect() {
+      if (stopped.current) return;
       const ws = new WebSocket(backendWsUrl('/ws/portfolio'));
+      wsRef.current = ws;
 
       ws.onopen = () => setConnected('portfolio', true);
 
       ws.onmessage = (event) => {
+        setConnected('portfolio', true);
         const data = JSON.parse(event.data);
 
         setPortfolio({
@@ -54,18 +61,21 @@ export function usePortfolio(setConnected) {
 
       ws.onclose = () => {
         setConnected('portfolio', false);
+        if (stopped.current) return;
         console.warn('Portfolio WebSocket closed, reconnecting...');
         reconnectTimer.current = setTimeout(connect, 2000);
       };
-
-      return ws;
     }
 
-    const ws = connect();
+    connect();
     return () => {
+      stopped.current = true;
       clearTimeout(reconnectTimer.current);
-      ws.onclose = null;
-      ws.close();
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+        wsRef.current = null;
+      }
     };
   }, [setConnected]);
 

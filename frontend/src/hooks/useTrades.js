@@ -13,15 +13,20 @@ export function useTrades(setConnected) {
   const [patternNeon, setPatternNeon] = useState([]);
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
+  const stopped = useRef(false);
 
   useEffect(() => {
+    stopped.current = false;
+
     function connect() {
+      if (stopped.current) return;
       const ws = new WebSocket(backendWsUrl('/ws/trades'));
       wsRef.current = ws;
 
       ws.onopen = () => setConnected('trades', true);
 
       ws.onmessage = (event) => {
+        setConnected('trades', true);
         const data = JSON.parse(event.data);
         setActivePair(data.pair);
         setTrades(data.trades);
@@ -32,6 +37,7 @@ export function useTrades(setConnected) {
 
       ws.onclose = () => {
         setConnected('trades', false);
+        if (stopped.current) return;
         console.warn('Trades WebSocket closed, reconnecting...');
         reconnectTimer.current = setTimeout(connect, 2000);
       };
@@ -39,10 +45,12 @@ export function useTrades(setConnected) {
 
     connect();
     return () => {
+      stopped.current = true;
       clearTimeout(reconnectTimer.current);
       if (wsRef.current) {
         wsRef.current.onclose = null;
         wsRef.current.close();
+        wsRef.current = null;
       }
     };
   }, [setConnected]);

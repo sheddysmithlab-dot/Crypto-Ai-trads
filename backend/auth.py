@@ -95,4 +95,11 @@ def extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
 
 
 async def require_ws_token(websocket: WebSocket) -> bool:
-    return verify_token(websocket.query_params.get("token"))
+    if verify_token(websocket.query_params.get("token")):
+        return True
+    # Reject cleanly so the browser reconnects with a fresh login instead of hanging.
+    try:
+        await websocket.close(code=4401)
+    except Exception:
+        pass
+    return False

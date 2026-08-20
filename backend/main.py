@@ -673,6 +673,7 @@ class AITradingAgent:
         # Risk % from modal -> max_concurrent_trades via round(risk_pct * 1.5). Not a stop-loss.
         self.risk_level_pct = 3.0
         self.max_concurrent_trades = MAX_CONCURRENT_TRADES_DEFAULT
+        self.last_open_skip_reason: str | None = None
         # AI Agent Instructions modal: optional "Capital profit of the day" target.
         # 0.0 means disabled. Once the day's profit % crosses this, new entries are
         # halted (existing positions keep being managed by strict exit logic).
@@ -1215,7 +1216,9 @@ class AITradingAgent:
         `position_size_usd` + `qty` from compute_auto_trade_plan() (TF capital %).
         `skip_exchange_open=True` when Bybit TESTNET already filled the order (FIX 4).
         `pair` stamps the trade onto that coin (watchlist multi-pair); defaults to active chart pair. """
+        self.last_open_skip_reason = None
         if self.emergency_triggered:
+            self.last_open_skip_reason = "Emergency stop active"
             return None
 
         trade_pair = (pair or self.active_pair or "").strip() or self.active_pair
@@ -1225,49 +1228,58 @@ class AITradingAgent:
             # Manual trading is the opposite of automation - only allowed while the bot
             # is NOT running (START AI AUTOMATION has not been clicked / was stopped).
             if self.is_active:
+                self.last_open_skip_reason = "Manual entry blocked while AI engine is running"
                 return None
         else:
             if not self.is_active:
+                self.last_open_skip_reason = "AI engine is not active"
                 return None
             if self.daily_target_reached:
+                self.last_open_skip_reason = "Daily profit target already reached"
                 return None
 
             if self.has_duplicate_auto_entry(
                 side, trade_pair, pattern, signal_candle_time, float(entry_price or mark_px or 0)
             ):
-                print(
-                    f"[PILLAR 3: AI AGENT] Duplicate auto-entry blocked on {trade_pair} "
-                    f"({side}, pattern={pattern}, candle={signal_candle_time})."
+                self.last_open_skip_reason = (
+                    f"Duplicate auto-entry blocked on {trade_pair} "
+                    f"({side}, pattern={pattern}, candle={signal_candle_time})"
                 )
+                print(f"[PILLAR 3: AI AGENT] {self.last_open_skip_reason}.")
                 return None
 
             if not self.has_same_side_auto_capacity(side, trade_pair):
-                print(
-                    f"[PILLAR 3: AI AGENT] Same-side stack blocked on {trade_pair} "
-                    f"({side} already open — max {MAX_SAME_SIDE_AUTO_PER_PAIR})."
+                self.last_open_skip_reason = (
+                    f"Same-side stack blocked on {trade_pair} "
+                    f"({side} already open — max {MAX_SAME_SIDE_AUTO_PER_PAIR})"
                 )
+                print(f"[PILLAR 3: AI AGENT] {self.last_open_skip_reason}.")
                 return None
 
         # AI Agent Instructions modal: cap stacked positions at max_concurrent_trades.
         if len(self.trades) >= self.max_concurrent_trades:
-            notifications.push(
-                f"Max concurrent trades ({self.max_concurrent_trades}) reached — new entry skipped on {trade_pair}.",
-                "info",
+            self.last_open_skip_reason = (
+                f"Max concurrent trades ({self.max_concurrent_trades}) reached — "
+                f"new entry skipped on {trade_pair}"
             )
+            notifications.push(self.last_open_skip_reason + ".", "info")
             return None
 
         if (entry_price is None and (not mark_px or mark_px <= 0)) or (
             entry_price is not None and float(entry_price) <= 0
         ):
-            print(f"[PILLAR 3: AI AGENT] Skipping entry — invalid price on {trade_pair}.")
+            self.last_open_skip_reason = f"Invalid price on {trade_pair}"
+            print(f"[PILLAR 3: AI AGENT] Skipping entry — {self.last_open_skip_reason}.")
             return None
 
         capital_base = self.get_trading_capital_base()
         if bybit_api.mode == "LIVE_TRADING":
             if capital_base is None:
+                self.last_open_skip_reason = "Waiting for Bybit balance sync"
                 notifications.push("Waiting for Bybit balance sync — please try again shortly.", "warning")
                 return None
             if capital_base <= 0:
+                self.last_open_skip_reason = "Insufficient Bybit equity ($0)"
                 notifications.push("Insufficient balance: Bybit account equity is $0.00.", "error")
                 return None
 
@@ -1279,17 +1291,18 @@ class AITradingAgent:
             margin = round((capital_base if capital_base is not None else self.current_capital) * self.margin_pct, 2)
             position_size = round(margin * self.leverage, 2)
         if margin <= 0 or position_size <= 0:
-            notifications.push("Insufficient balance to open a position.", "error")
+            self.last_open_skip_reason = "Insufficient balance to open a position"
+            notifications.push(self.last_open_skip_reason + ".", "error")
             return None
 
         # Paper ledger: reserve capital on open (auto = 10% notional slot; manual = margin).
         capital_reserved = round(position_size, 2) if source == "auto" and position_size_usd is not None else round(margin, 2)
         if bybit_api.mode != "LIVE_TRADING":
             if self.current_capital < capital_reserved:
-                notifications.push(
-                    f"Insufficient balance — need ${capital_reserved:,.2f}, have ${self.current_capital:,.2f}.",
-                    "error",
+                self.last_open_skip_reason = (
+                    f"Insufficient balance — need ${capital_reserved:,.2f}, have ${self.current_capital:,.2f}"
                 )
+                notifications.push(self.last_open_skip_reason + ".", "error")
                 return None
 
         # RULE 7: Market orders fill with minor slippage vs the requested price
@@ -2115,6 +2128,8 @@ def evaluate_entry(
         timeframe_key,
         pair=pair,
         htf_candles=htf_candles or candles_5m,
+        candles_1m=candles_1m,
+        candles_5m=candles_5m,
         account_balance=float(balance),
         risk_pct=risk_pct,
     )
@@ -2161,7 +2176,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
     # Determine a higher-TF series for brain top-down alignment.
     _HTF_MAP = {"1m": "5m", "5m": "15m", "15m": "1h", "1h": "1D", "30s": "5m"}
-    htf_key = _HTF_MAP.get(timeframe_key.lower())
+    tf_l = timeframe_key.lower()
+    htf_key = _HTF_MAP.get(tf_l)
     htf_candles = None
     if htf_key:
         try:
@@ -2169,7 +2185,18 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         except Exception:
             htf_candles = None
 
-    # AI-driven brain: brain.py analyses → AI API decides BUY/SELL/HOLD.
+    # Order-flow TRAP engine needs 1M (execution) + 5M (directional bias).
+    candles_1m = history if tf_l in ("1m", "30s") else None
+    candles_5m = history if tf_l == "5m" else (htf_candles if tf_l in ("1m", "30s") else None)
+    try:
+        if candles_1m is None:
+            candles_1m = await fetch_closed_candle_history(client, bybit_symbol, "1m", limit=lookback)
+        if candles_5m is None:
+            candles_5m = await fetch_closed_candle_history(client, bybit_symbol, "5m", limit=60)
+    except Exception as exc:
+        print(f"[TRAP-OF] 1m/5m fetch failed on {pair}: {exc}")
+
+    # AI-driven brain: brain.py + order-flow trap → AI API decides BUY/SELL/HOLD.
     balance = agent.get_available_capital() or agent.get_trading_capital_base() or 10000.0
     risk_pct = max(float(getattr(agent, "risk_level_pct", 1.0) or 1.0), 0.5) / 100.0
     risk_pct = min(risk_pct, 0.02)
@@ -2180,6 +2207,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             timeframe_key,
             pair=pair,
             htf_candles=htf_candles,
+            candles_1m=candles_1m,
+            candles_5m=candles_5m,
             account_balance=float(balance),
             risk_pct=risk_pct,
             settings=settings_store,
@@ -2208,9 +2237,55 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             f"AI-Brain scan {pair} @ {timeframe_key}: {detect.get('reason', 'HOLD')}",
             status="scanning",
             details={"pair": pair, "timeframe": timeframe_key, "engine": detect.get("engine"),
-                     "ai_driven": detect.get("ai_driven"), "brain_verdict": detect.get("brain_verdict")},
+                     "ai_driven": detect.get("ai_driven"), "brain_verdict": detect.get("brain_verdict"),
+                     "orderflow_trap": (detect.get("orderflow_trap") or {}).get("line")},
         )
         return False
+
+    # Seed mark from closed candle so watchlist pairs can size even before ticker poll.
+    candle_close = float(history[-1].get("close") or 0)
+    if candle_close > 0:
+        agent.set_pair_mark(pair, candle_close)
+
+    side = "LONG" if detect["action"] == "BUY" else "SHORT"
+
+    def _skip_fire(reason: str, *, cost_aware: bool = False) -> bool:
+        system_log.push_agent_chat(
+            f"SKIPPED {side} on {pair}: {reason}",
+            status="no_match",
+            details={"pair": pair, "side": side, "reason": reason, "detect": detect},
+        )
+        system_log.set_last_trade_fire(
+            {
+                "success": False,
+                "skipped": True,
+                "cost_aware": cost_aware,
+                "action": detect["action"],
+                "symbol": bybit_symbol,
+                "pattern": detect.get("pattern"),
+                "pair": pair,
+                "error": reason,
+            }
+        )
+        print(f"[BRAIN] SKIPPED {side} {pair}: {reason}")
+        return False
+
+    # Capacity gates before AI consult / sizing (avoids silent drop after BUY/SELL log).
+    if len(agent.trades) >= agent.max_concurrent_trades:
+        return _skip_fire(
+            f"Max concurrent trades ({agent.max_concurrent_trades}) reached "
+            f"({len(agent.trades)} open)"
+        )
+    if agent.daily_target_reached:
+        return _skip_fire("Daily profit target already reached")
+    if not agent.has_same_side_auto_capacity(side, pair):
+        return _skip_fire(
+            f"{side} already open on {pair} (max {MAX_SAME_SIDE_AUTO_PER_PAIR} same-side)"
+        )
+    if agent.has_duplicate_auto_entry(
+        side, pair, detect.get("pattern"), close_time, candle_close or float(detect.get("entry") or 0)
+    ):
+        return _skip_fire(f"Duplicate entry on same candle/pattern for {pair}")
 
     # AI provider consulted for observability — never blocks execution.
     ai_decision = None
@@ -2241,16 +2316,13 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     if ai_note != "SKIP":
         detect["reason"] = f"{detect.get('reason', '')} | AI={ai_note}"
 
-    mark_px = agent.mark_price_for(pair) or float(detect.get("entry") or history[-1]["close"])
-    side = "LONG" if detect["action"] == "BUY" else "SHORT"
+    mark_px = agent.mark_price_for(pair) or float(detect.get("entry") or candle_close or 0)
+    if not mark_px or mark_px <= 0:
+        return _skip_fire(f"No usable mark price for {pair}")
+
     plan = compute_auto_trade_plan(agent, price=mark_px, pair=pair)
     if plan is None:
-        system_log.push_agent_chat(
-            f"Brain signal on {pair} but size plan failed",
-            status="no_match",
-            details={"pair": pair, "detect": detect},
-        )
-        return False
+        return _skip_fire("Size plan failed (capital/lot)")
 
     # Use brain-driven SL/TP when available; fall back to fixed %.
     brain_sl = detect.get("sl")
@@ -2282,7 +2354,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         timeframe_key=timeframe_key,
     )
     if not trade:
-        return False
+        return _skip_fire(agent.last_open_skip_reason or "open_trade returned None")
 
     system_log.push_agent_chat(
         brain_chat_summary(detect) + f" → FIRED {side} on {pair}",

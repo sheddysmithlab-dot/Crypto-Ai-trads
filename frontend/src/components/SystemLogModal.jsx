@@ -152,14 +152,23 @@ function useMovableResizablePanel(open) {
   return { panelRef, pos, size, startDrag, startResize, resetLayout };
 }
 
-function StatusPill({ ok, label }) {
+function StatusPill({ ok, label, tone }) {
+  const resolved =
+    tone ||
+    (ok ? 'green' : label === 'RECONNECTING' ? 'yellow' : 'red');
+  const styles =
+    resolved === 'green'
+      ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-700/50'
+      : resolved === 'yellow'
+        ? 'bg-amber-900/40 text-amber-300 border border-amber-700/50'
+        : 'bg-red-900/40 text-red-300 border border-red-700/50';
+  const dot =
+    resolved === 'green' ? 'bg-emerald-400' : resolved === 'yellow' ? 'bg-amber-400' : 'bg-red-400';
   return (
     <span
-      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${
-        ok ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-700/50' : 'bg-red-900/40 text-red-300 border border-red-700/50'
-      }`}
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide ${styles}`}
     >
-      <span className={`w-1.5 h-1.5 rounded-full ${ok ? 'bg-emerald-400' : 'bg-red-400'}`} />
+      <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />
       {label}
     </span>
   );
@@ -318,7 +327,11 @@ export default function SystemLogModal({
           <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
             <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-2">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-2">Backend WebSockets</div>
-              <StatusPill ok={wsOk} label={apiStatus?.label || 'UNKNOWN'} />
+              <StatusPill
+                ok={wsOk}
+                label={apiStatus?.label || 'UNKNOWN'}
+                tone={apiStatus?.color === 'yellow' ? 'yellow' : undefined}
+              />
               <p className="text-[11px] text-gray-500 mt-2">market · portfolio · trades pipes</p>
             </div>
             <div className="bg-[#161A1E] border border-gray-800 rounded-xl p-2">

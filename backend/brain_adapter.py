@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import httpx
 
 import brain as _b
+from trap_orderflow_engine import evaluate_trap_orderflow, merge_with_structure_trap
 
 ENGINE_NAME = "ai_driven_brain_v2"
 ENTRY_PATTERN_NAME = "AI_BRAIN_V2"
@@ -77,8 +78,10 @@ def _run_brain(candles: List[dict], tf: str,
 _SYSTEM_PROMPT = """\
 You are an expert algorithmic cryptocurrency trader.
 You will receive a full technical analysis of a crypto chart from the Candlestick Brain engine.
-The analysis includes market structure, candlestick patterns, trap & reverse signals, an ML
-price-direction bias, and a risk plan.
+The analysis includes market structure, candlestick patterns, classic structure traps
+(bull/bear trap, spring, upthrust), PLUS the Order-Flow TRAP DETECTION ENGINE
+(buy/sell trap, absorption, exhaustion, fake breakout, reversal trap on 1M/5M with
+volume pressure and buyer/seller imbalance — effort vs result).
 
 Your job: read the analysis carefully, then output EXACTLY ONE of these three words on its own line:
   BUY
@@ -89,10 +92,14 @@ Rules:
 - BUY if the combined evidence strongly favours a LONG trade.
 - SELL if the combined evidence strongly favours a SHORT trade.
 - HOLD if the evidence is mixed, unclear, or insufficient.
+- Prefer confirmed order-flow traps (absorption / fake breakout / sell-trap→long / buy-trap→short)
+  when they align with 5M bias and scores are strong.
+- Never assume high buyer qty alone means LONG — evaluate effort versus result.
 - Output only the word. No explanation, no punctuation, no extra lines.
 """
 
-def _build_ai_messages(pair: str, timeframe: str, reasoning: str, think: dict) -> List[dict]:
+def _build_ai_messages(pair: str, timeframe: str, reasoning: str, think: dict,
+                       of_trap: Optional[dict] = None) -> List[dict]:
     ms = think.get("structure")
     sig = think.get("signal")
     trap = think.get("trap")
@@ -111,7 +118,19 @@ def _build_ai_messages(pair: str, timeframe: str, reasoning: str, think: dict) -
         facts.append(f"Entry {sig.entry:.4g}  stop {sig.stop:.4g}  target {sig.target:.4g}  R:R 1:{sig.rr:.2f}  score {sig.score:.1f}/12")
         facts.append(f"Confluence: {', '.join(sig.confluence or [])}")
     if trap:
-        facts.append(f"Trap: {trap.trap_type}  Smart-money action: {trap.smart_action}  ({trap.side})")
+        facts.append(f"Structure trap: {trap.trap_type}  Smart-money action: {trap.smart_action}  ({trap.side})")
+    if of_trap:
+        facts.append(
+            "Order-flow trap: "
+            f"{of_trap.get('line') or of_trap.get('final_signal')} "
+            f"| pattern={of_trap.get('pattern')} 5M_bias={of_trap.get('bias_5m')} "
+            f"LONG={of_trap.get('long_score')} SHORT={of_trap.get('short_score')} "
+            f"reason={of_trap.get('primary_reason')}"
+        )
+        facts.append(
+            f"Pressures: buy={of_trap.get('buy_pressure')} sell={of_trap.get('sell_pressure')} "
+            f"| vol ratios buy={of_trap.get('buy_volume_ratio')} sell={of_trap.get('sell_volume_ratio')}"
+        )
     if stance:
         facts.append(f"Smart stance: {stance.action}  source={stance.source}  {stance.narrative}")
     if ml.get("metrics"):
@@ -196,7 +215,8 @@ async def _call_ai_api(messages: List[dict], settings) -> Optional[str]:
 
 # ─── flatten brain result → backend dict ─────────────────────────────────────
 def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
-             risk_pct_pct: float, equity: float) -> Dict[str, Any]:
+             risk_pct_pct: float, equity: float,
+             of_trap: Optional[dict] = None) -> Dict[str, Any]:
     sig: Optional[_b.Signal] = think.get("signal")
     trap: Optional[_b.TrapSignal] = think.get("trap")
     stance: Optional[_b.SmartStance] = think.get("stance")
@@ -224,8 +244,21 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
         except Exception:
             plan = None
 
-    # Pattern / confluence labels
-    if stance and stance.source == "trap" and trap is not None:
+    # Pattern / confluence labels — order-flow trap can label when it drove decision
+    of_signal = (of_trap or {}).get("final_signal")
+    if of_trap and of_signal in ("LONG", "SHORT") and (
+        (ai_action == "BUY" and of_signal == "LONG") or (ai_action == "SELL" and of_signal == "SHORT")
+    ):
+        pattern_name = of_trap.get("pattern") or "orderflow_trap"
+        strategy_name = "trap_orderflow"
+        confluences = [
+            of_trap.get("primary_reason") or "",
+            f"5M bias={of_trap.get('bias_5m')}",
+            f"LONG_SCORE={of_trap.get('long_score')} SHORT_SCORE={of_trap.get('short_score')}",
+        ]
+        if trap is not None:
+            confluences.append(f"structure_trap={trap.trap_type}")
+    elif stance and stance.source == "trap" and trap is not None:
         pattern_name = trap.trap_type.replace("_", " ")
         strategy_name = "trap_reverse"
         confluences = list(trap.reasons) if trap.reasons else []
@@ -241,14 +274,19 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
     detail = think.get("verdict_detail", "")
     if stance and stance.narrative:
         detail = stance.narrative
+    if of_trap and of_trap.get("primary_reason"):
+        detail = (detail + " | " if detail else "") + f"OF: {of_trap.get('primary_reason')}"
     reason_parts = [f"AI decision: {ai_action}", detail]
     if confluences:
-        reason_parts.append("confluence: " + "; ".join(confluences[:4]))
+        reason_parts.append("confluence: " + "; ".join(str(c) for c in confluences[:4] if c))
     reason = " | ".join(p for p in reason_parts if p)
 
     action = "BUY" if ai_action == "BUY" else "SELL" if ai_action == "SELL" else "NO_TRADE"
 
     ml_label = ml.get("prediction", {}).get("label") if isinstance(ml, dict) else None
+    conf = float(sig.confidence) if sig else (0.6 if action != "NO_TRADE" else 0.0)
+    if of_trap and of_trap.get("confidence") is not None and action != "NO_TRADE":
+        conf = max(conf, float(of_trap.get("confidence") or 0))
 
     return {
         "action": action,
@@ -263,8 +301,8 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
         "stop": sl,
         "target": tp,
         "risk_reward": rr,
-        "confidence": float(sig.confidence) if sig else (0.6 if action != "NO_TRADE" else 0.0),
-        "score": float(sig.score) if sig else (float(trap.score) if trap else 0.0),
+        "confidence": conf,
+        "score": float(sig.score) if sig else (float(trap.score) if trap else float((of_trap or {}).get("long_score") or (of_trap or {}).get("short_score") or 0)),
         "confluences": confluences,
         "psychology": pattern_name,
         "market_structure": ms.trend if ms else None,
@@ -272,22 +310,74 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
         "timeframe_key": timeframe_key,
         "pair": pair,
         "direction": "LONG" if action == "BUY" else ("SHORT" if action == "SELL" else None),
-        "source": stance.source if stance else None,
+        "source": "trap_orderflow" if strategy_name == "trap_orderflow" else (stance.source if stance else None),
         "ml_bias": ml_label,
-        "trap_type": trap.trap_type if trap else None,
-        "brain_verdict": think.get("verdict"),
+        "trap_type": trap.trap_type if trap else (of_trap.get("pattern") if of_trap else None),
+        "orderflow_trap": of_trap,
         "ai_driven": True,
-        "n_candles": think.get("n", 0),
-        "last_close": think.get("last_close"),
-        "risk_plan": {
-            "units": plan.units,
-            "risk_amount": plan.risk_amount,
-            "rr": plan.rr,
-            "entry": plan.entry,
-            "stop": plan.stop,
-            "target": plan.target,
-        } if plan else None,
+        "brain_verdict": think.get("verdict"),
     }
+
+
+def _resolve_1m_5m(
+    candles: List[dict],
+    timeframe_key: str,
+    htf_candles: Optional[List[dict]],
+    candles_1m: Optional[List[dict]],
+    candles_5m: Optional[List[dict]],
+) -> tuple:
+    tf = _norm_tf(timeframe_key)
+    c1 = candles_1m
+    c5 = candles_5m
+    if tf == "1m":
+        c1 = c1 or candles
+        c5 = c5 or htf_candles
+    elif tf == "5m":
+        c5 = c5 or candles
+        c1 = c1 or None  # may be filled by caller
+    else:
+        # higher TF scan: use series as 5m-context proxy; execution = same series
+        c5 = c5 or candles
+        c1 = c1 or candles
+    return c1, c5
+
+
+def _run_orderflow_trap(
+    candles: List[dict],
+    timeframe_key: str,
+    think: dict,
+    *,
+    htf_candles: Optional[List[dict]] = None,
+    candles_1m: Optional[List[dict]] = None,
+    candles_5m: Optional[List[dict]] = None,
+) -> Optional[dict]:
+    try:
+        c1, c5 = _resolve_1m_5m(candles, timeframe_key, htf_candles, candles_1m, candles_5m)
+        of = evaluate_trap_orderflow(c1, c5, exec_tf=_norm_tf(timeframe_key))
+        struct = think.get("trap")
+        struct_side = getattr(struct, "side", None) if struct else None
+        struct_type = getattr(struct, "trap_type", None) if struct else None
+        merged = merge_with_structure_trap(of, struct_side, struct_type)
+        return merged.to_dict()
+    except Exception as exc:
+        print(f"[TRAP-OF] evaluate error: {exc}")
+        return None
+
+
+def _fallback_action_from_brain_and_of(think: dict, of_trap: Optional[dict]) -> str:
+    """When AI unavailable: prefer strong order-flow trap, else brain verdict."""
+    if of_trap:
+        sig = of_trap.get("final_signal")
+        score = max(float(of_trap.get("long_score") or 0), float(of_trap.get("short_score") or 0))
+        if sig == "LONG" and score >= 65:
+            return "BUY"
+        if sig == "SHORT" and score >= 65:
+            return "SELL"
+        if sig == "NO_TRADE":
+            # still allow brain BUY/SELL if structure trap is fresh
+            pass
+    brain_verdict = think.get("verdict", "HOLD")
+    return brain_verdict if brain_verdict in ("BUY", "SELL") else "HOLD"
 
 
 # ─── public API ───────────────────────────────────────────────────────────────
@@ -300,11 +390,13 @@ async def evaluate_live_entry_async(
     *,
     pair: str = "default",
     htf_candles: Optional[List[dict]] = None,
+    candles_1m: Optional[List[dict]] = None,
+    candles_5m: Optional[List[dict]] = None,
     account_balance: float = 10000.0,
     risk_pct: float = 0.01,
     settings=None,           # settings_store from main.py
 ) -> Dict[str, Any]:
-    """Async entry point: brain.py analysis → AI API decision.
+    """Async entry point: brain.py analysis + order-flow trap → AI API decision.
 
     Used from async context (scan_and_maybe_fire_pair).
     """
@@ -342,20 +434,36 @@ async def evaluate_live_entry_async(
     think = analysis["think"]
     reasoning = analysis["reasoning"]
 
+    of_trap = await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: _run_orderflow_trap(
+            candles, timeframe_key, think,
+            htf_candles=htf_candles,
+            candles_1m=candles_1m,
+            candles_5m=candles_5m,
+        ),
+    )
+
     # Ask AI API for final BUY/SELL/HOLD decision
     ai_action: Optional[str] = None
     if settings is not None:
-        messages = _build_ai_messages(pair, timeframe_key, reasoning, think)
+        messages = _build_ai_messages(pair, timeframe_key, reasoning, think, of_trap=of_trap)
         ai_action = await _call_ai_api(messages, settings)
 
-    # Fallback to brain.py's own verdict if AI unavailable
+    # Fallback: strong order-flow trap, else brain.py verdict
     if ai_action is None:
-        brain_verdict = think.get("verdict", "HOLD")
-        ai_action = brain_verdict if brain_verdict in ("BUY", "SELL") else "HOLD"
-        print(f"[AI-BRAIN] Using brain.py fallback verdict: {ai_action}")
+        ai_action = _fallback_action_from_brain_and_of(think, of_trap)
+        print(f"[AI-BRAIN] Using fallback verdict: {ai_action} (OF={of_trap.get('final_signal') if of_trap else None})")
 
-    return _flatten(think, ai_action=ai_action, pair=pair, timeframe_key=timeframe_key,
-                    risk_pct_pct=risk_pct_pct, equity=float(account_balance))
+    return _flatten(
+        think,
+        ai_action=ai_action,
+        pair=pair,
+        timeframe_key=timeframe_key,
+        risk_pct_pct=risk_pct_pct,
+        equity=float(account_balance),
+        of_trap=of_trap,
+    )
 
 
 def evaluate_live_entry(
@@ -403,10 +511,22 @@ def evaluate_live_entry(
         }
 
     think = analysis["think"]
-    brain_verdict = think.get("verdict", "HOLD")
-    ai_action = brain_verdict if brain_verdict in ("BUY", "SELL") else "HOLD"
-    return _flatten(think, ai_action=ai_action, pair=pair, timeframe_key=timeframe_key,
-                    risk_pct_pct=risk_pct_pct, equity=float(account_balance))
+    of_trap = _run_orderflow_trap(
+        candles, timeframe_key, think,
+        htf_candles=htf_raw,
+        candles_1m=candles_1m,
+        candles_5m=candles_5m or (candles if tf == "5m" else None),
+    )
+    ai_action = _fallback_action_from_brain_and_of(think, of_trap)
+    return _flatten(
+        think,
+        ai_action=ai_action,
+        pair=pair,
+        timeframe_key=timeframe_key,
+        risk_pct_pct=risk_pct_pct,
+        equity=float(account_balance),
+        of_trap=of_trap,
+    )
 
 
 def enrich_signal(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -414,7 +534,7 @@ def enrich_signal(result: Dict[str, Any]) -> Dict[str, Any]:
     out["brain"] = {
         "engine": ENGINE_NAME,
         "entry_pattern": ENTRY_PATTERN_NAME,
-        "pipeline": ["brain_analysis", "ai_api_decision", "risk_plan"],
+        "pipeline": ["brain_analysis", "orderflow_trap", "ai_api_decision", "risk_plan"],
         "pattern_label": result.get("pattern"),
         "strategy": result.get("strategy"),
         "confidence": result.get("confidence"),
@@ -427,6 +547,7 @@ def enrich_signal(result: Dict[str, Any]) -> Dict[str, Any]:
         "source": result.get("source"),
         "ml_bias": result.get("ml_bias"),
         "trap_type": result.get("trap_type"),
+        "orderflow_trap": result.get("orderflow_trap"),
         "brain_verdict": result.get("brain_verdict"),
         "ai_driven": result.get("ai_driven", True),
         "risk_plan": result.get("risk_plan"),
@@ -442,8 +563,9 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
         "name": ENTRY_PATTERN_NAME,
         "engine": ENGINE_NAME,
         "description": (
-            "AI-Driven Brain: brain.py analyses patterns, structure, traps, and ML; "
-            "the AI API model reads the full chain-of-thought and makes the final BUY/SELL/HOLD decision. "
+            "AI-Driven Brain: brain.py analyses patterns, structure, classic traps + ML; "
+            "order-flow TRAP DETECTION ENGINE scores 1M/5M buy/sell traps, absorption, "
+            "exhaustion, fake breakouts; AI API makes final BUY/SELL/HOLD. "
             f"Timeframe: {tf_cfg.label}. Min confluence score: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
             f"{tf_cfg.note}"
         ),
@@ -458,18 +580,23 @@ def brain_chat_summary(result: Dict[str, Any]) -> str:
     pattern = result.get("pattern") or result.get("strategy") or "—"
     reason = result.get("reason", "")
     ai_driven = result.get("ai_driven", False)
+    of_line = (result.get("orderflow_trap") or {}).get("line")
     tag = "AI" if ai_driven else "Brain"
-    return f"{tag} [{result.get('source') or 'signal'}] {action}: {pattern} — {reason}"
+    base = f"{tag} [{result.get('source') or 'signal'}] {action}: {pattern} — {reason}"
+    if of_line:
+        return f"{base} || OF: {of_line}"
+    return base
 
 
 def strategy_system_blurb() -> str:
     return (
-        "AI-DRIVEN CANDLESTICK BRAIN:\n"
-        "1) brain.py runs full analysis: patterns, market structure, trap & reverse (10th-man), ML bias.\n"
-        "2) The full chain-of-thought is sent to the AI API (GLM/OpenAI).\n"
-        "3) AI API returns BUY / SELL / HOLD — that is the final trade decision.\n"
-        "4) If AI API is offline, brain.py's own verdict is used as fallback.\n"
-        "5) Brain-driven SL/TP from signal entry/stop/target. Exit: ±fixed% as safety net."
+        "AI-DRIVEN CANDLESTICK BRAIN + ORDER-FLOW TRAP ENGINE:\n"
+        "1) brain.py: patterns, market structure, classic trap & reverse (10th-man), ML bias.\n"
+        "2) Order-flow TRAP DETECTION ENGINE on 1M/5M: buy/sell trap, absorption, exhaustion,\n"
+        "   fake breakout, reversal trap (effort vs result; volume & buyer/seller pressure).\n"
+        "3) Combined analysis sent to AI API (GLM/OpenAI) → BUY / SELL / HOLD.\n"
+        "4) If AI offline: strong OF trap (score≥65) or brain.py verdict as fallback.\n"
+        "5) Brain-driven SL/TP; fixed ±% safety net on exits."
     )
 
 
