@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { authFetch } from '../config/api';
 
 const PRESETS = [
   { amount: 1000, label: '$1K' },
@@ -9,20 +8,53 @@ const PRESETS = [
 ];
 
 function fmtCurrency(num) {
-  return `$${Number(num).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const n = Number(num);
+  if (!Number.isFinite(n)) return '$0.00';
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-export default function PaperTradingModal({ open, onClose, currentCapital, onCapitalSet, isLive }) {
+/**
+ * Fresh Paper Trading modal — loads/saves only via usePaperTrading (/paper/*).
+ */
+export default function PaperTradingModal({
+  open,
+  onClose,
+  isLive,
+  paperCapital,
+  paperLoading,
+  onRefreshStatus,
+  onSetCapital,
+}) {
   const [amount, setAmount] = useState('1000');
-  const [status, setStatus] = useState({ tone: 'yellow', message: `Currently simulating with ${fmtCurrency(currentCapital)}.` });
+  const [status, setStatus] = useState({ tone: 'yellow', message: 'Loading…' });
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (open) {
-      setAmount('1000');
-      setStatus({ tone: 'yellow', message: `Currently simulating with ${fmtCurrency(currentCapital)}.` });
+    if (!open || isLive) return;
+    let cancelled = false;
+
+    async function load() {
+      setStatus({ tone: 'yellow', message: 'Loading paper capital…' });
+      const data = await onRefreshStatus();
+      if (cancelled) return;
+      if (!data) {
+        setStatus({ tone: 'red', message: 'Could not load paper capital from backend.' });
+        return;
+      }
+      const cap = Number(data.capital);
+      const shown = Number.isFinite(cap) ? cap : 0;
+      setAmount(shown >= 100 ? String(Math.round(shown)) : '1000');
+      setStatus({
+        tone: 'yellow',
+        message: `Currently simulating with ${fmtCurrency(shown)}.`,
+      });
     }
-  }, [open, currentCapital]);
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, isLive, onRefreshStatus]);
 
   if (!open) return null;
 
@@ -31,8 +63,12 @@ export default function PaperTradingModal({ open, onClose, currentCapital, onCap
       <div className="fixed inset-0 bg-black bg-opacity-70 z-[110] flex items-center justify-center backdrop-blur-sm p-4">
         <div className="bg-[#0B0E11] border border-gray-800 rounded-2xl shadow-2xl max-w-md w-full p-6 text-center">
           <p className="text-emerald-400 font-semibold mb-2">Live Trading Active</p>
-          <p className="text-sm text-gray-400 mb-4">Paper trading is paused while Bybit is connected. Capital and P&amp;L come from your live account.</p>
-          <button className="px-4 py-2 rounded-lg bg-gray-800 text-white text-sm" onClick={onClose}>Close</button>
+          <p className="text-sm text-gray-400 mb-4">
+            Paper trading is paused while Bybit is connected. Capital and P&amp;L come from your live account.
+          </p>
+          <button type="button" className="px-4 py-2 rounded-lg bg-gray-800 text-white text-sm" onClick={onClose}>
+            Close
+          </button>
         </div>
       </div>
     );
@@ -44,6 +80,11 @@ export default function PaperTradingModal({ open, onClose, currentCapital, onCap
     emerald: 'bg-emerald-900/30 border-emerald-600/50 text-emerald-300',
   };
 
+  const displayCap =
+    paperCapital != null && Number.isFinite(Number(paperCapital))
+      ? Number(paperCapital)
+      : null;
+
   async function handleSave() {
     const value = parseFloat(amount);
     if (!value || value < 100) {
@@ -53,21 +94,18 @@ export default function PaperTradingModal({ open, onClose, currentCapital, onCap
 
     setSaving(true);
     try {
-      const res = await authFetch('/paper-trading/set-capital', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: value }),
-      });
-      const data = await res.json();
-      const isSuccess = res.ok && data.status === 'success';
-      setStatus({ tone: isSuccess ? 'emerald' : 'red', message: data.message });
-
-      if (isSuccess) {
-        onCapitalSet(data.capital);
-        setTimeout(onClose, 1200);
+      const result = await onSetCapital(value);
+      if (result?.ok) {
+        setStatus({
+          tone: 'emerald',
+          message: result.message || `Paper capital set to ${fmtCurrency(result.capital)}.`,
+        });
+        setTimeout(onClose, 900);
+      } else {
+        setStatus({ tone: 'red', message: result?.message || 'Failed to set paper capital.' });
       }
     } catch (err) {
-      console.error('Failed to set paper trading capital:', err);
+      console.error('Paper capital save failed:', err);
       setStatus({ tone: 'red', message: 'Connection to backend failed. Please try again.' });
     } finally {
       setSaving(false);
@@ -86,10 +124,11 @@ export default function PaperTradingModal({ open, onClose, currentCapital, onCap
             <h2 className="text-xl font-bold text-white">Paper Trading Setup</h2>
           </div>
           <button
+            type="button"
             className="w-8 h-8 rounded-lg bg-[#161A1E] border border-gray-700 text-gray-400 hover:text-white flex items-center justify-center"
             onClick={onClose}
           >
-            <i className="fas fa-times"></i>
+            <i className="fas fa-times" />
           </button>
         </div>
 
@@ -119,7 +158,12 @@ export default function PaperTradingModal({ open, onClose, currentCapital, onCap
             {PRESETS.map((preset) => (
               <button
                 key={preset.amount}
-                className="bg-[#161A1E] hover:bg-gray-800 border border-gray-700 text-gray-300 text-xs font-bold py-2 rounded-lg"
+                type="button"
+                className={`border text-xs font-bold py-2 rounded-lg ${
+                  String(amount) === String(preset.amount)
+                    ? 'bg-yellow-500/20 border-yellow-500 text-yellow-300'
+                    : 'bg-[#161A1E] hover:bg-gray-800 border-gray-700 text-gray-300'
+                }`}
                 onClick={() => setAmount(String(preset.amount))}
               >
                 {preset.label}
@@ -127,14 +171,18 @@ export default function PaperTradingModal({ open, onClose, currentCapital, onCap
             ))}
           </div>
 
-          <div className={`text-xs rounded-lg px-4 py-3 border ${toneClasses[status.tone]}`}>{status.message}</div>
+          <div className={`text-xs rounded-lg px-4 py-3 border ${toneClasses[status.tone]}`}>
+            {status.message}
+            {displayCap != null && status.tone === 'yellow' ? null : null}
+          </div>
 
           <button
+            type="button"
             className="w-full bg-yellow-500 hover:bg-yellow-400 text-black font-bold py-2.5 rounded-lg text-sm transition-colors disabled:opacity-60"
             onClick={handleSave}
-            disabled={saving}
+            disabled={saving || paperLoading}
           >
-            {saving ? 'Starting...' : 'Start Paper Trading With This Amount'}
+            {saving || paperLoading ? 'Saving…' : 'Start Paper Trading With This Amount'}
           </button>
         </div>
       </div>

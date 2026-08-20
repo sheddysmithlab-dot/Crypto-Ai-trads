@@ -2753,20 +2753,54 @@ async def timeframe_profiles():
     }
 
 # ==========================================
-# PAPER TRADING CAPITAL WIRING
+# PAPER TRADING CAPITAL — fresh /paper/* API
 # ==========================================
 class PaperCapitalPayload(BaseModel):
     amount: float
 
-@app.post("/paper-trading/set-capital")
-async def set_paper_capital(payload: PaperCapitalPayload):
+
+@app.get("/paper/status")
+async def paper_status():
+    """Current paper capital + mode for the Paper Trading modal."""
+    return {
+        "status": "success",
+        "mode": bybit_api.mode,
+        "is_paper": bybit_api.mode == "PAPER_TRADING",
+        "capital": round(float(agent.current_capital or 0), 2),
+        "starting_capital": round(float(agent.starting_capital or 0), 2),
+        "total_portfolio_value": round(float(agent.get_total_portfolio_value() or 0), 2),
+    }
+
+
+@app.post("/paper/set-capital")
+async def paper_set_capital(payload: PaperCapitalPayload):
+    """Set simulated paper capital. Forces PAPER mode if still on paper path."""
     if bybit_api.mode != "PAPER_TRADING":
-        return {"status": "error", "message": "Cannot change simulated capital while LIVE trading is active."}
-    if payload.amount < 100:
+        return {
+            "status": "error",
+            "message": "Cannot change simulated capital while LIVE trading is active.",
+            "mode": bybit_api.mode,
+        }
+    amount = float(payload.amount or 0)
+    if amount < 100:
         return {"status": "error", "message": "Minimum paper trading capital is $100."}
 
-    agent.set_paper_capital(payload.amount)
-    return {"status": "success", "message": f"Paper trading capital set to ${payload.amount:,.2f}.", "capital": agent.current_capital}
+    agent.set_paper_capital(amount)
+    notifications.push(f"Paper capital set to ${amount:,.2f}.", "success")
+    system_log.push("ai", f"Paper capital reset to ${amount:,.2f}.", {"capital": amount})
+    return {
+        "status": "success",
+        "message": f"Paper trading capital set to ${amount:,.2f}.",
+        "capital": round(float(agent.current_capital), 2),
+        "mode": bybit_api.mode,
+        "is_paper": True,
+    }
+
+
+# Legacy alias (old frontend builds)
+@app.post("/paper-trading/set-capital")
+async def set_paper_capital_legacy(payload: PaperCapitalPayload):
+    return await paper_set_capital(payload)
 
 # ==========================================
 # AI AGENT INSTRUCTIONS MODAL WIRING

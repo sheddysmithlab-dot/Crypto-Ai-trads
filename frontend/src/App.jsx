@@ -12,6 +12,7 @@ import { useUptime } from './hooks/useUptime';
 import { useDayStats } from './hooks/useDayStats';
 import { useTfMoveStats } from './hooks/useTfMoveStats';
 import { useBotControl } from './hooks/useBotControl';
+import { usePaperTrading } from './hooks/usePaperTrading';
 
 import Header from './components/Header';
 import MobilePortfolioCard from './components/MobilePortfolioCard';
@@ -77,6 +78,18 @@ export default function App() {
   const [launcherEditingId, setLauncherEditingId] = useState(null);
 
   const portfolio = usePortfolio(setConnected);
+  const {
+    capital: paperCapital,
+    loading: paperLoading,
+    refresh: refreshPaperStatus,
+    setPaperCapital,
+  } = usePaperTrading();
+
+  // Load true paper capital from backend once (do not trust $0 from empty WS).
+  useEffect(() => {
+    refreshPaperStatus();
+  }, [refreshPaperStatus]);
+
   const serverBotActive = Boolean(portfolio.isActive);
   const {
     isActive: effectiveBotActive,
@@ -316,7 +329,10 @@ export default function App() {
     return { title: '', message: '', confirmLabel: 'Confirm' };
   })();
 
-  const totalEquity = portfolio.cashLedger ?? portfolio.totalCapital;
+  const totalEquity =
+    paperCapital != null && Number.isFinite(Number(paperCapital))
+      ? Number(paperCapital)
+      : (portfolio.cashLedger ?? portfolio.totalCapital);
   const tradeValue = portfolio.tradeNotional > 0
     ? portfolio.tradeNotional
     : trades.reduce((sum, t) => {
@@ -438,9 +454,11 @@ export default function App() {
       <PaperTradingModal
         open={paperModalOpen}
         onClose={() => setPaperModalOpen(false)}
-        currentCapital={totalEquity}
-        onCapitalSet={() => {}}
         isLive={portfolio.tradingMode === 'LIVE_TRADING'}
+        paperCapital={paperCapital}
+        paperLoading={paperLoading}
+        onRefreshStatus={refreshPaperStatus}
+        onSetCapital={setPaperCapital}
       />
 
       <AlertModal open={alertOpen} onClose={() => setAlertOpen(false)} />
