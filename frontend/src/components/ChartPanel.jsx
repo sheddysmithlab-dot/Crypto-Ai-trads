@@ -36,6 +36,7 @@ export default function ChartPanel({
           activePairLabel={pairSelector.activePairLabel}
           selectPair={pairSelector.selectPair}
           toggleStar={pairSelector.toggleStar}
+          botIsActive={botIsActive}
         />
         <div className="flex flex-wrap justify-end items-center gap-2 text-xs font-semibold">
           {readouts.tradeFireTooltip ? (
@@ -105,7 +106,11 @@ export default function ChartPanel({
                     ? 'bg-blue-600 text-white'
                     : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
                 }`}
-                onClick={() => switchTimeframe(tf)}
+                disabled={botIsActive}
+                onClick={() => {
+                  if (botIsActive) return;
+                  switchTimeframe(tf);
+                }}
                 onMouseEnter={() => setHoverTf(tf)}
                 onMouseLeave={() => setHoverTf(null)}
                 title={`${tf}: Win ${p.winRate}% / Lose ${p.loseRate}% · Trade ${p.capitalPct}% of capital`}

@@ -1,7 +1,14 @@
 import { useMemo, useRef, useState } from 'react';
 import { useClickOutside } from '../hooks/useClickOutside';
 
-export default function PairSelectorDropdown({ pairs, activePair, activePairLabel, selectPair, toggleStar }) {
+export default function PairSelectorDropdown({
+  pairs,
+  activePair,
+  activePairLabel,
+  selectPair,
+  toggleStar,
+  botIsActive = false,
+}) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const wrapRef = useRef(null);
@@ -18,6 +25,7 @@ export default function PairSelectorDropdown({ pairs, activePair, activePairLabe
   }, [pairs, query]);
 
   function handleSelect(symbol) {
+    if (botIsActive) return;
     selectPair(symbol);
     setOpen(false);
     setQuery('');
@@ -25,7 +33,14 @@ export default function PairSelectorDropdown({ pairs, activePair, activePairLabe
 
   return (
     <div className="relative" ref={wrapRef}>
-      <button className="flex items-center gap-2" onClick={() => setOpen((o) => !o)}>
+      <button
+        className={`flex items-center gap-2 ${botIsActive ? 'opacity-60 cursor-not-allowed' : ''}`}
+        onClick={() => {
+          if (botIsActive) return;
+          setOpen((o) => !o);
+        }}
+        disabled={botIsActive}
+      >
         <div
           className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white"
           style={{ background: activePair.color }}
@@ -85,6 +100,7 @@ export default function PairSelectorDropdown({ pairs, activePair, activePairLabe
                       : 'hover:bg-gray-100/5 dark:hover:bg-gray-800/30 border-l-4 border-transparent'
                   }`}
                   onClick={() => handleSelect(pair.symbol)}
+                  disabled={botIsActive}
                 >
                   <i
                     className={`text-xs cursor-pointer hover:scale-125 transition-transform ${

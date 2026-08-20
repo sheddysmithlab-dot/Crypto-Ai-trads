@@ -11,6 +11,7 @@ import { useTradingChart } from './hooks/useTradingChart';
 import { useUptime } from './hooks/useUptime';
 import { useDayStats } from './hooks/useDayStats';
 import { useTfMoveStats } from './hooks/useTfMoveStats';
+import { useBotControl } from './hooks/useBotControl';
 
 import Header from './components/Header';
 import MobilePortfolioCard from './components/MobilePortfolioCard';
@@ -20,8 +21,6 @@ import ControlBar from './components/ControlBar';
 import PaperTradingModal from './components/PaperTradingModal';
 import AlertModal from './components/AlertModal';
 import SettingsModal from './components/SettingsModal';
-import AgentInstructionsModal from './components/AgentInstructionsModal';
-import StartConfirmModal from './components/StartConfirmModal';
 import TradeExitConfirmModal from './components/TradeExitConfirmModal';
 import SystemLogModal from './components/SystemLogModal';
 import AgentChatStrip from './components/AgentChatStrip';
@@ -67,9 +66,6 @@ export default function App() {
   const [alertOpen, setAlertOpen] = useState(false);
   const [paperModalOpen, setPaperModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [agentModalOpen, setAgentModalOpen] = useState(false);
-  const [startConfirmOpen, setStartConfirmOpen] = useState(false);
-  const [pendingConfig, setPendingConfig] = useState(null);
   const [logModalOpen, setLogModalOpen] = useState(false);
   const [statementOpen, setStatementOpen] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState(null);
@@ -81,8 +77,14 @@ export default function App() {
   const [launcherEditingId, setLauncherEditingId] = useState(null);
 
   const portfolio = usePortfolio(setConnected);
+  const serverBotActive = Boolean(portfolio.isActive);
+  const {
+    isActive: effectiveBotActive,
+    loading: botLoading,
+    toggle: toggleBotEngine,
+  } = useBotControl({ serverIsActive: serverBotActive });
 
-  const uptime = useUptime(portfolio.isActive);
+  const uptime = useUptime(effectiveBotActive);
   const dayStats = useDayStats(pairSelector.activePairLabel);
 
   async function fetchSettingsStatus() {
@@ -123,7 +125,7 @@ export default function App() {
     pairPrice: pairSelector.activePair.price,
     externalTradingMode: portfolio.tradingMode,
     setConnected,
-    botIsActive: portfolio.isActive,
+    botIsActive: effectiveBotActive,
     blueBoxOverlay: portfolio.blueBoxOverlay,
     entryCandles,
     patternNeon,
@@ -177,79 +179,14 @@ export default function App() {
     ].slice(0, 20));
   }
 
+  // Fresh AI Engine toggle — only /bot/start and /bot/stop
   async function handleControlClick() {
-    if (!portfolio.isActive) {
-      // START AI AUTOMATION opens the AI Agent Instructions pre-start popup first.
-      // The actual /start-bot call happens inside handleAgentStart once the user
-      // confirms risk level / daily-profit and clicks Start.
-      debugLog('User clicked START AI AUTOMATION. Opening AI Agent Instructions modal...');
-      pushActionLog('START AI AUTOMATION requested. Showing AI instructions popup.');
-      setAgentModalOpen(true);
-    } else {
-      debugLog('User clicked STOP AI AUTOMATION. Sending POST /emergency-exit to Backend...');
-      pushActionLog('STOP AI AUTOMATION requested. Sending emergency exit request to backend.');
-      try {
-        await authFetch('/emergency-exit', { method: 'POST' });
-      } catch (err) {
-        console.error('Emergency exit failed:', err);
-      }
-    }
-  }
-
-  // Step 3 -> Step 4 wiring: the AI Agent Instructions "Start AI Automation"
-  // button hands the chosen config here. We close that popup and immediately
-  // open the "Emergency Exit & Continue" final safety check with the config.
-  function handleAgentStartRequest(config) {
-    debugLog('AI Instructions confirmed. Opening Emergency Exit & Continue safety check...', config);
-    pushActionLog(`AI config confirmed. risk_level=${config.stopLossPct}%, daily_profit=${config.dailyProfitPct}%`);
-    setAgentModalOpen(false);
-    setPendingConfig(config);
-    setStartConfirmOpen(true);
-  }
-
-  // Safety check -> Continue: actually apply the config and start the bot.
-  async function handleConfirmContinue() {
-    if (!pendingConfig) return;
-    const { stopLossPct, dailyProfitPct, trades } = pendingConfig;
-    setStartConfirmOpen(false);
-    pushActionLog(`Safety check continued. Starting bot with risk_level=${stopLossPct}%, daily_profit=${dailyProfitPct}%, max_trades=${trades}`);
-    debugLog(`Safety check: Continue. Applying config (riskLevel=${stopLossPct}%, dailyProfit=${dailyProfitPct}%, maxTrades=${trades}) and starting bot...`);
-    try {
-      const configRes = await authFetch('/agent/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          stop_loss_pct: stopLossPct,
-          daily_profit_pct: dailyProfitPct,
-          max_concurrent_trades: trades,
-        }),
-      });
-      const configData = await configRes.json();
-      if (configData.status === 'error') {
-        pushActionLog(`Agent config rejected: ${configData.message}`);
-        console.error('Agent config rejected:', configData.message);
-        window.alert(configData.message || 'Could not apply AI agent settings. Bot not started.');
-        setPendingConfig(null);
-        return;
-      }
-      pushActionLog(`Agent config applied. max_concurrent_trades=${configData.max_concurrent_trades}`);
-      await syncWatchlist(launcherSlots);
-      const res = await authFetch('/start-bot', { method: 'POST' });
-      const data = await res.json();
-      debugLog('Bot started successfully:', data.message);
-    } catch (err) {
-      console.error('Failed to start bot from safety check:', err);
-    } finally {
-      setPendingConfig(null);
-    }
-  }
-
-  // Safety check -> Emergency Exit (or 30s auto-default): cancel, do NOT start.
-  function handleConfirmExit() {
-    pushActionLog('Safety check cancelled. Bot start aborted.');
-    debugLog('Safety check: Emergency Exit. Bot start cancelled.');
-    setStartConfirmOpen(false);
-    setPendingConfig(null);
+    const pairs = launcherSlots.map((s) => `${s.symbol}/USDT`);
+    const goingOn = !effectiveBotActive;
+    pushActionLog(goingOn ? 'AI Engine START…' : 'AI Engine STOP…');
+    const ok = await toggleBotEngine({ watchlistPairs: pairs });
+    pushActionLog(ok ? (goingOn ? 'AI Engine ON.' : 'AI Engine OFF.') : 'AI Engine request failed.');
+    debugLog(ok ? 'AI Engine toggle ok' : 'AI Engine toggle failed');
   }
 
   function requestForceClose(tradeId) {
@@ -290,7 +227,7 @@ export default function App() {
   }
 
   function handleLauncherMinimizeToSlot({ id, symbol, timeframe: tf }) {
-    if (portfolio.isActive) return;
+    if (effectiveBotActive) return;
     let nextSlots = null;
     setLauncherSlots((prev) => {
       const sameSymbol = prev.find((s) => s.symbol === symbol);
@@ -379,7 +316,6 @@ export default function App() {
     return { title: '', message: '', confirmLabel: 'Confirm' };
   })();
 
-  // Total Capital = available cash (drops 10% per open trade). Trade Value = open notional.
   const totalEquity = portfolio.cashLedger ?? portfolio.totalCapital;
   const tradeValue = portfolio.tradeNotional > 0
     ? portfolio.tradeNotional
@@ -439,7 +375,7 @@ export default function App() {
           timeframe={timeframe}
           switchTimeframe={switchTimeframe}
           readouts={readouts}
-          botIsActive={portfolio.isActive}
+          botIsActive={effectiveBotActive}
           tfMovePct={tfMoveStats.avgPct}
           tfMoveLabel={tfMoveStats.windowLabel}
           launcher={{
@@ -447,7 +383,7 @@ export default function App() {
             editorOpen: launcherEditorOpen,
             editingId: launcherEditingId,
             onOpenNew: () => {
-              if (portfolio.isActive) return;
+              if (effectiveBotActive) return;
               if (launcherSlots.length >= MAX_LAUNCHER_SLOTS) {
                 window.alert(`Maximum ${MAX_LAUNCHER_SLOTS} coins in the minimize list.`);
                 return;
@@ -461,12 +397,12 @@ export default function App() {
             },
             onMinimizeToSlot: handleLauncherMinimizeToSlot,
             onRestoreSlot: (id) => {
-              if (portfolio.isActive) return;
+              if (effectiveBotActive) return;
               setLauncherEditingId(id);
               setLauncherEditorOpen(true);
             },
             onRemoveSlot: (id) => {
-              if (portfolio.isActive) return;
+              if (effectiveBotActive) return;
               setLauncherSlots((prev) => {
                 const next = prev.filter((s) => s.id !== id);
                 syncWatchlist(next);
@@ -479,7 +415,7 @@ export default function App() {
             },
           }}
         />
-        <AgentChatStrip isActive={portfolio.isActive} lines={portfolio.agentChat} />
+        <AgentChatStrip isActive={effectiveBotActive} lines={portfolio.agentChat} />
 
         <LiveTradesPanel
           trades={trades}
@@ -490,7 +426,8 @@ export default function App() {
       </main>
 
       <ControlBar
-        botIsActive={portfolio.isActive}
+        botIsActive={effectiveBotActive}
+        botLoading={botLoading}
         uptime={uptime}
         lastUpdated={readouts.lastUpdated}
         onClick={handleControlClick}
@@ -502,9 +439,7 @@ export default function App() {
         open={paperModalOpen}
         onClose={() => setPaperModalOpen(false)}
         currentCapital={totalEquity}
-        onCapitalSet={() => {
-          /* Backend /ws/portfolio pushes the reset equity after save. */
-        }}
+        onCapitalSet={() => {}}
         isLive={portfolio.tradingMode === 'LIVE_TRADING'}
       />
 
@@ -513,20 +448,6 @@ export default function App() {
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onLiveTradingConnected={() => {}} />
 
       <TradingStatementModal open={statementOpen} onClose={() => setStatementOpen(false)} />
-
-      <AgentInstructionsModal
-        open={agentModalOpen}
-        onClose={() => setAgentModalOpen(false)}
-        onStart={handleAgentStartRequest}
-      />
-
-      <StartConfirmModal
-        open={startConfirmOpen}
-        config={pendingConfig}
-        activeCount={activeCount}
-        onContinue={handleConfirmContinue}
-        onExit={handleConfirmExit}
-      />
 
       <TradeExitConfirmModal
         open={exitConfirm.open}

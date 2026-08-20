@@ -2472,66 +2472,86 @@ async def session_schedule_loop():
 # ==========================================
 # 2. REST API COMMAND "WIRES"
 # ==========================================
-@app.post("/start-bot")
-async def start_bot():
+# ── Fresh AI Engine control (frontend uses ONLY these) ──────────────────────
+@app.post("/bot/start")
+async def bot_start():
+    """Fresh AI Engine START — arms brain.py scanner. No modal config chain."""
+    if agent.is_active:
+        return {
+            "status": "success",
+            "is_active": True,
+            "message": "AI Engine already running.",
+        }
     open_count = len(agent.trades)
     agent.clear_emergency_state()
-    agent.daily_target_reached = False  # fresh session -> clear any prior daily-target halt
-    agent.begin_ai_season()  # season P&L + kill-switch baseline = portfolio value right now
+    agent.daily_target_reached = False
+    agent.begin_ai_season()
     agent.is_active = True
-    print("[PILLAR 2: BACKEND] Received 'START' — Candlestick Brain v2 (brain.py).")
-    system_log.push(
-        "ai",
-        f"AI automation STARTED on {agent.active_pair} ({open_count} open position(s) preserved).",
-        {"open_positions": open_count, "timeframe_seconds": agent.timeframe_seconds},
-    )
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     profile = entry_pattern_profile(tf_key)
-    engine_note = (
-        "Candlestick Brain v2: pattern scan + market structure + trap & reverse (10th-man) + ML bias. "
-        "Brain-driven SL/TP (fallback ±fixed%)."
+    print(f"[AI ENGINE] START — {agent.active_pair} ({tf_key}) brain.py")
+    system_log.push(
+        "ai",
+        f"AI Engine STARTED on {agent.active_pair} ({open_count} open preserved).",
+        {"open_positions": open_count, "timeframe_seconds": agent.timeframe_seconds},
     )
     system_log.push_agent_chat(
-        f"Bot active — {profile['name']} on {agent.active_pair} ({tf_key}): {engine_note}.",
+        f"AI Engine ON — {profile['name']} · {agent.active_pair} · {tf_key}",
         status="active",
-        details={
-            "pair": agent.active_pair,
-            "timeframe": tf_key,
-            "entry_pattern": profile,
-        },
+        details={"pair": agent.active_pair, "timeframe": tf_key, "entry_pattern": profile},
     )
-    if open_count:
-        notifications.push(
-            f"AI Agent STARTED on {agent.active_pair}. {open_count} open position(s) preserved (manual trades protected).",
-            "success",
-        )
-    else:
-        notifications.push(f"AI Agent STARTED - now monitoring {agent.active_pair} live.", "success")
+    notifications.push(f"AI Engine STARTED on {agent.active_pair}.", "success")
     return {
         "status": "success",
-        "entry_pattern": profile["name"],
-        "entry_pattern_profile": profile,
-        "message": (
-            f"Bot active — {profile['name']} ({tf_key}). {engine_note}"
-        ),
+        "is_active": True,
+        "message": f"AI Engine started — {profile['name']} ({tf_key}).",
         "open_positions": open_count,
-        "trade_history_count": len(agent.trade_history),
+        "entry_pattern": profile["name"],
     }
+
+
+@app.post("/bot/stop")
+async def bot_stop():
+    """Fresh AI Engine STOP — close all positions and halt scanner."""
+    if not agent.is_active and not agent.trades:
+        agent.is_active = False
+        return {
+            "status": "success",
+            "is_active": False,
+            "message": "AI Engine already stopped.",
+        }
+    print("[AI ENGINE] STOP — closing positions and halting.")
+    agent.manual_stop("AI Engine STOP from Frontend")
+    return {
+        "status": "success",
+        "is_active": False,
+        "message": "AI Engine stopped. All positions closed.",
+    }
+
+
+@app.get("/bot/status")
+async def bot_status():
+    """Lightweight poll for AI Engine active flag."""
+    return {
+        "status": "success",
+        "is_active": bool(agent.is_active),
+        "open_positions": len(agent.trades),
+        "pair": agent.active_pair,
+    }
+
+
+# Legacy aliases (old frontend / cached builds) — keep working but log as legacy
+@app.post("/start-bot")
+async def start_bot():
+    return await bot_start()
+
 
 @app.post("/emergency-exit")
 async def emergency_exit():
-    """ Shared by two very different situations, disambiguated by server-side state:
-    1. The main STOP TRADING button (voluntary, no loss event) -> manual_stop().
-    2. The RULE 8 popup's 'Emergency Exit' button / 30s frontend fallback, responding to
-       an ALREADY-ACTIVE automatic emergency -> confirm_emergency_exit() (positions are
-       already closed at trigger time; this just resolves the pending decision). """
     if agent.emergency_awaiting_decision:
-        print("[PILLAR 2: BACKEND] User confirmed EMERGENCY EXIT choice from the RULE 8 popup.")
         agent.confirm_emergency_exit()
-    else:
-        print("[PILLAR 2: BACKEND] Received manual STOP TRADING from Frontend control button.")
-        agent.manual_stop("STOP AI AUTOMATION | Emergency Exit from Frontend")
-    return {"status": "success", "message": "All trades closed."}
+        return {"status": "success", "is_active": False, "message": "Emergency exit confirmed."}
+    return await bot_stop()
 
 @app.post("/continue-trading")
 async def continue_trading():
