@@ -610,11 +610,18 @@ bybit_api = BybitAPIWrapper()
 # Manual-mode defaults (auto strategy wiped)
 MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "5"))
 MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "1"))
-AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Fixed ±0.5% gross exit (LONG/SHORT)
+AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path-based SL + fixed profit book
 INVERT_AUTO_TRADE_FIRE = False
-# Exit when price move vs entry hits these gross % levels (same both sides).
-FIXED_EXIT_LOSS_PCT = 0.5    # book loss / cut at ≤ -0.5%
+# Profit book (gross % from entry) — same both sides.
 FIXED_EXIT_PROFIT_PCT = 0.5  # book profit at ≥ +0.5%
+# Path-based stop-loss (per trade, tick path):
+#   continuous adverse --- (3 steps) → exit at -0.50%
+#   choppy -+-+ path → hold past 0.50%, exit at -0.70%
+PATH_SL_TIGHT_PCT = 0.5
+PATH_SL_WIDE_PCT = 0.7
+PATH_SL_ADVERSE_STEPS = 3
+# Legacy alias (tight SL) — used for initial UI SL price on open.
+FIXED_EXIT_LOSS_PCT = PATH_SL_TIGHT_PCT
 BTC_REGIME_GATE = False
 _AUTO_BUY_TICKER_POLL = float(os.environ.get("MARKET_TICKER_POLL", "0.35"))
 _AUTO_BUY_BURST_POLL = float(os.environ.get("AUTO_BUY_BURST_POLL", "0.12"))
@@ -1325,8 +1332,8 @@ class AITradingAgent:
         entry_fee_pct = bybit_api.get_taker_fee_pct()
         entry_fee_usd = round(position_size * (entry_fee_pct / 100), 4)
 
-        # Manual / future engine: keep SL+TP from signal when provided.
-        # Auto trades: force fixed ±0.5% gross exits (LONG/SHORT same).
+        # Manual: keep SL+TP from signal when provided.
+        # Auto: path-based SL (--- → 0.5%, -+-+ → 0.7%) + fixed +0.5% TP prices for UI.
         clean_sl = None
         clean_tp = None
         if source == "auto":
@@ -1374,8 +1381,14 @@ class AITradingAgent:
             "capital_reserved": capital_reserved,
             "season_id": self.ai_season_id,
             "timeframe_key": timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m"),
-            "exit_mode": "fixed_pm_0_5" if source == "auto" else "manual",
+            "exit_mode": "path_sl" if source == "auto" else "manual",
             "entry_pattern": ENTRY_PATTERN_NAME,
+            # Path-based SL state (auto): --- → exit -0.5%; -+-+ → hold to -0.7%
+            "path_last_gross_pct": 0.0,
+            "path_adverse_streak": 0,
+            "path_choppy": False,       # True once a + recovery broke a --- run
+            "path_continuous_dump": False,  # True after 3 consecutive adverse steps
+            "path_sl_pct": PATH_SL_TIGHT_PCT,
         }
         self.trades.append(trade)
         self.set_pair_mark(trade_pair, filled_price)
@@ -1509,14 +1522,18 @@ class AITradingAgent:
         return snapshot
 
     async def process_tick(self, new_price, volume_increment, pair: str | None = None):
-        """Update mark for one pair; evaluate Strict Exit using each trade's own pair price."""
+        """Update mark for one pair; always re-check auto exits on every tick."""
         focus = (pair or self.active_pair or "").strip()
-        clean_price = self.set_pair_mark(focus, new_price) if focus else _sanitize_market_price(new_price)
+        clean_price = None
+        if focus:
+            clean_price = self.set_pair_mark(focus, new_price)
+        else:
+            clean_price = _sanitize_market_price(new_price)
+            if clean_price is not None:
+                self.current_price = clean_price
         if clean_price is None:
+            # Bad tick for this pair — still evaluate exits using last known marks.
             print(f"[PILLAR 3: AI AGENT] Ignoring invalid market tick: {new_price!r} pair={focus}")
-            return
-        if not focus:
-            self.current_price = clean_price
 
         corrupt = [t for t in self.trades if t.get("entry", 0) <= 0]
         if corrupt:
@@ -1531,35 +1548,62 @@ class AITradingAgent:
             self.peak_net_pct = 0.0
             return
 
-        # Auto exits: fixed ±0.5% gross from entry (LONG/SHORT same; manual untouched).
         if AUTO_TRADE_AUTO_EXIT_ENABLED:
-            still_open = []
-            for trade in self.trades:
-                if trade.get("source") == "manual":
-                    still_open.append(trade)
-                    continue
-                trade_pair = trade.get("pair") or ""
-                mark = self.mark_price_for(trade_pair)
-                entry = float(trade.get("entry") or 0)
-                if mark is None or entry <= 0:
-                    still_open.append(trade)
-                    continue
-                reason = self._evaluate_fixed_pct_exit(trade, float(mark))
-                if reason:
-                    m = self._trade_metrics(trade)
-                    if self._close_single_trade(trade, m, reason):
-                        continue
-                still_open.append(trade)
-            self.trades = still_open
+            self._run_auto_exits()
 
         self._sync_agent_trailing_lock_state()
 
-    def _fixed_exit_prices(self, entry: float, side: str) -> tuple[float | None, float | None]:
-        """SL/TP prices for ±FIXED_EXIT_*_PCT (same magnitude both sides)."""
+    def _run_auto_exits(self) -> int:
+        """Close auto trades that hit path-SL / +0.5% TP. Returns number closed."""
+        still_open = []
+        closed_n = 0
+        for trade in list(self.trades):
+            if trade.get("source") == "manual":
+                still_open.append(trade)
+                continue
+            trade_pair = trade.get("pair") or ""
+            entry = float(trade.get("entry") or 0)
+            if entry <= 0:
+                still_open.append(trade)
+                continue
+            # Same mark the UI uses (includes cross-pair 20x guard).
+            metrics = self._trade_metrics(trade)
+            mark = float(metrics.get("mark_price") or 0)
+            if mark <= 0:
+                still_open.append(trade)
+                continue
+            try:
+                reason = self._evaluate_fixed_pct_exit(trade, mark)
+            except Exception as exc:
+                print(f"[AUTO-EXIT] evaluate error #{trade.get('id')} {trade_pair}: {exc}")
+                still_open.append(trade)
+                continue
+            if reason:
+                if self._close_single_trade(trade, metrics, reason):
+                    closed_n += 1
+                    print(f"[AUTO-EXIT] {reason}")
+                    continue
+                print(
+                    f"[AUTO-EXIT] Close FAILED #{trade.get('id')} {trade_pair} "
+                    f"(will retry) | {reason}"
+                )
+            still_open.append(trade)
+        self.trades = still_open
+        return closed_n
+
+    def _fixed_exit_prices(
+        self,
+        entry: float,
+        side: str,
+        *,
+        loss_pct: float | None = None,
+        profit_pct: float | None = None,
+    ) -> tuple[float | None, float | None]:
+        """SL/TP prices for given gross % levels (defaults: path tight SL + fixed TP)."""
         if entry <= 0:
             return None, None
-        loss = FIXED_EXIT_LOSS_PCT / 100.0
-        profit = FIXED_EXIT_PROFIT_PCT / 100.0
+        loss = (PATH_SL_TIGHT_PCT if loss_pct is None else float(loss_pct)) / 100.0
+        profit = (FIXED_EXIT_PROFIT_PCT if profit_pct is None else float(profit_pct)) / 100.0
         if side == "LONG":
             sl = entry * (1.0 - loss)
             tp = entry * (1.0 + profit)
@@ -1573,12 +1617,63 @@ class AITradingAgent:
             round(tp, price_decimals_for_mark(entry)),
         )
 
-    def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
-        """Exit an auto trade when brain-driven SL/TP is hit, or fall back to fixed %.
+    def _update_path_sl_state(self, trade: dict, gross_pct: float) -> None:
+        """Track adverse vs recovery steps for path-based stop.
 
-        Priority:
-          1. Brain-derived sl_price / tp_price stored on the trade at open.
-          2. Fixed FIXED_EXIT_LOSS_PCT / FIXED_EXIT_PROFIT_PCT as safety net.
+        Adverse step (-): gross PnL worsened (more red / less green).
+        Recovery step (+): gross improved or unchanged → marks path choppy.
+        Three consecutive adverse steps → continuous dump mode (tight −0.50% SL).
+        """
+        last = float(trade.get("path_last_gross_pct") if trade.get("path_last_gross_pct") is not None else 0.0)
+        # First sample after open: seed only.
+        if trade.get("path_seeded") is not True:
+            trade["path_last_gross_pct"] = gross_pct
+            trade["path_seeded"] = True
+            trade["path_adverse_streak"] = 0
+            return
+
+        eps = 1e-6
+        if gross_pct < last - eps:
+            # Adverse step
+            streak = int(trade.get("path_adverse_streak") or 0) + 1
+            trade["path_adverse_streak"] = streak
+            if streak >= PATH_SL_ADVERSE_STEPS:
+                trade["path_continuous_dump"] = True
+        elif gross_pct > last + eps:
+            # Recovery / bounce — reset streak; choppy only if bounce while in loss path
+            trade["path_adverse_streak"] = 0
+            if last < -eps or gross_pct < -eps:
+                trade["path_choppy"] = True
+        else:
+            # Flat — do not count as adverse continuity
+            trade["path_adverse_streak"] = 0
+
+        trade["path_last_gross_pct"] = gross_pct
+
+        # Active SL distance for UI: tight if continuous dump and not choppy; else wide once choppy.
+        if trade.get("path_choppy") and not trade.get("path_continuous_dump"):
+            trade["path_sl_pct"] = PATH_SL_WIDE_PCT
+        elif trade.get("path_continuous_dump") and not trade.get("path_choppy"):
+            trade["path_sl_pct"] = PATH_SL_TIGHT_PCT
+        elif trade.get("path_choppy"):
+            # Saw both bounce and later a dump — still treat as wide (user: -+-+ → 0.7%)
+            trade["path_sl_pct"] = PATH_SL_WIDE_PCT
+        else:
+            trade["path_sl_pct"] = PATH_SL_TIGHT_PCT
+
+        # Keep sl_price in sync for UI (TP unchanged).
+        entry = float(trade.get("entry") or 0)
+        side = trade.get("side")
+        if entry > 0 and side in ("LONG", "SHORT"):
+            sl, _tp = self._fixed_exit_prices(entry, side, loss_pct=float(trade["path_sl_pct"]))
+            if sl is not None:
+                trade["sl_price"] = sl
+
+    def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
+        """Path-based stop-loss + hard +0.5% profit book for auto trades.
+
+        Profit is ALWAYS gross-% based (never blocked by a far brain/UI tp_price).
+        Loss: continuous --- → −0.50%; choppy -+-+ → −0.70%; hard floor −0.70%.
         """
         entry = float(trade.get("entry") or 0)
         if entry <= 0:
@@ -1587,43 +1682,45 @@ class AITradingAgent:
         if side not in ("LONG", "SHORT"):
             return None
 
-        sl_price = trade.get("sl_price")
-        tp_price = trade.get("tp_price")
-
-        # Brain-driven exit (preferred).
-        if sl_price and tp_price:
-            sl = float(sl_price)
-            tp = float(tp_price)
-            if sl > 0 and tp > 0:
-                if side == "LONG":
-                    if mark <= sl:
-                        return f"Brain SL hit: LONG mark {mark:.6f} <= sl {sl:.6f}"
-                    if mark >= tp:
-                        return f"Brain TP hit: LONG mark {mark:.6f} >= tp {tp:.6f}"
-                elif side == "SHORT":
-                    if mark >= sl:
-                        return f"Brain SL hit: SHORT mark {mark:.6f} >= sl {sl:.6f}"
-                    if mark <= tp:
-                        return f"Brain TP hit: SHORT mark {mark:.6f} <= tp {tp:.6f}"
-                return None   # SL/TP not reached yet
-
-        # Fallback: fixed percentage exit.
         if side == "LONG":
             gross_pct = ((mark - entry) / entry) * 100.0
         else:
             gross_pct = ((entry - mark) / entry) * 100.0
 
-        if gross_pct <= -FIXED_EXIT_LOSS_PCT:
-            return (
-                f"Fixed loss exit −{FIXED_EXIT_LOSS_PCT:g}%: {side} gross {gross_pct:.3f}% "
-                f"(mark {mark:.6f} vs entry {entry:.6f})"
-            )
+        trade["peak_gross_pct"] = max(float(trade.get("peak_gross_pct") or 0), gross_pct)
+        trade["trough_gross_pct"] = min(float(trade.get("trough_gross_pct") or 0), gross_pct)
+
+        self._update_path_sl_state(trade, gross_pct)
+
+        # Hard profit book — must fire even if stored tp_price is farther away.
         if gross_pct >= FIXED_EXIT_PROFIT_PCT:
             return (
-                f"Fixed profit book +{FIXED_EXIT_PROFIT_PCT:g}%: {side} gross {gross_pct:.3f}% "
+                f"Auto TP +{FIXED_EXIT_PROFIT_PCT:g}%: {side} gross {gross_pct:.3f}% "
                 f"(mark {mark:.6f} vs entry {entry:.6f})"
             )
-        return None
+
+        # Hard loss floor
+        if gross_pct <= -PATH_SL_WIDE_PCT:
+            return (
+                f"Path SL −{PATH_SL_WIDE_PCT:g}%: {side} gross {gross_pct:.3f}% "
+                f"(mark {mark:.6f} vs entry {entry:.6f})"
+            )
+
+        if gross_pct > -PATH_SL_TIGHT_PCT:
+            return None
+
+        # At or beyond −0.50%
+        choppy = bool(trade.get("path_choppy"))
+        continuous = bool(trade.get("path_continuous_dump"))
+
+        if choppy:
+            return None  # hold to −0.70%
+
+        why = "continuous ---" if continuous else "no-bounce dump"
+        return (
+            f"Path SL −{PATH_SL_TIGHT_PCT:g}% ({why}): {side} gross {gross_pct:.3f}% "
+            f"streak={trade.get('path_adverse_streak')} (mark {mark:.6f})"
+        )
 
     def _close_single_trade(self, trade, metrics, reason) -> bool:
         """Close one position. Returns True if closed locally (and on Bybit when applicable)."""
@@ -2001,8 +2098,9 @@ def get_bybit_executor_agent():
 def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
-        "CANDLESTICK BRAIN v2 | patterns + market structure + trap & reverse (10th-man) + ML bias | "
-        "brain-driven SL/TP (fallback ±fixed%) | "
+        "CANDLESTICK BRAIN v2 + path SL | "
+        f"auto TP +{FIXED_EXIT_PROFIT_PCT:g}% gross | "
+        f"SL −{PATH_SL_TIGHT_PCT:g}% (continuous ---) / −{PATH_SL_WIDE_PCT:g}% (choppy -+-+) | "
         "manual BUY/SELL + emergency sell-all"
     )
 
@@ -2499,6 +2597,20 @@ async def self_ping_keepalive():
             await _ping_health(client, self_url)
 
 
+async def auto_exit_watchdog():
+    """Re-check path-SL / +0.5% TP even if a ticker tick was skipped or failed."""
+    print("[AUTO-EXIT] Watchdog online (path SL + hard +0.5% TP).")
+    while True:
+        try:
+            if AUTO_TRADE_AUTO_EXIT_ENABLED and agent.trades:
+                n = agent._run_auto_exits()
+                if n:
+                    agent._sync_agent_trailing_lock_state()
+        except Exception as exc:
+            print(f"[AUTO-EXIT] Watchdog error: {exc}")
+        await asyncio.sleep(0.35)
+
+
 @app.on_event("startup")
 async def start_background_tasks():
     try:
@@ -2530,6 +2642,7 @@ async def start_background_tasks():
     asyncio.create_task(bybit_balance_refresher())
     asyncio.create_task(self_ping_keepalive())
     asyncio.create_task(auto_buy_loop())
+    asyncio.create_task(auto_exit_watchdog())
     asyncio.create_task(chart_24h_refresh_loop(BYBIT_SYMBOL_MAP))
     asyncio.create_task(session_schedule_loop())
 
