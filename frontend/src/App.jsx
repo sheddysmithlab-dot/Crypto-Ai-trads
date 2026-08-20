@@ -25,6 +25,8 @@ import PaperTradingModal from './components/PaperTradingModal';
 import SessionMomentumModal from './components/SessionMomentumModal';
 import AlertModal from './components/AlertModal';
 import SettingsModal from './components/SettingsModal';
+import AgentInstructionsModal from './components/AgentInstructionsModal';
+import StartConfirmModal from './components/StartConfirmModal';
 import TradeExitConfirmModal from './components/TradeExitConfirmModal';
 import SystemLogModal from './components/SystemLogModal';
 import AgentChatStrip from './components/AgentChatStrip';
@@ -72,6 +74,9 @@ export default function App() {
   const [paperModalOpen, setPaperModalOpen] = useState(false);
   const [sessionModalOpen, setSessionModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [agentModalOpen, setAgentModalOpen] = useState(false);
+  const [startConfirmOpen, setStartConfirmOpen] = useState(false);
+  const [pendingConfig, setPendingConfig] = useState(null);
   const [logModalOpen, setLogModalOpen] = useState(false);
   const [statementOpen, setStatementOpen] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState(null);
@@ -99,7 +104,8 @@ export default function App() {
   const {
     isActive: effectiveBotActive,
     loading: botLoading,
-    toggle: toggleBotEngine,
+    start: startBotEngine,
+    stop: stopBotEngine,
   } = useBotControl({ serverIsActive: serverBotActive });
 
   const {
@@ -206,18 +212,73 @@ export default function App() {
     ].slice(0, 20));
   }
 
-  // Fresh AI Engine toggle — only /bot/start and /bot/stop
+  // START → Instructions popup → Safety check → /agent/config + /bot/start
+  // STOP  → /bot/stop directly
   async function handleControlClick() {
-    const pairs = launcherSlots.map((s) => `${s.symbol}/USDT`);
-    const goingOn = !effectiveBotActive;
-    pushActionLog(goingOn ? 'AI Engine START…' : 'AI Engine STOP…');
-    const ok = await toggleBotEngine({ watchlistPairs: pairs });
-    pushActionLog(ok ? (goingOn ? 'AI Engine ON.' : 'AI Engine OFF.') : 'AI Engine request failed.');
-    debugLog(ok ? 'AI Engine toggle ok' : 'AI Engine toggle failed');
-    if (ok && goingOn) {
-      // Main engine start disables Session Momentum Engine on the backend
-      refreshSessionEngine();
+    if (effectiveBotActive) {
+      pushActionLog('AI Engine STOP…');
+      const ok = await stopBotEngine();
+      pushActionLog(ok ? 'AI Engine OFF.' : 'AI Engine stop failed.');
+      debugLog(ok ? 'AI Engine stopped' : 'AI Engine stop failed');
+      return;
     }
+    pushActionLog('AI Engine START requested. Opening instructions popup.');
+    debugLog('Opening AI Engine Instructions modal…');
+    setAgentModalOpen(true);
+  }
+
+  function handleAgentStartRequest(config) {
+    debugLog('AI Instructions confirmed. Opening Final Safety Check…', config);
+    pushActionLog(
+      `AI config confirmed. risk=${config.stopLossPct}%, daily_profit=${config.dailyProfitPct}%, max_trades=${config.trades}`,
+    );
+    setAgentModalOpen(false);
+    setPendingConfig(config);
+    setStartConfirmOpen(true);
+  }
+
+  async function handleConfirmContinue() {
+    if (!pendingConfig) return;
+    const { stopLossPct, dailyProfitPct, trades } = pendingConfig;
+    setStartConfirmOpen(false);
+    pushActionLog(
+      `Safety check OK. Starting AI Engine (risk=${stopLossPct}%, daily=${dailyProfitPct}%, max_trades=${trades})…`,
+    );
+    try {
+      const configRes = await authFetch('/agent/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stop_loss_pct: stopLossPct,
+          daily_profit_pct: dailyProfitPct,
+          max_concurrent_trades: trades,
+        }),
+      });
+      const configData = await configRes.json().catch(() => ({}));
+      if (!configRes.ok || configData.status === 'error') {
+        pushActionLog(`Agent config rejected: ${configData.message || 'error'}`);
+        window.alert(configData.message || 'Could not apply AI agent settings. Bot not started.');
+        setPendingConfig(null);
+        return;
+      }
+      pushActionLog(`Agent config applied. max_concurrent_trades=${configData.max_concurrent_trades}`);
+      const pairs = launcherSlots.map((s) => `${s.symbol}/USDT`);
+      const ok = await startBotEngine({ watchlistPairs: pairs });
+      pushActionLog(ok ? 'AI Engine ON.' : 'AI Engine start failed.');
+      if (ok) refreshSessionEngine();
+    } catch (err) {
+      console.error('Failed to start AI Engine from safety check:', err);
+      pushActionLog('AI Engine start failed (network).');
+    } finally {
+      setPendingConfig(null);
+    }
+  }
+
+  function handleConfirmExit() {
+    pushActionLog('Safety check cancelled. AI Engine start aborted.');
+    debugLog('Safety check: Emergency Exit. Start cancelled.');
+    setStartConfirmOpen(false);
+    setPendingConfig(null);
   }
 
   async function handleSessionStart() {
@@ -540,6 +601,20 @@ export default function App() {
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onLiveTradingConnected={() => {}} />
 
       <TradingStatementModal open={statementOpen} onClose={() => setStatementOpen(false)} />
+
+      <AgentInstructionsModal
+        open={agentModalOpen}
+        onClose={() => setAgentModalOpen(false)}
+        onStart={handleAgentStartRequest}
+      />
+
+      <StartConfirmModal
+        open={startConfirmOpen}
+        config={pendingConfig}
+        activeCount={activeCount}
+        onContinue={handleConfirmContinue}
+        onExit={handleConfirmExit}
+      />
 
       <TradeExitConfirmModal
         open={exitConfirm.open}
