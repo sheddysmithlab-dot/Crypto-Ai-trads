@@ -8,9 +8,10 @@ async function fetchBybitDayStats(pairLabel) {
   const bybitSymbol = getBybitSymbol(pairLabel);
   if (!bybitSymbol) return { high: null, low: null };
 
+  // Trading pairs are linear USDT perps — do NOT use spot tickers.
   try {
     const res = await fetch(
-      `https://api.bybit.com/v5/market/tickers?category=spot&symbol=${bybitSymbol}`
+      `https://api.bybit.com/v5/market/tickers?category=linear&symbol=${bybitSymbol}`,
     );
     if (!res.ok) return { high: null, low: null };
     const json = await res.json();
@@ -27,7 +28,7 @@ async function fetchBybitDayStats(pairLabel) {
   }
 }
 
-// 24h high/low — backend /chart/24h first, Bybit public ticker as fallback.
+// 24h high/low — backend /chart/24h first, Bybit linear ticker as fallback.
 export function useDayStats(pairLabel) {
   const [stats, setStats] = useState({ high: null, low: null });
 
@@ -44,6 +45,8 @@ export function useDayStats(pairLabel) {
           const data = await res.json();
           high = data.high != null ? Number(data.high) : null;
           low = data.low != null ? Number(data.low) : null;
+          if (!Number.isFinite(high) || high <= 0) high = null;
+          if (!Number.isFinite(low) || low <= 0) low = null;
         }
       } catch (err) {
         console.warn(`[DAY STATS] Backend 24h fetch failed for ${pairLabel}:`, err);

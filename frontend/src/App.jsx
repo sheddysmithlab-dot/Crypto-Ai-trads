@@ -359,34 +359,61 @@ export default function App() {
     return { title: '', message: '', confirmLabel: 'Confirm' };
   })();
 
+  // Prefer live portfolio WS; fall back to open-trade rollups if WS lags at zeros.
+  const openTrades = trades.filter((t) => t.status !== 'sold');
+  const tradesNetUsd = openTrades.reduce((sum, t) => sum + (Number(t.net_pnl_usd) || 0), 0);
+  const tradesFeeUsd = openTrades.reduce((sum, t) => sum + (Number(t.entry_fee_usd) || 0), 0);
+  const wsDaily = Number(portfolio.dailyProfit) || 0;
+  const wsFee = Number(portfolio.dailyBrokerFee) || 0;
+  const wsSeason = Number(portfolio.seasonProfit) || 0;
+  const pnlFallbackNeeded =
+    openTrades.length > 0 &&
+    wsDaily === 0 &&
+    wsFee === 0 &&
+    (Math.abs(tradesNetUsd) > 0.0001 || tradesFeeUsd > 0.0001);
+  const dailyProfit = pnlFallbackNeeded ? tradesNetUsd : wsDaily;
+  const dailyBrokerFee = pnlFallbackNeeded ? tradesFeeUsd : wsFee;
+  const seasonProfit =
+    portfolio.seasonActive || openTrades.length > 0
+      ? (pnlFallbackNeeded ? tradesNetUsd : wsSeason)
+      : wsSeason;
+  const seasonActive = Boolean(portfolio.seasonActive || openTrades.length > 0);
+  const capitalBase = Number(portfolio.cashLedger || portfolio.totalCapital || paperCapital || 0) || 1;
+  const dailyProfitPct = pnlFallbackNeeded
+    ? (dailyProfit / capitalBase) * 100
+    : (Number(portfolio.dailyProfitPct) || 0);
+  const seasonProfitPct = pnlFallbackNeeded
+    ? (seasonProfit / capitalBase) * 100
+    : (Number(portfolio.seasonProfitPct) || 0);
+
+  // Total Capital from portfolio ledger (WS). Paper hook is only a seed.
   const totalEquity =
-    paperCapital != null && Number.isFinite(Number(paperCapital))
-      ? Number(paperCapital)
-      : (portfolio.cashLedger ?? portfolio.totalCapital);
+    Number(portfolio.cashLedger) > 0 || Number(portfolio.totalCapital) > 0
+      ? (portfolio.cashLedger ?? portfolio.totalCapital)
+      : (paperCapital != null && Number.isFinite(Number(paperCapital))
+          ? Number(paperCapital)
+          : (portfolio.cashLedger ?? portfolio.totalCapital ?? 0));
   const tradeValue = portfolio.tradeNotional > 0
     ? portfolio.tradeNotional
-    : trades.reduce((sum, t) => {
-        if (t.status === 'sold') return sum;
-        return sum + (Number(t.position_size) || 0);
-      }, 0);
+    : openTrades.reduce((sum, t) => sum + (Number(t.position_size) || 0), 0);
 
   return (
     <div className="min-h-screen flex flex-col">
       <Header
         totalCapital={totalEquity}
         tradeValue={tradeValue}
-        dailyProfit={portfolio.dailyProfit}
-        dailyProfitPct={portfolio.dailyProfitPct}
-        dailyBrokerFee={portfolio.dailyBrokerFee}
-        seasonProfit={portfolio.seasonProfit}
-        seasonProfitPct={portfolio.seasonProfitPct}
-        seasonActive={portfolio.seasonActive}
+        dailyProfit={dailyProfit}
+        dailyProfitPct={dailyProfitPct}
+        dailyBrokerFee={dailyBrokerFee}
+        seasonProfit={seasonProfit}
+        seasonProfitPct={seasonProfitPct}
+        seasonActive={seasonActive}
         tradesCount={activeCount}
         apiStatus={apiStatus}
         tradingMode={portfolio.tradingMode}
         dayHigh={dayStats.high}
         dayLow={dayStats.low}
-        tfMovePct={tfMoveStats.avgPct}
+        tfMovePct={tfMoveStats.displayPct ?? tfMoveStats.totalPct ?? tfMoveStats.avgPct}
         tfMoveLabel={tfMoveStats.windowLabel}
         chartTimeframe={timeframe}
         notifications={notifications}
@@ -408,10 +435,10 @@ export default function App() {
       <MobilePortfolioCard
         totalCapital={totalEquity}
         tradeValue={tradeValue}
-        dailyProfit={portfolio.dailyProfit}
-        dailyBrokerFee={portfolio.dailyBrokerFee}
-        seasonProfit={portfolio.seasonProfit}
-        seasonActive={portfolio.seasonActive}
+        dailyProfit={dailyProfit}
+        dailyBrokerFee={dailyBrokerFee}
+        seasonProfit={seasonProfit}
+        seasonActive={seasonActive}
         tradesCount={activeCount}
       />
 
@@ -424,7 +451,7 @@ export default function App() {
           switchTimeframe={switchTimeframe}
           readouts={readouts}
           botIsActive={effectiveBotActive}
-          tfMovePct={tfMoveStats.avgPct}
+          tfMovePct={tfMoveStats.displayPct ?? tfMoveStats.totalPct ?? tfMoveStats.avgPct}
           tfMoveLabel={tfMoveStats.windowLabel}
           launcher={{
             slots: launcherSlots,

@@ -70,7 +70,7 @@ export default function Header({
   const tfMoveUp = tfMovePct != null && tfMovePct >= 0;
   const tfMoveStr =
     tfMovePct != null
-      ? `${tfMoveUp ? '+' : ''}${tfMovePct.toFixed(2)}%`
+      ? `${tfMoveUp ? '+' : ''}${Math.abs(tfMovePct) < 0.005 && tfMovePct !== 0 ? tfMovePct.toFixed(3) : tfMovePct.toFixed(2)}%`
       : '--';
   const tfMoveTitle = formatTfMoveLabel(chartTimeframe, tfMoveLabel);
 
@@ -166,8 +166,8 @@ export default function Header({
           >
             {tfMoveStr}
             {tfMoveLabel ? (
-              <span className="text-[10px] font-normal text-gray-400 ml-1">
-                {formatTfMoveLabel(chartTimeframe, tfMoveLabel).split('·')[1]?.trim() || tfMoveLabel}
+              <span className="text-[10px] font-normal text-gray-400 ml-1.5">
+                {(formatTfMoveLabel(chartTimeframe, tfMoveLabel).split('·')[1] || tfMoveLabel).trim()}
               </span>
             ) : null}
           </span>

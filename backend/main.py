@@ -1009,11 +1009,16 @@ class AITradingAgent:
         """Gross trade P&L + Bybit broker fees (open entry + est. exit + closed)."""
         open_gross = 0.0
         open_fees = 0.0
+        fee_rate = float(bybit_api.get_taker_fee_pct() or 0.055) / 100.0
         for t in self.trades:
             m_open = self._trade_metrics(t, for_close=False)
             m_close = self._trade_metrics(t, for_close=True)
             open_gross += float(m_open["gross_usd"])
-            open_fees += float(t.get("entry_fee_usd") or 0) + float(m_close["exit_fee_usd"])
+            entry_fee = float(t.get("entry_fee_usd") or 0)
+            if entry_fee <= 0:
+                # Recover missing fee fields on older in-memory trades
+                entry_fee = round(float(t.get("position_size") or 0) * fee_rate, 4)
+            open_fees += entry_fee + float(m_close["exit_fee_usd"])
 
         closed_gross = 0.0
         closed_fees = 0.0
@@ -1775,14 +1780,18 @@ class AITradingAgent:
         notifications.push("EMERGENCY EXIT: All positions closed and AI automation stopped.", "error")
 
     def schedule_soft_stop(self, reason: str):
-        """Session schedule off-window: stop new entries, keep open trades for trailing exits."""
+        """Session schedule off-window: stop new entries, keep open trades + season PnL."""
         if not self.is_active:
             return
         print(f"[SESSION SCHEDULE] Soft stop — {reason}")
         self.is_active = False
-        # Persist season totals but keep live table so open positions remain visible.
-        self.end_ai_season(clear_live_table=False, reason=f"schedule_soft_stop:{reason}")
-        system_log.push("ai", f"Session schedule paused AI automation — {reason}", {"open_positions": len(self.trades)})
+        # Do NOT end_ai_season here — open positions must keep live Daily/Season PnL
+        # in the header until the user hard-stops or the next window re-arms.
+        system_log.push(
+            "ai",
+            f"Session schedule paused AI automation — {reason}",
+            {"open_positions": len(self.trades)},
+        )
         notifications.push(
             f"Session schedule OFF-window — automation paused ({len(self.trades)} open position(s) still managed).",
             "warning",
@@ -1798,7 +1807,9 @@ class AITradingAgent:
         open_count = len(self.trades)
         self.clear_emergency_state()
         self.daily_target_reached = False
-        self.begin_ai_season()
+        # Resume existing season if soft-paused with open book; else start fresh.
+        if self.ai_season_start_capital is None:
+            self.begin_ai_season()
         self.is_active = True
         print(f"[SESSION SCHEDULE] Auto-start — {reason}")
         system_log.push(
@@ -3267,17 +3278,24 @@ async def portfolio_feed(websocket: WebSocket):
                     "success",
                 )
 
-            # AI Season profit = fee-aware net while season is active.
-            if agent.ai_season_start_capital is not None and agent.is_active:
+            # AI Season / live book profit — keep showing while season baseline exists
+            # OR while open positions remain (soft-pause / orphaned book).
+            if agent.ai_season_start_capital is not None or agent.trades:
                 ai_season_profit = float(fee_book["net_usd"])
-                ai_season_profit_pct = (
-                    (ai_season_profit / agent.ai_season_start_capital) * 100
-                    if agent.ai_season_start_capital
-                    else 0
+                baseline = (
+                    float(agent.ai_season_start_capital)
+                    if agent.ai_season_start_capital is not None
+                    else float(agent.starting_capital or 0)
                 )
+                ai_season_profit_pct = (ai_season_profit / baseline) * 100 if baseline else 0
             else:
                 ai_season_profit = 0.0
                 ai_season_profit_pct = 0.0
+
+            season_active = bool(
+                agent.ai_season_start_capital is not None
+                and (agent.is_active or len(agent.trades) > 0)
+            )
 
             baseline = agent.get_session_baseline()
             portfolio_drop = ((baseline - total_value) / baseline) * 100 if baseline else 0
@@ -3306,7 +3324,7 @@ async def portfolio_feed(websocket: WebSocket):
                 "daily_gross_profit": round(float(fee_book["gross_usd"]), 2),
                 "ai_season_profit": round(ai_season_profit, 2),
                 "ai_season_profit_pct": round(ai_season_profit_pct, 2),
-                "ai_season_active": agent.ai_season_start_capital is not None and agent.is_active,
+                "ai_season_active": season_active,
                 "portfolio_drop_pct": round(portfolio_drop, 2),
                 "is_active": agent.is_active,
                 "timeframe_seconds": agent.timeframe_seconds,
