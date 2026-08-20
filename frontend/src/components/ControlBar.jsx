@@ -1,6 +1,7 @@
 export default function ControlBar({
   botIsActive,
   botLoading,
+  sessionEngineEnabled = false,
   uptime,
   lastUpdated,
   onClick,
@@ -11,6 +12,8 @@ export default function ControlBar({
     ? 'bg-amber-500 cursor-wait'
     : botIsActive
     ? 'bg-red-600 hover:bg-red-700'
+    : sessionEngineEnabled
+    ? 'bg-gray-600 hover:bg-gray-500'
     : 'bg-green-600 hover:bg-green-700';
 
   const sideBase =
@@ -47,6 +50,14 @@ export default function ControlBar({
             <>
               <i className="fas fa-stop-circle" />
               AI ENGINE STOP
+            </>
+          ) : sessionEngineEnabled ? (
+            <>
+              <i className="fas fa-play" />
+              AI ENGINE START
+              <span className="hidden sm:inline text-xs font-bold normal-case tracking-normal opacity-80">
+                (Session Engine ON)
+              </span>
             </>
           ) : (
             <>

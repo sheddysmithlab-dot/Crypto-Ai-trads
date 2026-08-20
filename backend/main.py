@@ -2448,16 +2448,27 @@ async def start_background_tasks():
     asyncio.create_task(self_ping_keepalive())
     asyncio.create_task(auto_buy_loop())
     asyncio.create_task(chart_24h_refresh_loop(BYBIT_SYMBOL_MAP))
-    # session schedule wiped — force off
-    try:
-        schedule_store.set_enabled(False)
-    except Exception:
-        pass
+    asyncio.create_task(session_schedule_loop())
 
 
 async def session_schedule_loop():
-    """Session schedule removed — no-op."""
-    return
+    """Mon–Fri IST windows: auto start/stop AI when Session Momentum Engine is ON."""
+    print(
+        f"[SESSION SCHEDULE] Loop online (enabled={schedule_store.enabled}, "
+        f"want_active={schedule_store.status_dict().get('want_active')})."
+    )
+    while True:
+        try:
+            st = schedule_store.status_dict()
+            if schedule_store.enabled:
+                if st["want_active"] and not agent.is_active:
+                    labels = ", ".join(st["active_windows"]) or "session window"
+                    agent.schedule_auto_start(labels)
+                elif not st["want_active"] and agent.is_active:
+                    agent.schedule_soft_stop("outside Mon–Fri IST session windows")
+        except Exception as exc:
+            print(f"[SESSION SCHEDULE] loop error: {exc}")
+        await asyncio.sleep(20)
 
 
 # ==========================================
@@ -2467,11 +2478,19 @@ async def session_schedule_loop():
 @app.post("/bot/start")
 async def bot_start():
     """Fresh AI Engine START — arms brain.py scanner. No modal config chain."""
+    # Main engine and Session Momentum Engine are mutually exclusive.
+    if schedule_store.enabled:
+        schedule_store.set_enabled(False)
+        notifications.push(
+            "Session Momentum Engine turned OFF — Main AI Engine is taking control.",
+            "warning",
+        )
     if agent.is_active:
         return {
             "status": "success",
             "is_active": True,
             "message": "AI Engine already running.",
+            "session_schedule_enabled": False,
         }
     open_count = len(agent.trades)
     agent.clear_emergency_state()
@@ -2498,6 +2517,7 @@ async def bot_start():
         "message": f"AI Engine started — {profile['name']} ({tf_key}).",
         "open_positions": open_count,
         "entry_pattern": profile["name"],
+        "session_schedule_enabled": False,
     }
 
 
@@ -2887,35 +2907,73 @@ class SessionSchedulePayload(BaseModel):
     enabled: bool
 
 
+@app.get("/session-engine/status")
 @app.get("/settings/session-schedule")
 async def get_session_schedule():
+    st = schedule_store.status_dict()
     return {
-        "enabled": False,
-        "removed": True,
-        "message": "Session schedule wiped",
-        "want_active": False,
-        "in_window": False,
-        "active_windows": [],
-        "windows": [],
+        "status": "success",
+        **st,
+        "main_engine_active": bool(agent.is_active),
+        "message": (
+            "Session Momentum Engine is ON — main AI Engine stays off outside schedule control."
+            if st.get("enabled")
+            else "Session Momentum Engine is OFF."
+        ),
+    }
+
+
+@app.post("/session-engine/start")
+async def session_engine_start():
+    """Start Session Momentum Engine. Turns Main AI Engine OFF (mutually exclusive)."""
+    if agent.is_active:
+        agent.manual_stop("Session Momentum Engine START — Main AI Engine released")
+    schedule_store.set_enabled(True)
+    st = schedule_store.status_dict()
+    # If already inside a window, wake immediately
+    if st.get("want_active") and not agent.is_active:
+        labels = ", ".join(st.get("active_windows") or []) or "session window"
+        agent.schedule_auto_start(labels)
+    notifications.push(
+        "Session Momentum Engine STARTED — trades only during high-momentum market windows (IST).",
+        "success",
+    )
+    system_log.push(
+        "ai",
+        "Session Momentum Engine STARTED (Main AI Engine OFF).",
+        st,
+    )
+    return {
+        "status": "success",
+        "message": "Session Momentum Engine started. Main AI Engine is OFF.",
+        "schedule": schedule_store.status_dict(),
+        "main_engine_active": bool(agent.is_active),
+    }
+
+
+@app.post("/session-engine/stop")
+async def session_engine_stop():
+    """Stop Session Momentum Engine. Soft-pauses automation if it was schedule-driven."""
+    was_enabled = schedule_store.enabled
+    schedule_store.set_enabled(False)
+    if was_enabled and agent.is_active:
+        agent.schedule_soft_stop("Session Momentum Engine STOP from Frontend")
+    notifications.push("Session Momentum Engine STOPPED.", "warning")
+    system_log.push("ai", "Session Momentum Engine STOPPED.", schedule_store.status_dict())
+    return {
+        "status": "success",
+        "message": "Session Momentum Engine stopped.",
+        "schedule": schedule_store.status_dict(),
+        "main_engine_active": bool(agent.is_active),
     }
 
 
 @app.post("/settings/session-schedule")
 async def set_session_schedule(payload: SessionSchedulePayload):
-    """Schedule feature removed."""
-    schedule_store.set_enabled(False)
-    return {
-        "status": "success",
-        "message": "Session schedule removed — use START/STOP manually.",
-        "schedule": {
-            "enabled": False,
-            "removed": True,
-            "want_active": False,
-            "in_window": False,
-            "active_windows": [],
-            "windows": [],
-        },
-    }
+    """Legacy toggle — prefer /session-engine/start|stop."""
+    if payload.enabled:
+        return await session_engine_start()
+    return await session_engine_stop()
 
 @app.get("/trades/statement")
 async def trades_statement(

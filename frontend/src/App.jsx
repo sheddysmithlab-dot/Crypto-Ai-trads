@@ -13,6 +13,7 @@ import { useDayStats } from './hooks/useDayStats';
 import { useTfMoveStats } from './hooks/useTfMoveStats';
 import { useBotControl } from './hooks/useBotControl';
 import { usePaperTrading } from './hooks/usePaperTrading';
+import { useSessionEngine } from './hooks/useSessionEngine';
 
 import Header from './components/Header';
 import MobilePortfolioCard from './components/MobilePortfolioCard';
@@ -20,6 +21,7 @@ import ChartPanel from './components/ChartPanel';
 import LiveTradesPanel from './components/LiveTradesPanel';
 import ControlBar from './components/ControlBar';
 import PaperTradingModal from './components/PaperTradingModal';
+import SessionMomentumModal from './components/SessionMomentumModal';
 import AlertModal from './components/AlertModal';
 import SettingsModal from './components/SettingsModal';
 import TradeExitConfirmModal from './components/TradeExitConfirmModal';
@@ -66,6 +68,7 @@ export default function App() {
 
   const [alertOpen, setAlertOpen] = useState(false);
   const [paperModalOpen, setPaperModalOpen] = useState(false);
+  const [sessionModalOpen, setSessionModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [logModalOpen, setLogModalOpen] = useState(false);
   const [statementOpen, setStatementOpen] = useState(false);
@@ -96,6 +99,15 @@ export default function App() {
     loading: botLoading,
     toggle: toggleBotEngine,
   } = useBotControl({ serverIsActive: serverBotActive });
+
+  const {
+    status: sessionStatus,
+    enabled: sessionEngineEnabled,
+    loading: sessionLoading,
+    refresh: refreshSessionEngine,
+    start: startSessionEngine,
+    stop: stopSessionEngine,
+  } = useSessionEngine({ serverSchedule: portfolio.sessionSchedule });
 
   const uptime = useUptime(effectiveBotActive);
   const dayStats = useDayStats(pairSelector.activePairLabel);
@@ -200,6 +212,24 @@ export default function App() {
     const ok = await toggleBotEngine({ watchlistPairs: pairs });
     pushActionLog(ok ? (goingOn ? 'AI Engine ON.' : 'AI Engine OFF.') : 'AI Engine request failed.');
     debugLog(ok ? 'AI Engine toggle ok' : 'AI Engine toggle failed');
+    if (ok && goingOn) {
+      // Main engine start disables Session Momentum Engine on the backend
+      refreshSessionEngine();
+    }
+  }
+
+  async function handleSessionStart() {
+    pushActionLog('Session Momentum Engine START…');
+    const result = await startSessionEngine();
+    pushActionLog(result?.ok ? 'Session Momentum Engine ON (Main AI Engine OFF).' : 'Session engine start failed.');
+    return result;
+  }
+
+  async function handleSessionStop() {
+    pushActionLog('Session Momentum Engine STOP…');
+    const result = await stopSessionEngine();
+    pushActionLog(result?.ok ? 'Session Momentum Engine OFF.' : 'Session engine stop failed.');
+    return result;
   }
 
   function requestForceClose(tradeId) {
@@ -366,6 +396,8 @@ export default function App() {
           if (portfolio.tradingMode === 'LIVE_TRADING') return;
           setPaperModalOpen(true);
         }}
+        onOpenSessionModal={() => setSessionModalOpen(true)}
+        sessionEngineEnabled={sessionEngineEnabled}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenLog={() => setLogModalOpen(true)}
         onOpenStatement={() => setStatementOpen(true)}
@@ -444,6 +476,7 @@ export default function App() {
       <ControlBar
         botIsActive={effectiveBotActive}
         botLoading={botLoading}
+        sessionEngineEnabled={sessionEngineEnabled}
         uptime={uptime}
         lastUpdated={readouts.lastUpdated}
         onClick={handleControlClick}
@@ -459,6 +492,18 @@ export default function App() {
         paperLoading={paperLoading}
         onRefreshStatus={refreshPaperStatus}
         onSetCapital={setPaperCapital}
+      />
+
+      <SessionMomentumModal
+        open={sessionModalOpen}
+        onClose={() => setSessionModalOpen(false)}
+        enabled={sessionEngineEnabled}
+        loading={sessionLoading}
+        status={sessionStatus}
+        mainEngineActive={effectiveBotActive}
+        onRefresh={refreshSessionEngine}
+        onStart={handleSessionStart}
+        onStop={handleSessionStop}
       />
 
       <AlertModal open={alertOpen} onClose={() => setAlertOpen(false)} />

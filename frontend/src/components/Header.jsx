@@ -37,6 +37,8 @@ export default function Header({
   unreadCount,
   markAllRead,
   onOpenPaperModal,
+  onOpenSessionModal,
+  sessionEngineEnabled = false,
   onOpenSettings,
   onOpenLog,
   onOpenStatement,
@@ -192,6 +194,21 @@ export default function Header({
         >
           <i className={`fas ${isLive ? 'fa-bolt' : 'fa-file-invoice-dollar'} mr-1.5`}></i>
           <span>{isLive ? 'LIVE TRADING' : 'PAPER TRADING'}</span>
+        </button>
+
+        <button
+          id="session-momentum-badge"
+          type="button"
+          onClick={onOpenSessionModal}
+          className={`flex items-center px-2 py-1 rounded-full text-[10px] font-bold border hover:opacity-80 transition ${
+            sessionEngineEnabled
+              ? 'bg-cyan-100 dark:bg-cyan-900/30 border-cyan-300 dark:border-cyan-700 text-cyan-800 dark:text-cyan-300'
+              : 'bg-gray-100 dark:bg-gray-800/60 border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300'
+          }`}
+          title="Session Momentum Engine — high-momentum market windows"
+        >
+          <i className="fas fa-clock mr-1.5" />
+          <span>{sessionEngineEnabled ? 'SESSION ENGINE ON' : 'SESSION ENGINE'}</span>
         </button>
 
         <NotificationsDropdown notifications={notifications} unreadCount={unreadCount} markAllRead={markAllRead} />
