@@ -1669,12 +1669,21 @@ class AITradingAgent:
             if sl is not None:
                 trade["sl_price"] = sl
 
+    def _mark_from_gross_pct(self, entry: float, side: str, gross_pct: float) -> float:
+        """Price that realizes exactly gross_pct for side (paper SL/TP fill clamp)."""
+        if side == "LONG":
+            return entry * (1.0 + float(gross_pct) / 100.0)
+        return entry * (1.0 - float(gross_pct) / 100.0)
+
     def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
         """Path-based stop-loss + hard +0.5% profit book for auto trades.
 
         Profit is ALWAYS gross-% based (never blocked by a far brain/UI tp_price).
         Loss: continuous --- → −0.50%; choppy -+-+ → −0.70%; hard floor −0.70%.
+        Paper mode: if mark gapped past the stop/TP, settle at the rule price
+        (so a poll gap cannot show −1.70% after a −0.70% floor trip).
         """
+        trade.pop("_exit_fill_mark", None)
         entry = float(trade.get("entry") or 0)
         if entry <= 0:
             return None
@@ -1691,19 +1700,38 @@ class AITradingAgent:
         trade["trough_gross_pct"] = min(float(trade.get("trough_gross_pct") or 0), gross_pct)
 
         self._update_path_sl_state(trade, gross_pct)
+        paper = trade.get("exchange") == "paper" or not trade_uses_bybit_executor(trade)
+
+        def _arm_paper_fill(target_gross: float) -> None:
+            """Clamp paper settlement to the policy level when mark has gapped past it."""
+            if not paper:
+                return
+            # Only clamp when mark is past the target (worse loss / extra profit).
+            if target_gross >= 0 and gross_pct > target_gross + 1e-9:
+                trade["_exit_fill_mark"] = self._mark_from_gross_pct(entry, side, target_gross)
+            elif target_gross < 0 and gross_pct < target_gross - 1e-9:
+                trade["_exit_fill_mark"] = self._mark_from_gross_pct(entry, side, target_gross)
 
         # Hard profit book — must fire even if stored tp_price is farther away.
         if gross_pct >= FIXED_EXIT_PROFIT_PCT:
+            _arm_paper_fill(FIXED_EXIT_PROFIT_PCT)
+            gap = ""
+            if trade.get("_exit_fill_mark") is not None:
+                gap = f" (gapped {gross_pct:.3f}%→fill +{FIXED_EXIT_PROFIT_PCT:g}%)"
             return (
                 f"Auto TP +{FIXED_EXIT_PROFIT_PCT:g}%: {side} gross {gross_pct:.3f}% "
-                f"(mark {mark:.6f} vs entry {entry:.6f})"
+                f"(mark {mark:.6f} vs entry {entry:.6f}){gap}"
             )
 
-        # Hard loss floor
+        # Hard loss floor — never hold past −0.70%
         if gross_pct <= -PATH_SL_WIDE_PCT:
+            _arm_paper_fill(-PATH_SL_WIDE_PCT)
+            gap = ""
+            if trade.get("_exit_fill_mark") is not None:
+                gap = f" (gapped {gross_pct:.3f}%→fill −{PATH_SL_WIDE_PCT:g}%)"
             return (
                 f"Path SL −{PATH_SL_WIDE_PCT:g}%: {side} gross {gross_pct:.3f}% "
-                f"(mark {mark:.6f} vs entry {entry:.6f})"
+                f"(mark {mark:.6f} vs entry {entry:.6f}){gap}"
             )
 
         if gross_pct > -PATH_SL_TIGHT_PCT:
@@ -1717,15 +1745,37 @@ class AITradingAgent:
             return None  # hold to −0.70%
 
         why = "continuous ---" if continuous else "no-bounce dump"
+        _arm_paper_fill(-PATH_SL_TIGHT_PCT)
+        gap = ""
+        if trade.get("_exit_fill_mark") is not None:
+            gap = f" (gapped {gross_pct:.3f}%→fill −{PATH_SL_TIGHT_PCT:g}%)"
         return (
             f"Path SL −{PATH_SL_TIGHT_PCT:g}% ({why}): {side} gross {gross_pct:.3f}% "
-            f"streak={trade.get('path_adverse_streak')} (mark {mark:.6f})"
+            f"streak={trade.get('path_adverse_streak')} (mark {mark:.6f}){gap}"
         )
 
     def _close_single_trade(self, trade, metrics, reason) -> bool:
         """Close one position. Returns True if closed locally (and on Bybit when applicable)."""
-        # Always settle with full round-trip fees at close.
-        metrics = self._trade_metrics(trade, for_close=True)
+        # Paper path-SL/TP: if mark gapped past the rule, settle at the rule price.
+        fill_mark = trade.pop("_exit_fill_mark", None)
+        pair = (trade.get("pair") or "").strip()
+        prev_mark = None
+        if fill_mark is not None and pair and (
+            trade.get("exchange") == "paper" or not trade_uses_bybit_executor(trade)
+        ):
+            prev_mark = self.pair_prices.get(pair)
+            self.pair_prices[pair] = float(fill_mark)
+            if pair == self.active_pair:
+                self.current_price = float(fill_mark)
+        try:
+            # Always settle with full round-trip fees at close.
+            metrics = self._trade_metrics(trade, for_close=True)
+        finally:
+            # Restore live mark after settlement; metrics already captured at fill.
+            if fill_mark is not None and pair and prev_mark is not None:
+                self.pair_prices[pair] = prev_mark
+                if pair == self.active_pair:
+                    self.current_price = float(prev_mark)
         if trade_uses_bybit_executor(trade):
             ok, err = bybit_close_trade(trade)
             if not ok:
@@ -2521,36 +2571,56 @@ async def market_simulator():
 
 
 async def bybit_price_feed():
-    """Poll Bybit lastPrice for chart pair + watchlist + every open-trade pair."""
+    """Poll Bybit lastPrice for chart pair + watchlist + every open-trade pair.
+
+    Open-trade pairs are fetched first (in parallel) so path-SL cannot lag behind
+    a long sequential scan of the watchlist. Ticks are applied sequentially to
+    avoid concurrent mutation of open trades.
+    """
     global _last_real_feed_update
     print(f"[MARKET FEED] Background task starting (Bybit linear multi-pair poll, ~{_AUTO_BUY_TICKER_POLL}s).")
 
     async with httpx.AsyncClient(timeout=6.0) as client:
         while True:
-            pairs: set[str] = set()
-            if agent.active_pair:
-                pairs.add(agent.active_pair)
-            pairs |= set(agent.get_scan_pairs())
-            pairs |= agent.open_trade_pairs()
+            open_pairs = {p for p in agent.open_trade_pairs() if p}
+            priority: list[str] = sorted(open_pairs)
+            if agent.active_pair and agent.active_pair not in open_pairs:
+                priority.insert(0, agent.active_pair)
 
-            if not pairs:
-                await asyncio.sleep(2)
-                continue
-
+            scan_rest = sorted(set(agent.get_scan_pairs()) - set(priority))
             any_ok = False
-            for pair_label in pairs:
+
+            async def _fetch_one(pair_label: str) -> tuple[str, float | None]:
                 bybit_symbol = get_bybit_symbol(pair_label)
                 if bybit_symbol is None:
-                    continue
+                    return pair_label, None
                 try:
                     price = await _fetch_bybit_linear_ticker_price(client, bybit_symbol)
+                    if price is None:
+                        print(f"[MARKET FEED] Invalid ticker for {bybit_symbol} ({pair_label})")
+                    return pair_label, price
+                except Exception as exc:
+                    print(f"[MARKET FEED] Ticker poll error for {bybit_symbol}: {exc}")
+                    return pair_label, None
+
+            # 1) Open trades + chart pair — fetch parallel, apply ticks one-by-one
+            if priority:
+                fetched = await asyncio.gather(*[_fetch_one(p) for p in priority])
+                for pair_label, price in fetched:
                     if price is not None:
                         await agent.process_tick(price, 0.0, pair=pair_label)
                         any_ok = True
-                    else:
-                        print(f"[MARKET FEED] Invalid ticker for {bybit_symbol} ({pair_label})")
-                except Exception as exc:
-                    print(f"[MARKET FEED] Ticker poll error for {bybit_symbol}: {exc}")
+
+            # 2) Remaining scan pairs — sequential (slower is OK; no open risk)
+            for pair_label in scan_rest:
+                _pair, price = await _fetch_one(pair_label)
+                if price is not None:
+                    await agent.process_tick(price, 0.0, pair=pair_label)
+                    any_ok = True
+
+            if not priority and not scan_rest:
+                await asyncio.sleep(2)
+                continue
 
             if any_ok:
                 _last_real_feed_update = time.time()
@@ -3488,12 +3558,11 @@ async def portfolio_feed(websocket: WebSocket):
             tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
             scan = system_log.last_taapi_scan
             last_scan = scan if scan and scan.get("pair") == agent.active_pair else None
-            blue_box_overlay = build_blue_box_chart_overlay(
-                agent.active_pair,
-                tf_key,
-                is_active=agent.is_active,
-                last_scan=last_scan,
-            )
+            # Stub overlay only — wrong kwargs used to crash /ws/portfolio every tick.
+            try:
+                blue_box_overlay = build_blue_box_chart_overlay([])
+            except Exception:
+                blue_box_overlay = []
 
             payload = {
                 "capital": round(agent.current_capital, 2),
