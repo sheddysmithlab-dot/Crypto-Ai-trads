@@ -162,13 +162,13 @@ export default function ChartPanel({
       <div ref={chartContainerRef} className="w-full h-80 lg:h-[28rem] relative">
         {botIsActive ? (
           <div className="absolute top-2 right-2 z-20 pointer-events-none flex flex-col items-end gap-1">
-            <div className="px-2 py-1 rounded-md bg-slate-900/80 border border-slate-500/40 text-[9px] font-black uppercase tracking-widest text-slate-200 shadow-lg">
-              Strategy wiped
+            <div className="px-2 py-1 rounded-md bg-emerald-950/85 border border-emerald-500/40 text-[9px] font-black uppercase tracking-widest text-emerald-200 shadow-lg">
+              AI Engine live
             </div>
-            <div className="text-[8px] text-slate-300/80 font-mono text-right leading-tight">
-              awaiting fresh entry
+            <div className="text-[8px] text-emerald-200/80 font-mono text-right leading-tight">
+              TP +0.5% · SL 0.5%/0.7%
               <br />
-              no auto SL / TP
+              path stop · brain entry
             </div>
           </div>
         ) : null}

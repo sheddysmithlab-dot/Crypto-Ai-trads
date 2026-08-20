@@ -1,9 +1,34 @@
-const HOW_IT_WORKS = [
-  'Pick a coin pair and chart timeframe.',
-  'START AI AUTOMATION arms the bot shell — entry strategy is currently wiped (awaiting fresh rules).',
-  'No auto entries, stop-loss, take-profit, or session schedule while wiped.',
-  'Manual BUY / SELL still open LONG / SHORT; emergency STOP closes everything.',
-  'PAPER simulates fills; testnet can send real orders when keys are set.',
+const SECTIONS = [
+  {
+    title: 'AI Engine',
+    items: [
+      'START AI ENGINE scans watchlist pairs on your chart TF (1m–1D).',
+      'Brain patterns + structure traps + order-flow trap (1M exec / 5M bias) → AI BUY/SELL/HOLD.',
+      'Size by TF capital %: 1m 3% · 5m 7% · 15m 10% · 1h 15% · 1D 20%.',
+    ],
+  },
+  {
+    title: 'Stop-loss (per trade)',
+    items: [
+      'Continuous dump --- (3 adverse ticks, no bounce) → exit at −0.50%.',
+      'Choppy path -+-+ (bounce in loss) → hold past 0.5%, exit at −0.70%.',
+      'Hard floor always −0.70%.',
+    ],
+  },
+  {
+    title: 'Take-profit',
+    items: [
+      'Auto book at +0.50% gross from entry (hard TP — not delayed by far targets).',
+    ],
+  },
+  {
+    title: 'Controls',
+    items: [
+      'Manual BUY/SELL when AI is OFF; trash icon force-closes one position.',
+      'Emergency STOP closes all. PAPER = simulated; Testnet = real orders with keys.',
+      'Session Momentum Engine: timed IST windows (mutually exclusive with main AI).',
+    ],
+  },
 ];
 
 export default function BotHelpModal({ open, onClose }) {
@@ -16,38 +41,46 @@ export default function BotHelpModal({ open, onClose }) {
       role="presentation"
     >
       <div
-        className="modal-enter bg-lightCard dark:bg-darkCard rounded-2xl shadow-2xl max-w-lg w-full border border-gray-200 dark:border-gray-700 overflow-hidden"
+        className="modal-enter bg-[#0B0E11] rounded-2xl shadow-2xl max-w-lg w-full border border-gray-700 overflow-hidden"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-labelledby="bot-help-title"
         aria-modal="true"
       >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-gray-800">
-          <h2 id="bot-help-title" className="text-sm font-black tracking-widest text-gray-900 dark:text-white uppercase">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800">
+          <h2 id="bot-help-title" className="text-sm font-black tracking-widest text-white uppercase">
             How this bot works
           </h2>
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400"
+            className="p-1.5 rounded-lg hover:bg-gray-800 text-gray-400"
             aria-label="Close help"
           >
             <i className="fas fa-times" />
           </button>
         </div>
 
-        <div className="px-5 py-4 max-h-[70vh] overflow-y-auto">
-          <p className="text-sm text-gray-600 dark:text-gray-300 mb-4 leading-relaxed">
-            Strategy wiped — shell ready for your next entry/exit doctrine. Not financial advice.
+        <div className="px-5 py-4 max-h-[70vh] overflow-y-auto space-y-4">
+          <p className="text-xs text-gray-400 leading-relaxed">
+            Live AI candle brain + path stop-loss. Not financial advice.
           </p>
-          <ul className="space-y-2.5 text-sm text-gray-700 dark:text-gray-200 list-disc pl-5 leading-relaxed">
-            {HOW_IT_WORKS.map((line) => (
-              <li key={line}>{line}</li>
-            ))}
-          </ul>
+
+          {SECTIONS.map((sec) => (
+            <section key={sec.title}>
+              <h3 className="text-[10px] font-bold uppercase tracking-wider text-blue-400 mb-1.5">
+                {sec.title}
+              </h3>
+              <ul className="space-y-1.5 text-sm text-gray-200 list-disc pl-4 leading-snug">
+                {sec.items.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            </section>
+          ))}
         </div>
 
-        <div className="px-5 py-4 border-t border-gray-200 dark:border-gray-800">
+        <div className="px-5 py-4 border-t border-gray-800">
           <button
             type="button"
             onClick={onClose}
