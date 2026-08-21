@@ -469,12 +469,15 @@ export default function App() {
   const wsDaily = Number(portfolio.dailyProfit) || 0;
   const wsFee = Number(portfolio.dailyBrokerFee) || 0;
   const wsSeason = Number(portfolio.seasonProfit) || 0;
+  const wsSeasonNet = Number(portfolio.seasonProfitNet);
   const dailyProfit = wsDaily;
   const dailyBrokerFee = wsFee;
   const seasonProfit = wsSeason;
+  const seasonProfitNet = Number.isFinite(wsSeasonNet) ? wsSeasonNet : wsSeason - wsFee;
   const seasonActive = Boolean(portfolio.seasonActive);
   const dailyProfitPct = Number(portfolio.dailyProfitPct) || 0;
   const seasonProfitPct = Number(portfolio.seasonProfitPct) || 0;
+  const seasonProfitNetPct = Number(portfolio.seasonProfitNetPct) || 0;
 
   // Total Capital from portfolio ledger (WS). Paper hook is only a seed.
   const totalEquity =
@@ -496,6 +499,8 @@ export default function App() {
         dailyBrokerFee={dailyBrokerFee}
         seasonProfit={seasonProfit}
         seasonProfitPct={seasonProfitPct}
+        seasonProfitNet={seasonProfitNet}
+        seasonProfitNetPct={seasonProfitNetPct}
         seasonActive={seasonActive}
         tradesCount={sessionOpenPositions}
         exitedPnlUsd={Number(portfolio.exitedBookedUsd) || 0}

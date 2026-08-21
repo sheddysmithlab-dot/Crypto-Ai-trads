@@ -4,17 +4,22 @@ export default function MobilePortfolioCard({
   dailyProfit,
   dailyBrokerFee = 0,
   seasonProfit,
+  seasonProfitNet,
   seasonActive,
   tradesCount,
 }) {
   const isProfit = dailyProfit >= 0;
-  const isSeasonProfit = seasonProfit >= 0;
+  const netVal =
+    seasonProfitNet != null && Number.isFinite(Number(seasonProfitNet))
+      ? Number(seasonProfitNet)
+      : Number(seasonProfit || 0) - Math.abs(Number(dailyBrokerFee) || 0);
+  const isSeasonNet = netVal >= 0;
   const capStr = totalCapital.toLocaleString('en-US', { minimumFractionDigits: 2 });
   const tradeValStr = tradeValue.toLocaleString('en-US', { minimumFractionDigits: 2 });
   const pnlStr = `${isProfit ? '+' : '-'}$${Math.abs(dailyProfit).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
   const feeStr = `-$${Math.abs(Number(dailyBrokerFee) || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
   const seasonStr = seasonActive
-    ? `${isSeasonProfit ? '+' : '-'}$${Math.abs(seasonProfit).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
+    ? `${isSeasonNet ? '+' : '-'}$${Math.abs(netVal).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
     : '$0.00';
 
   return (
@@ -38,10 +43,10 @@ export default function MobilePortfolioCard({
           <div className="font-bold text-sm text-amber-400">{feeStr}</div>
         </div>
         <div>
-          <div className="text-[11px] text-gray-500 dark:text-gray-400">AI Season</div>
+          <div className="text-[11px] text-gray-500 dark:text-gray-400">AI Season Net</div>
           <div
             className={`font-bold text-sm ${
-              !seasonActive ? 'text-gray-400' : isSeasonProfit ? 'text-green-500' : 'text-red-500'
+              !seasonActive ? 'text-gray-400' : isSeasonNet ? 'text-green-500' : 'text-red-500'
             }`}
           >
             {seasonStr}

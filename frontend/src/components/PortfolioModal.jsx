@@ -35,6 +35,8 @@ export default function PortfolioModal({
   dailyBrokerFee = 0,
   seasonProfit,
   seasonProfitPct,
+  seasonProfitNet = 0,
+  seasonProfitNetPct = 0,
   seasonActive,
   tradesCount,
   apiStatus,
@@ -47,7 +49,8 @@ export default function PortfolioModal({
   if (!open) return null;
 
   const isProfit = dailyProfit >= 0;
-  const isSeasonProfit = seasonProfit >= 0;
+  const isSeasonGross = seasonProfit >= 0;
+  const isSeasonNet = seasonProfitNet >= 0;
   const capStr = Number(totalCapital || 0).toLocaleString('en-US', { minimumFractionDigits: 2 });
   const tradeValStr = Number(tradeValue || 0).toLocaleString('en-US', { minimumFractionDigits: 2 });
   const profitStr = `${isProfit ? '+' : '-'}$${Math.abs(dailyProfit).toLocaleString('en-US', {
@@ -57,9 +60,12 @@ export default function PortfolioModal({
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
-  const seasonStr = `${isSeasonProfit ? '+' : '-'}$${Math.abs(seasonProfit).toLocaleString('en-US', {
+  const seasonGrossStr = `${isSeasonGross ? '+' : '-'}$${Math.abs(seasonProfit).toLocaleString('en-US', {
     minimumFractionDigits: 2,
-  })} (${isSeasonProfit ? '+' : ''}${Number(seasonProfitPct || 0).toFixed(2)}%)`;
+  })} (${isSeasonGross ? '+' : ''}${Number(seasonProfitPct || 0).toFixed(2)}%)`;
+  const seasonNetStr = `${isSeasonNet ? '+' : '-'}$${Math.abs(seasonProfitNet).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+  })} (${isSeasonNet ? '+' : ''}${Number(seasonProfitNetPct || 0).toFixed(2)}%)`;
   const tfMoveUp = tfMovePct != null && tfMovePct >= 0;
   const tfMoveStr =
     tfMovePct != null
@@ -111,10 +117,20 @@ export default function PortfolioModal({
           >
             <span className="text-amber-400">{feeStr}</span>
           </StatCell>
-          <StatCell label="AI Season Profit (Gross)" tip="Gross profit for the current AI season (fees not deducted).">
-            <span className={isSeasonProfit ? 'text-green-500' : 'text-red-500'}>
-              {seasonStr}
-            </span>
+          <StatCell
+            label="AI Season Profit"
+            tip="Gross = trade P&L before fees. Net = Gross minus Session Bybit Broker Fee."
+          >
+            <div className="flex flex-col gap-0.5 leading-snug">
+              <span className={isSeasonGross ? 'text-green-500' : 'text-red-500'}>
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 mr-1">Gross</span>
+                {seasonGrossStr}
+              </span>
+              <span className={isSeasonNet ? 'text-green-500' : 'text-red-500'}>
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 mr-1">Net</span>
+                {seasonNetStr}
+              </span>
+            </div>
           </StatCell>
           <StatCell label="Open Positions" tip="How many trades are open in this AI session.">
             <span className="text-gray-900 dark:text-white">

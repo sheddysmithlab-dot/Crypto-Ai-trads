@@ -13,6 +13,8 @@ export default function Header({
   dailyBrokerFee = 0,
   seasonProfit,
   seasonProfitPct,
+  seasonProfitNet = 0,
+  seasonProfitNetPct = 0,
   seasonActive,
   tradesCount,
   exitedPnlUsd = 0,
@@ -205,6 +207,8 @@ export default function Header({
         dailyBrokerFee={dailyBrokerFee}
         seasonProfit={seasonProfit}
         seasonProfitPct={seasonProfitPct}
+        seasonProfitNet={seasonProfitNet}
+        seasonProfitNetPct={seasonProfitNetPct}
         seasonActive={seasonActive}
         tradesCount={tradesCount}
         apiStatus={apiStatus}

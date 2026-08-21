@@ -714,6 +714,8 @@ class AITradingAgent:
             "daily_broker_fee": 0.0,
             "ai_season_profit": 0.0,
             "ai_season_profit_pct": 0.0,
+            "ai_season_profit_net": 0.0,
+            "ai_season_profit_net_pct": 0.0,
             "exited_booked_usd": 0.0,
             "open_positions": 0,
         }
@@ -1116,6 +1118,8 @@ class AITradingAgent:
             "daily_broker_fee": 0.0,
             "ai_season_profit": 0.0,
             "ai_season_profit_pct": 0.0,
+            "ai_season_profit_net": 0.0,
+            "ai_season_profit_net_pct": 0.0,
             "exited_booked_usd": 0.0,
             "open_positions": 0,
         }
@@ -1132,6 +1136,8 @@ class AITradingAgent:
             else (self.starting_capital or 0)
         )
         pct = (gross / baseline) * 100 if baseline else 0.0
+        net = gross - fees
+        net_pct = (net / baseline) * 100 if baseline else 0.0
         session_open = self._session_open_trades()
         self.session_stats_snapshot = {
             "trade_notional": round(
@@ -1142,13 +1148,15 @@ class AITradingAgent:
             "daily_broker_fee": round(fees, 4),
             "ai_season_profit": round(gross, 2),
             "ai_season_profit_pct": round(pct, 2),
+            "ai_season_profit_net": round(net, 2),
+            "ai_season_profit_net_pct": round(net_pct, 2),
             "exited_booked_usd": round(exited, 2),
             "open_positions": len(session_open),
         }
         self.session_stats_frozen = True
         print(
             f"[AI SEASON] Portfolio stats frozen — "
-            f"gross ${gross:,.2f} · fees ${fees:,.2f} · open {len(session_open)}"
+            f"gross ${gross:,.2f} · fees ${fees:,.2f} · net ${net:,.2f} · open {len(session_open)}"
         )
 
     def get_available_capital(self):
@@ -2017,6 +2025,67 @@ class AITradingAgent:
         opposite = "SHORT" if side == "LONG" else "LONG"
         return any(t["pair"] == pair and t["side"] == opposite for t in self.trades)
 
+    def close_opposite_positions_for_flip(
+        self, side: str, pair: str, *, pattern: str | None = None
+    ) -> int:
+        """AI flip-exit training: opposite signal on the same chart/pair closes the old side.
+
+        Long + short on different candles of one pair is allowed, but when the new side
+        fires, open opposite positions on that pair exit immediately — do not ride the
+        reverse move into deeper loss (e.g. LONG still open when SHORT fires).
+        """
+        opposite = "SHORT" if side == "LONG" else "LONG"
+        targets = [
+            t
+            for t in list(self.trades)
+            if (t.get("pair") or "") == pair and t.get("side") == opposite
+        ]
+        if not targets:
+            return 0
+
+        why = (
+            f"Flip-exit on {pair}: {side} signal"
+            + (f" ({pattern})" if pattern else "")
+            + f" closed opposite {opposite}"
+        )
+        target_ids = {t["id"] for t in targets}
+        still_open: list = []
+        closed_n = 0
+        for trade in list(self.trades):
+            if trade.get("id") not in target_ids:
+                still_open.append(trade)
+                continue
+            m = self._trade_metrics(trade, for_close=True)
+            if self._close_single_trade(trade, m, why):
+                closed_n += 1
+                print(
+                    f"[FLIP-EXIT] {why} | #{trade.get('id')} "
+                    f"gross={m['gross_pct']:.3f}% net=${m['net_usd']:.2f}"
+                )
+                system_log.push_agent_chat(
+                    f"FLIP-EXIT {opposite} #{trade.get('id')} on {pair} — new {side} signal"
+                    + (f" ({pattern})" if pattern else ""),
+                    status="match",
+                    details={
+                        "pair": pair,
+                        "closed_side": opposite,
+                        "new_side": side,
+                        "pattern": pattern,
+                        "trade_id": trade.get("id"),
+                        "gross_pct": m.get("gross_pct"),
+                        "net_usd": m.get("net_usd"),
+                    },
+                )
+            else:
+                still_open.append(trade)
+        self.trades = still_open
+        if closed_n:
+            notifications.push(
+                f"Flip-exit: closed {closed_n}× {opposite} on {pair} before new {side}.",
+                "info",
+            )
+        return closed_n
+
     def same_side_auto_count(self, side: str, pair: str) -> int:
         return sum(
             1
@@ -2648,6 +2717,12 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         detect_candle_ms = int(pending["signal_candle_time"])
         fire_candle_ms = int(pending["fire_candle_time"])
         candle_close = float(pending.get("detect_close") or detect.get("entry") or 0)
+
+        # Flip-exit training: SHORT fire → close open LONGs on this pair (and vice versa)
+        # before capacity checks / new entry, so we do not ride the reverse into loss.
+        agent.close_opposite_positions_for_flip(
+            side, pair, pattern=detect.get("pattern")
+        )
 
         if len(agent.trades) >= agent.max_concurrent_trades:
             return await _skip_pending(
@@ -4039,6 +4114,8 @@ async def portfolio_feed(websocket: WebSocket):
                 daily_profit_pct = (daily_profit / baseline) * 100 if baseline else 0
                 ai_season_profit = daily_gross
                 ai_season_profit_pct = daily_profit_pct
+                ai_season_profit_net = daily_gross - broker_fee
+                ai_season_profit_net_pct = (ai_season_profit_net / baseline) * 100 if baseline else 0
                 exited_booked_usd = float(fee_book.get("closed_gross_usd") or 0)
             else:
                 snap = agent.session_stats_snapshot
@@ -4049,6 +4126,20 @@ async def portfolio_feed(websocket: WebSocket):
                 daily_profit_pct = float(snap.get("daily_profit_pct") or 0)
                 ai_season_profit = float(snap.get("ai_season_profit") or 0)
                 ai_season_profit_pct = float(snap.get("ai_season_profit_pct") or 0)
+                ai_season_profit_net = float(
+                    snap.get("ai_season_profit_net")
+                    if snap.get("ai_season_profit_net") is not None
+                    else (ai_season_profit - broker_fee)
+                )
+                ai_season_profit_net_pct = float(
+                    snap.get("ai_season_profit_net_pct")
+                    if snap.get("ai_season_profit_net_pct") is not None
+                    else (
+                        (ai_season_profit_net / float(agent.starting_capital or 0)) * 100
+                        if agent.starting_capital
+                        else 0
+                    )
+                )
                 daily_gross = daily_profit
                 exited_booked_usd = float(snap.get("exited_booked_usd") or 0)
 
@@ -4110,6 +4201,8 @@ async def portfolio_feed(websocket: WebSocket):
                 "exited_booked_usd": round(exited_booked_usd, 2),
                 "ai_season_profit": round(ai_season_profit, 2),
                 "ai_season_profit_pct": round(ai_season_profit_pct, 2),
+                "ai_season_profit_net": round(ai_season_profit_net, 2),
+                "ai_season_profit_net_pct": round(ai_season_profit_net_pct, 2),
                 "ai_season_active": season_active,
                 "session_stats_frozen": bool(agent.session_stats_frozen),
                 "session_hold_mode": bool(agent.session_hold_mode),

@@ -15,6 +15,8 @@ export function usePortfolio(setConnected) {
     exitedBookedUsd: 0,
     seasonProfit: 0,
     seasonProfitPct: 0,
+    seasonProfitNet: 0,
+    seasonProfitNetPct: 0,
     seasonActive: false,
     sessionStatsFrozen: false,
     sessionOpenPositions: 0,
@@ -54,6 +56,10 @@ export function usePortfolio(setConnected) {
           exitedBookedUsd: data.exited_booked_usd ?? 0,
           seasonProfit: data.ai_season_profit ?? 0,
           seasonProfitPct: data.ai_season_profit_pct ?? 0,
+          seasonProfitNet: data.ai_season_profit_net ?? (
+            (Number(data.ai_season_profit) || 0) - (Number(data.daily_broker_fee) || 0)
+          ),
+          seasonProfitNetPct: data.ai_season_profit_net_pct ?? 0,
           seasonActive: Boolean(data.ai_season_active),
           sessionStatsFrozen: Boolean(data.session_stats_frozen),
           sessionOpenPositions: Number(data.trades) || 0,
