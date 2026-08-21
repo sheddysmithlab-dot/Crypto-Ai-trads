@@ -33,7 +33,7 @@ export default function InfoTip({ text, label = 'More info', className = '' }) {
     <span ref={rootRef} className={`relative inline-flex items-center align-middle ${className}`}>
       <button
         type="button"
-        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-sky-400/70 text-[9px] font-bold leading-none text-sky-300 hover:bg-sky-500/20 hover:text-sky-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/60"
+        className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border border-gray-500/25 text-[8px] font-semibold leading-none text-gray-400/35 opacity-40 hover:opacity-75 hover:border-gray-400/40 hover:text-gray-300/70 hover:bg-transparent focus:outline-none focus-visible:opacity-80 focus-visible:ring-1 focus-visible:ring-gray-500/30 transition-opacity"
         aria-label={label}
         aria-expanded={open}
         aria-controls={tipId}

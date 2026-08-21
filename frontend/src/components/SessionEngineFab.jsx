@@ -1,8 +1,8 @@
 /**
  * Session Engine control with a white neon star that rides the pill border.
- * Used inside the bottom Start/Stop control bar (not floating).
+ * Lives in the bottom-left corner of the control bar.
  */
-export default function SessionEngineFab({ enabled = false, onClick }) {
+export default function SessionEngineFab({ enabled = false, onClick, compact = false }) {
   return (
     <div className="session-engine-fab relative inline-flex">
       <div className="session-engine-fab__shell relative inline-flex">
@@ -53,14 +53,18 @@ export default function SessionEngineFab({ enabled = false, onClick }) {
           id="session-momentum-badge"
           type="button"
           onClick={onClick}
-          className={`session-engine-fab__btn relative flex items-center gap-2 px-4 py-2 sm:px-5 sm:py-2.5 rounded-full text-[10px] sm:text-xs font-bold border-2 transition hover:opacity-90 active:scale-[0.98] ${
+          className={`session-engine-fab__btn relative flex items-center rounded-full font-bold border-2 transition hover:opacity-90 active:scale-[0.98] ${
+            compact
+              ? 'gap-1.5 px-2.5 py-1 text-[9px] sm:text-[10px]'
+              : 'gap-2 px-4 py-2 sm:px-5 sm:py-2.5 text-[10px] sm:text-xs'
+          } ${
             enabled
               ? 'bg-cyan-100 dark:bg-cyan-900/40 border-cyan-300 dark:border-cyan-500 text-cyan-800 dark:text-cyan-200'
               : 'bg-gray-100 dark:bg-gray-900/80 border-gray-300 dark:border-gray-500 text-gray-700 dark:text-gray-200'
           }`}
           title="Session Momentum Engine — high-momentum market windows"
         >
-          <i className="fas fa-clock text-sm" />
+          <i className={`fas fa-clock ${compact ? 'text-[10px]' : 'text-sm'}`} />
           <span className="tracking-wide whitespace-nowrap">
             {enabled ? 'SESSION ENGINE ON' : 'SESSION ENGINE'}
           </span>

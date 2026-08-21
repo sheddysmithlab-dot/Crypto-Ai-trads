@@ -29,7 +29,7 @@ body.dark {
   opacity: 1;
 }
 
-/* Session Engine control — white neon star rides the pill border (in ControlBar) */
+/* Session Engine control — white neon star rides the pill border (bottom-left corner) */
 .session-engine-fab {
   pointer-events: none;
 }
@@ -39,14 +39,14 @@ body.dark {
 .session-engine-fab__btn {
   pointer-events: auto;
   box-shadow:
-    0 0 12px rgba(255, 255, 255, 0.28),
-    0 4px 18px rgba(0, 0, 0, 0.4);
+    0 0 8px rgba(255, 255, 255, 0.22),
+    0 2px 10px rgba(0, 0, 0, 0.35);
 }
 .session-engine-fab__ring {
   position: absolute;
-  inset: -7px;
-  width: calc(100% + 14px);
-  height: calc(100% + 14px);
+  inset: -5px;
+  width: calc(100% + 10px);
+  height: calc(100% + 10px);
   overflow: visible;
   pointer-events: none;
   z-index: 2;

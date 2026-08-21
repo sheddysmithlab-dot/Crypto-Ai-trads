@@ -21,18 +21,14 @@ export default function ControlBar({
     : 'bg-green-600 hover:bg-green-700';
 
   const sideBase =
-    'shrink-0 w-14 sm:w-20 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-wide text-white transition-all duration-200 active:scale-95 flex flex-col items-center justify-center gap-0.5 py-2';
+    'shrink-0 w-12 sm:w-16 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-wide text-white transition-all duration-200 active:scale-95 flex flex-col items-center justify-center gap-0 py-1.5';
   const sideOff = 'bg-gray-300 dark:bg-gray-700 text-gray-500 cursor-not-allowed opacity-60';
   const locked = botIsActive || botLoading;
 
   return (
-    <div className="bg-lightCard dark:bg-darkCard border-t border-gray-300 dark:border-gray-800 px-4 py-4 shrink-0 flex flex-col items-center justify-center space-y-3">
-      <div className="w-full max-w-4xl flex items-center justify-start gap-2">
-        <SessionEngineFab enabled={sessionEngineEnabled} onClick={onOpenSessionModal} />
-        <InfoTip text="Timed momentum windows (IST). When ON, main AI Engine stays OFF — only one mode at a time." />
-      </div>
-
-      <div className="w-full max-w-4xl flex items-stretch gap-2">
+    <div className="relative bg-lightCard dark:bg-darkCard border-t border-gray-300 dark:border-gray-800 px-2 sm:px-3 py-1.5 shrink-0">
+      {/* Main actions — compact height */}
+      <div className="w-full max-w-4xl mx-auto flex items-stretch gap-1.5 sm:gap-2">
         <button
           type="button"
           className={`${sideBase} ${locked ? sideOff : 'bg-emerald-500 hover:bg-emerald-400'}`}
@@ -40,13 +36,13 @@ export default function ControlBar({
           disabled={locked}
           title="Manual BUY (LONG)"
         >
-          <i className="fas fa-arrow-up" />
+          <i className="fas fa-arrow-up text-[10px]" />
           BUY
         </button>
 
         <button
           type="button"
-          className={`flex-1 text-white py-3.5 text-base lg:text-lg font-black tracking-widest rounded-xl uppercase flex items-center justify-center gap-3 transition-colors duration-200 active:scale-95 ${mainBtnColor}`}
+          className={`flex-1 text-white py-2 sm:py-2.5 text-sm lg:text-base font-black tracking-widest rounded-lg uppercase flex items-center justify-center gap-2 transition-colors duration-200 active:scale-95 ${mainBtnColor}`}
           onClick={onClick}
           disabled={botLoading}
         >
@@ -64,7 +60,7 @@ export default function ControlBar({
             <>
               <i className="fas fa-play" />
               AI ENGINE START
-              <span className="hidden sm:inline text-xs font-bold normal-case tracking-normal opacity-80">
+              <span className="hidden sm:inline text-[10px] font-bold normal-case tracking-normal opacity-80">
                 (Session Engine ON)
               </span>
             </>
@@ -83,24 +79,31 @@ export default function ControlBar({
           disabled={locked}
           title="Manual SELL (SHORT)"
         >
-          <i className="fas fa-arrow-down" />
+          <i className="fas fa-arrow-down text-[10px]" />
           SELL
         </button>
       </div>
 
-      <div className="w-full max-w-4xl flex flex-col sm:flex-row items-center justify-between text-xs text-gray-500 dark:text-gray-400 font-medium gap-3 px-2">
-        <div className="flex items-center gap-2">
-          <i className="fas fa-hourglass-start text-blue-500" />
-          <span className="inline-flex items-center gap-1">Session <InfoTip text="How long this AI session has been running." /></span>
-          <span className="text-gray-800 dark:text-gray-200 font-bold">{uptime.formatted}</span>
-          <span className={botIsActive ? 'text-green-500' : 'text-gray-500'}>
-            {botIsActive ? '(Running)' : '(Stopped)'}
+      {/* Bottom strip: Session Engine locked to far-left corner */}
+      <div className="mt-1 w-full flex items-center justify-between gap-2 min-h-[28px]">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <SessionEngineFab enabled={sessionEngineEnabled} onClick={onOpenSessionModal} compact />
+          <InfoTip text="Timed momentum windows (IST). When ON, main AI Engine stays OFF — only one mode at a time." />
+          <span className="inline-flex items-center gap-1.5 text-[10px] sm:text-xs text-gray-500 dark:text-gray-400 font-medium ml-1 truncate">
+            <i className="fas fa-hourglass-start text-blue-500 shrink-0" />
+            <span className="hidden sm:inline-flex items-center gap-1 shrink-0">
+              Session <InfoTip text="How long this AI session has been running." />
+            </span>
+            <span className="text-gray-800 dark:text-gray-200 font-bold tabular-nums">{uptime.formatted}</span>
+            <span className={`shrink-0 ${botIsActive ? 'text-green-500' : 'text-gray-500'}`}>
+              {botIsActive ? '(Running)' : '(Stopped)'}
+            </span>
           </span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 text-[10px] sm:text-xs text-gray-500 dark:text-gray-400 font-medium shrink-0">
           <i className="fas fa-sync-alt text-gray-500" />
-          <span>Updated:</span>
-          <span className="text-gray-800 dark:text-gray-200 font-bold">{lastUpdated}</span>
+          <span className="hidden sm:inline">Updated:</span>
+          <span className="text-gray-800 dark:text-gray-200 font-bold tabular-nums">{lastUpdated}</span>
         </div>
       </div>
     </div>

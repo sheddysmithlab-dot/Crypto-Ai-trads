@@ -290,11 +290,8 @@ export function renderTradeFireOverlay({
 
     overlayEl.appendChild(wrap);
 
-    // Always show the small toast on detect/confirm candles; hover for fired/skipped.
-    const stage = entry.stage || 'fired';
-    const showToast =
-      isHovered || stage === 'detected' || stage === 'confirming';
-    if (showToast) {
+    // Popup toast only while the cursor is on this candle.
+    if (isHovered) {
       appendTooltip(overlayEl, xCenter, top, entry, neon);
     }
   }
