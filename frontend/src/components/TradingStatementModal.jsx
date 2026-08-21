@@ -194,10 +194,9 @@ export default function TradingStatementModal({ open, onClose }) {
             <div className="text-center text-gray-500 text-sm py-12">Loading statement…</div>
           ) : !dbEnabled ? (
             <div className="text-center text-gray-400 text-sm py-10 px-4 leading-relaxed">
-              MySQL abhi connect nahi hai.
+              Trade history storage is not connected yet.
               <br />
-              Hostinger hPanel → MySQL Databases → DB banao, schema.sql run karo, phir VPS{' '}
-              <code className="text-blue-400">backend/.env</code> mein MYSQL_* keys set karo.
+              Statements will appear here once the database is available. Contact support if this persists.
             </div>
           ) : view === 'seasons' ? (
             seasons.length === 0 ? (

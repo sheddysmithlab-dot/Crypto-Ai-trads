@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import InfoTip from './InfoTip';
 
 const PRESETS = [
   { amount: 1000, label: '$1K' },
@@ -134,12 +135,14 @@ export default function PaperTradingModal({
 
         <div className="px-6 py-5 space-y-4">
           <p className="text-sm text-gray-400">
-            Kitni virtual (paper) money se bot ko trade karna chahiye? Yeh amount real funds ko touch nahi karega -
-            sirf simulation ke liye hai.
+            Choose how much virtual money the bot should trade with. This does not touch real funds — simulation only.
           </p>
 
           <div>
-            <label className="block text-xs font-semibold text-gray-300 mb-1.5">Starting Paper Capital (USD)</label>
+            <label className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-gray-300">
+              Starting Paper Capital (USD)
+              <InfoTip text="Virtual balance for simulation. Does not use real money." />
+            </label>
             <div className="relative">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">$</span>
               <input

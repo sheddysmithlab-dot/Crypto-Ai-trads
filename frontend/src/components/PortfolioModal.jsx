@@ -1,5 +1,6 @@
 import { fmtNum } from '../data/pairs';
 import { formatTfMoveLabel } from '../hooks/useTfMoveStats';
+import InfoTip from './InfoTip';
 
 const STATUS_COLOR = {
   green: 'text-green-500',
@@ -12,14 +13,12 @@ const DOT_COLOR = {
   red: 'bg-red-500',
 };
 
-function StatCell({ label, title, children }) {
+function StatCell({ label, tip, children }) {
   return (
     <div className="flex flex-col min-w-0 rounded-lg bg-gray-50 dark:bg-gray-800/50 px-3 py-2.5 border border-gray-200 dark:border-gray-700/80">
-      <span
-        className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider"
-        title={title}
-      >
-        {label}
+      <span className="flex items-center gap-1 text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">
+        <span className="truncate">{label}</span>
+        {tip ? <InfoTip text={tip} /> : null}
       </span>
       <div className="font-bold text-sm mt-0.5 truncate">{children}</div>
     </div>
@@ -97,27 +96,27 @@ export default function PortfolioModal({
         </div>
 
         <div className="p-4 grid grid-cols-2 sm:grid-cols-3 gap-2.5">
-          <StatCell label="Total Capital" title="Available cash for new trades (10% sizing base)">
+          <StatCell label="Total Capital" tip="Cash available for new trades.">
             <span className="text-gray-900 dark:text-white">${capStr}</span>
           </StatCell>
-          <StatCell label="Trade Value" title="Open notional for this AI session only — freezes on STOP, resets on START">
+          <StatCell label="Trade Value" tip="Open trade size for this AI session. Freezes on STOP, resets on START.">
             <span className="text-amber-500">${tradeValStr}</span>
           </StatCell>
-          <StatCell label="Session Profit (Gross)" title="Trade P&L only — fees NOT deducted. Separate from broker fee line.">
+          <StatCell label="Session Profit (Gross)" tip="Session trade profit/loss before fees. Fees are shown on a separate line.">
             <span className={isProfit ? 'text-green-500' : 'text-red-500'}>{profitStr}</span>
           </StatCell>
           <StatCell
             label="Session Bybit Broker Fee"
-            title="Broker fees only — shown separately, not subtracted from Session Profit above"
+            tip="Broker fees for this session. Shown separately from gross profit."
           >
             <span className="text-amber-400">{feeStr}</span>
           </StatCell>
-          <StatCell label="AI Season Profit (Gross)" title="Same session gross trade P&L — fees NOT deducted">
+          <StatCell label="AI Season Profit (Gross)" tip="Gross profit for the current AI season (fees not deducted).">
             <span className={isSeasonProfit ? 'text-green-500' : 'text-red-500'}>
               {seasonStr}
             </span>
           </StatCell>
-          <StatCell label="Open Positions" title="Open trades in this AI session — freezes on STOP, resets on START">
+          <StatCell label="Open Positions" tip="How many trades are open in this AI session.">
             <span className="text-gray-900 dark:text-white">
               {tradesCount}{' '}
               <span className="text-xs font-normal text-gray-400">(Active)</span>
@@ -134,11 +133,10 @@ export default function PortfolioModal({
               <span className="text-gray-400 font-normal">--</span>
             )}
           </StatCell>
-          <StatCell label={`Market ${chartTimeframe}`} title={`Avg candle move over ${tfMoveTitle}`}>
+          <StatCell label={`Market ${chartTimeframe}`} tip={`Average move per ${chartTimeframe} candle (${tfMoveTitle}).`}>
             <span
               className={tfMovePct == null ? 'text-gray-400' : tfMoveUp ? 'text-green-500' : 'text-red-500'}
-              title={`${tfMoveTitle} — avg % per ${chartTimeframe} candle`}
-            >
+              >
               {tfMoveStr}
               {tfMoveLabel ? (
                 <span className="text-[10px] font-normal text-gray-400 ml-1.5">

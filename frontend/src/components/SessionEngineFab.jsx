@@ -1,10 +1,10 @@
 /**
- * Floating Session Engine control — lower-left, with a white neon star
- * that rides the button border continuously.
+ * Session Engine control with a white neon star that rides the pill border.
+ * Used inside the bottom Start/Stop control bar (not floating).
  */
 export default function SessionEngineFab({ enabled = false, onClick }) {
   return (
-    <div className="session-engine-fab fixed z-40 left-3 bottom-28 sm:left-4 sm:bottom-32">
+    <div className="session-engine-fab relative inline-flex">
       <div className="session-engine-fab__shell relative inline-flex">
         <svg
           className="session-engine-fab__ring"
@@ -21,7 +21,6 @@ export default function SessionEngineFab({ enabled = false, onClick }) {
               </feMerge>
             </filter>
           </defs>
-          {/* Rounded-rect path matching the pill (rx≈20 on a 100×40 box). */}
           <path
             id="sessionEngineBorderPath"
             d="M 20,2 H 80 A 18,18 0 0 1 80,38 H 20 A 18,18 0 0 1 20,2 Z"
@@ -54,14 +53,14 @@ export default function SessionEngineFab({ enabled = false, onClick }) {
           id="session-momentum-badge"
           type="button"
           onClick={onClick}
-          className={`session-engine-fab__btn relative flex items-center gap-2 px-4 py-2.5 sm:px-5 sm:py-3 rounded-full text-xs sm:text-sm font-bold border-2 transition hover:opacity-90 active:scale-[0.98] ${
+          className={`session-engine-fab__btn relative flex items-center gap-2 px-4 py-2 sm:px-5 sm:py-2.5 rounded-full text-[10px] sm:text-xs font-bold border-2 transition hover:opacity-90 active:scale-[0.98] ${
             enabled
               ? 'bg-cyan-100 dark:bg-cyan-900/40 border-cyan-300 dark:border-cyan-500 text-cyan-800 dark:text-cyan-200'
               : 'bg-gray-100 dark:bg-gray-900/80 border-gray-300 dark:border-gray-500 text-gray-700 dark:text-gray-200'
           }`}
           title="Session Momentum Engine — high-momentum market windows"
         >
-          <i className="fas fa-clock text-sm sm:text-base" />
+          <i className="fas fa-clock text-sm" />
           <span className="tracking-wide whitespace-nowrap">
             {enabled ? 'SESSION ENGINE ON' : 'SESSION ENGINE'}
           </span>

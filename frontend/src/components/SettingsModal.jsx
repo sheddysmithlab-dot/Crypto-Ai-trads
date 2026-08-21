@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { authFetch } from '../config/api';
+import InfoTip from './InfoTip';
 
 const TONE_CLASSES = {
   neutral: 'bg-emerald-900/20 border-emerald-700/40 text-emerald-300',
@@ -7,6 +8,15 @@ const TONE_CLASSES = {
   error: 'bg-red-900/30 border-red-600/50 text-red-300',
   info: 'bg-blue-900/30 border-blue-600/50 text-blue-300',
 };
+
+function LabelWithInfo({ children, tip }) {
+  return (
+    <label className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-gray-300">
+      <span>{children}</span>
+      <InfoTip text={tip} />
+    </label>
+  );
+}
 
 export default function SettingsModal({ open, onClose, onLiveTradingConnected }) {
   const [bybitKey, setBybitKey] = useState('');
@@ -24,22 +34,24 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
       const res = await authFetch('/settings/status');
       const data = await res.json();
 
-      const bybitLabel = data.bybit_configured ? `Bybit: configured (${data.bybit_environment})` : 'Bybit: not configured';
-      const aiLabel =
-        data.ai_configured
-          ? `AI: ${data.ai_provider} (${data.ai_model || 'glm-4.5-flash'})`
-          : data.ai_provider === 'z-ai'
-            ? 'AI: Z.ai GLM-4.5-Flash (add ZAI_API_KEY in backend/.env or paste key below)'
-            : 'AI: not configured';
+      const bybitLabel = data.bybit_configured
+        ? `Bybit: connected (${data.bybit_environment})`
+        : 'Bybit: not connected';
+      const aiLabel = data.ai_configured
+        ? `AI: ${data.ai_provider} (${data.ai_model || 'glm-4.5-flash'})`
+        : 'AI: not connected';
 
-      setBanner({ tone: 'neutral', message: `${bybitLabel} | ${aiLabel}. Keys stored locally; values never shown in the form.` });
+      setBanner({
+        tone: 'neutral',
+        message: `${bybitLabel} | ${aiLabel}. Keys are saved securely and never shown here again.`,
+      });
 
       setBybitEnv(data.bybit_environment || 'mainnet');
       setAiProvider(data.ai_provider || 'z-ai');
       setAiModel(data.ai_model || 'glm-4.5-flash');
       setAiBaseUrl(data.ai_base_url || 'https://api.z.ai/api/paas/v4');
     } catch {
-      setBanner({ tone: 'error', message: 'Could not reach backend to load settings status.' });
+      setBanner({ tone: 'error', message: 'Could not load settings status. Please try again.' });
     }
   }
 
@@ -84,7 +96,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
         setBanner({ tone: 'error', message: data.message || 'Failed to save settings.' });
       }
     } catch {
-      setBanner({ tone: 'error', message: 'Connection to backend failed while saving settings.' });
+      setBanner({ tone: 'error', message: 'Could not save settings. Please try again.' });
     } finally {
       setBusy((b) => ({ ...b, save: false }));
     }
@@ -93,7 +105,6 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
   async function handleTestBybit() {
     setBusy((b) => ({ ...b, testBybit: true }));
     try {
-      // Apply environment + any newly typed keys before testing stored credentials.
       const saveRes = await authFetch('/settings/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -124,7 +135,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
         onLiveTradingConnected?.();
       }
     } catch {
-      setBanner({ tone: 'error', message: 'Connection to backend failed while testing Bybit.' });
+      setBanner({ tone: 'error', message: 'Could not test Bybit. Please try again.' });
     } finally {
       setBusy((b) => ({ ...b, testBybit: false }));
     }
@@ -137,14 +148,14 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
       const data = await res.json();
       setBanner({ tone: data.success ? 'success' : 'error', message: data.message });
     } catch {
-      setBanner({ tone: 'error', message: 'Connection to backend failed while testing AI provider.' });
+      setBanner({ tone: 'error', message: 'Could not test AI. Please try again.' });
     } finally {
       setBusy((b) => ({ ...b, testAi: false }));
     }
   }
 
   async function handleReset() {
-    if (!confirm('Reset all stored API settings? This cannot be undone.')) return;
+    if (!confirm('Reset all saved API settings? This cannot be undone.')) return;
     setBusy((b) => ({ ...b, reset: true }));
     try {
       const res = await authFetch('/settings/reset', { method: 'POST' });
@@ -158,7 +169,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
       setAiBaseUrl('https://api.z.ai/api/paas/v4');
       setBanner({ tone: 'info', message: data.message });
     } catch {
-      setBanner({ tone: 'error', message: 'Connection to backend failed while resetting settings.' });
+      setBanner({ tone: 'error', message: 'Could not reset settings. Please try again.' });
     } finally {
       setBusy((b) => ({ ...b, reset: false }));
     }
@@ -172,7 +183,10 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
       <div className="bg-[#0B0E11] border border-gray-800 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
         <div className="flex justify-between items-start px-6 pt-6">
           <div>
-            <div className="text-xs font-bold text-blue-400 uppercase tracking-widest mb-1">Integration</div>
+            <div className="mb-1 flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-blue-400">
+              Integration
+              <InfoTip text="Connect your exchange account and optional AI provider. Save, then use Test to verify." />
+            </div>
             <h2 className="text-xl font-bold text-white">Set API — Bybit & AI</h2>
           </div>
           <button
@@ -184,12 +198,16 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
         </div>
 
         <div className="px-6 py-5 space-y-6">
-          {/* BYBIT API */}
           <div>
-            <div className="text-xs font-bold text-blue-400 uppercase tracking-widest mb-3">Bybit API</div>
+            <div className="mb-3 flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-blue-400">
+              Bybit API
+              <InfoTip text="Required for live trading. Paste your Bybit API key and secret, pick Mainnet or Testnet, then Save and Test Bybit." />
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-semibold text-gray-300 mb-1.5">API Key</label>
+                <LabelWithInfo tip="Your Bybit public API key. Leave blank to keep the key already saved.">
+                  API Key
+                </LabelWithInfo>
                 <input
                   type="password"
                   autoComplete="off"
@@ -200,7 +218,9 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-gray-300 mb-1.5">API Secret</label>
+                <LabelWithInfo tip="Your Bybit secret key. Leave blank to keep the secret already saved.">
+                  API Secret
+                </LabelWithInfo>
                 <input
                   type="password"
                   autoComplete="off"
@@ -212,7 +232,9 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
               </div>
             </div>
             <div className="mt-4">
-              <label className="block text-xs font-semibold text-gray-300 mb-1.5">Environment</label>
+              <LabelWithInfo tip="Mainnet uses real funds. Testnet uses practice funds — create keys on Bybit’s Testnet site and match this setting.">
+                Environment
+              </LabelWithInfo>
               <select
                 value={bybitEnv}
                 onChange={(e) => setBybitEnv(e.target.value)}
@@ -221,19 +243,19 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
                 <option value="mainnet">Mainnet (real funds)</option>
                 <option value="testnet">Testnet (paper funds)</option>
               </select>
-              <p className="mt-2 text-[11px] text-gray-500 leading-relaxed">
-                Testnet keys come from testnet.bybit.com only. If Test Bybit returns 403, open API Management → Edit key →
-                add your backend server IP or choose &quot;No IP restriction&quot; (the test runs from the server, not your browser).
-              </p>
             </div>
           </div>
 
-          {/* AI API INTEGRATION */}
           <div>
-            <div className="text-xs font-bold text-blue-400 uppercase tracking-widest mb-3">AI API Integration</div>
+            <div className="mb-3 flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-blue-400">
+              AI API Integration
+              <InfoTip text="Optional. Lets the bot ask an AI model for a second opinion. Choose None to turn AI consult off." />
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-semibold text-gray-300 mb-1.5">AI provider</label>
+                <LabelWithInfo tip="Which AI service to use. Z.ai is the default. Choose None to disable.">
+                  AI provider
+                </LabelWithInfo>
                 <select
                   value={aiProvider}
                   onChange={(e) => {
@@ -250,16 +272,18 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
                   <option value="none">None (disable AI)</option>
                   <option value="openai">OpenAI</option>
                   <option value="azure-openai">Azure OpenAI</option>
-                  <option value="zhipu-glm">Zhipu GLM (China endpoint)</option>
+                  <option value="zhipu-glm">Zhipu GLM</option>
                   <option value="custom">Custom / Other</option>
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-semibold text-gray-300 mb-1.5">AI API key</label>
+                <LabelWithInfo tip="Paste your AI provider API key. Leave blank to keep a key already saved.">
+                  AI API key
+                </LabelWithInfo>
                 <input
                   type="password"
                   autoComplete="off"
-                  placeholder="Paste Z.ai API key (or set ZAI_API_KEY in backend/.env)"
+                  placeholder="Paste AI API key"
                   value={aiKey}
                   onChange={(e) => setAiKey(e.target.value)}
                   className="w-full bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
@@ -268,7 +292,9 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
               <div>
-                <label className="block text-xs font-semibold text-gray-300 mb-1.5">Model</label>
+                <LabelWithInfo tip="Model name your provider expects (example: glm-4.5-flash).">
+                  Model
+                </LabelWithInfo>
                 <input
                   type="text"
                   placeholder="glm-4.5-flash"
@@ -278,7 +304,9 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-gray-300 mb-1.5">Base URL (optional)</label>
+                <LabelWithInfo tip="API endpoint URL. Leave the default unless your provider gave you a custom address.">
+                  Base URL (optional)
+                </LabelWithInfo>
                 <input
                   type="text"
                   placeholder="https://api.z.ai/api/paas/v4"
@@ -290,10 +318,8 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
             </div>
           </div>
 
-          {/* Status Banner */}
           <div className={`text-xs rounded-lg px-4 py-3 border ${TONE_CLASSES[banner.tone]}`}>{banner.message}</div>
 
-          {/* Action Buttons */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <button
               className="bg-emerald-500 hover:bg-emerald-600 text-black font-bold py-2.5 rounded-lg text-sm transition-colors col-span-2 sm:col-span-1 disabled:opacity-60"

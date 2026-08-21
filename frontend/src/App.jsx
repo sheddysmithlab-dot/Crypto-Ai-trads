@@ -22,7 +22,6 @@ import LiveTradesPanel from './components/LiveTradesPanel';
 import ControlBar from './components/ControlBar';
 import PaperTradingModal from './components/PaperTradingModal';
 import SessionMomentumModal from './components/SessionMomentumModal';
-import SessionEngineFab from './components/SessionEngineFab';
 import AlertModal from './components/AlertModal';
 import SettingsModal from './components/SettingsModal';
 import AgentInstructionsModal from './components/AgentInstructionsModal';
@@ -437,10 +436,10 @@ export default function App() {
       const trade = trades.find((t) => t.id === exitConfirm.tradeId);
       return {
         title: 'Force Close Position?',
-        message: `Position #${exitConfirm.tradeId} ko abhi market price par close karna chahte hain?`,
+        message: `Close position #${exitConfirm.tradeId} now at market price?`,
         detail: trade
           ? `${trade.pair} ${trade.side} @ $${trade.entry} | Current PnL: ${trade.pnl >= 0 ? '+' : ''}${trade.pnl?.toFixed(2)}%`
-          : 'Yeh action undo nahi ho sakta.',
+          : 'This action cannot be undone.',
         confirmLabel: 'Force Close',
       };
     }
@@ -563,11 +562,6 @@ export default function App() {
         />
       </main>
 
-      <SessionEngineFab
-        enabled={sessionEngineEnabled}
-        onClick={() => setSessionModalOpen(true)}
-      />
-
       <ControlBar
         botIsActive={effectiveBotActive}
         botLoading={botLoading}
@@ -577,6 +571,7 @@ export default function App() {
         onClick={handleControlClick}
         onManualBuy={handleManualBuy}
         onManualSell={handleManualSell}
+        onOpenSessionModal={() => setSessionModalOpen(true)}
       />
 
       <PaperTradingModal

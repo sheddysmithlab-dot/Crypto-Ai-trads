@@ -29,7 +29,7 @@ body.dark {
   opacity: 1;
 }
 
-/* Session Engine FAB — white neon star rides the pill border */
+/* Session Engine control — white neon star rides the pill border (in ControlBar) */
 .session-engine-fab {
   pointer-events: none;
 }

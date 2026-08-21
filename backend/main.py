@@ -471,19 +471,18 @@ class BybitAPIWrapper:
 
         if status_code == 403:
             outbound_ip = await self._get_outbound_ip()
-            parts = ["Bybit returned HTTP 403 (Forbidden)."]
+            parts = ["Bybit rejected the connection (403)."]
             if ret_msg:
                 parts.append(str(ret_msg))
             parts.append(
-                "The API call is made from your backend server, not your browser. "
-                "In Bybit → API Management → Edit key → add that server's public IP or choose 'No IP restriction'."
+                "Check that your API key allows this account and that Mainnet/Testnet matches where the key was created."
             )
             if outbound_ip:
-                parts.append(f"Backend outbound IP: {outbound_ip} (whitelist this in Bybit).")
+                parts.append(f"If your key uses IP allowlists, add this IP: {outbound_ip}.")
             if settings_store.bybit_environment == "testnet":
-                parts.append("Testnet keys must be created at testnet.bybit.com and Environment must be Testnet.")
+                parts.append("Testnet keys must come from Bybit Testnet.")
             else:
-                parts.append("Mainnet keys must be created at bybit.com and Environment must be Mainnet.")
+                parts.append("Mainnet keys must come from Bybit Mainnet.")
             return " ".join(parts)
 
         if ret_msg:
@@ -614,7 +613,7 @@ bybit_api = BybitAPIWrapper()
 # PILLAR 3: CORE AI AGENT LOGIC (State & Rules)
 # ==========================================
 # Manual-mode defaults (auto strategy wiped)
-MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "5"))
+MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "10"))
 MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "1"))
 AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path-based SL + path-based profit book
 INVERT_AUTO_TRADE_FIRE = False
@@ -689,8 +688,9 @@ class AITradingAgent:
         # Pre-start strategy config (AI Agent Instructions modal before START).
         self.starting_capital = 1000.0
         self.current_capital = self.starting_capital
-        # Risk % from modal -> max_concurrent_trades via round(risk_pct * 1.5). Not a stop-loss.
-        self.risk_level_pct = 3.0
+        # Total capital risk % from modal -> max_concurrent_trades via round(risk_pct * 2).
+        # Also: when session portfolio drop hits this %, auto Hold-stop (no new entries).
+        self.risk_level_pct = 5.0
         self.max_concurrent_trades = MAX_CONCURRENT_TRADES_DEFAULT
         self.last_open_skip_reason: str | None = None
         # AI Agent Instructions modal: optional "Capital profit of the day" target.
@@ -2128,7 +2128,7 @@ class AITradingAgent:
             {"reason": reason, "open_positions": open_n},
         )
         notifications.push(
-            f"AI Engine stopped (Hold). {open_n} open trade(s) will auto-exit on TP/SL — no new entries.",
+            f"AI Engine stopped (Hold). {open_n} open trade(s) will auto-exit on TP/SL — no new entries. ({reason})",
             "warning",
         )
 
@@ -3320,7 +3320,7 @@ async def set_paper_capital_legacy(payload: PaperCapitalPayload):
 # AI AGENT INSTRUCTIONS MODAL WIRING
 # ==========================================
 class AgentConfigPayload(BaseModel):
-    stop_loss_pct: float = 3.0
+    stop_loss_pct: float = 5.0
     daily_profit_pct: float = 0.0
     max_concurrent_trades: int | None = None
 
@@ -3334,14 +3334,15 @@ def _half_up_round(value: float) -> int:
 
 @app.post("/agent/config")
 async def set_agent_config(payload: AgentConfigPayload):
-    """ Applied from the "AI Agent Instructions" pre-start modal.
-    - stop_loss_pct (risk level from the popup) -> max_concurrent_trades via
-      round(stop_loss_pct * 1.5) (half-up) unless max_concurrent_trades is sent
+    """ Applied from the "AI Engine Instructions" pre-start modal.
+    - stop_loss_pct = total capital risk % → max_concurrent_trades via
+      round(stop_loss_pct * 2) (half-up) unless max_concurrent_trades is sent
       explicitly from the frontend (must match the modal display).
-    - daily_profit_pct -> optional "Capital profit of the day" target; 0 disables.
-    Both are validated and stored before /start-bot is called by the frontend. """
+    - Same % is the auto Hold-stop threshold when session portfolio drop hits it.
+    - daily_profit_pct -> optional daily profit target; 0 disables.
+    """
     if payload.stop_loss_pct < 0.5 or payload.stop_loss_pct > 100:
-        return {"status": "error", "message": "Risk level must be between 0.5% and 100%."}
+        return {"status": "error", "message": "Total capital risk must be between 0.5% and 100%."}
     if payload.daily_profit_pct < 0 or payload.daily_profit_pct > 1000:
         return {"status": "error", "message": "Daily profit target must be between 0% and 1000%."}
 
@@ -3350,17 +3351,17 @@ async def set_agent_config(payload: AgentConfigPayload):
             return {"status": "error", "message": "Concurrent trades must be between 1 and 500."}
         max_trades = payload.max_concurrent_trades
     else:
-        max_trades = max(1, _half_up_round(payload.stop_loss_pct * 1.5))
+        max_trades = max(1, _half_up_round(payload.stop_loss_pct * 2.0))
 
     agent.risk_level_pct = payload.stop_loss_pct
     agent.max_concurrent_trades = max_trades
     agent.daily_profit_target_pct = payload.daily_profit_pct
     agent.daily_target_reached = False
-    print(f"[AGENT CONFIG] risk_level={payload.stop_loss_pct}% | max_concurrent_trades="
+    print(f"[AGENT CONFIG] capital_risk={payload.stop_loss_pct}% | max_concurrent_trades="
           f"{agent.max_concurrent_trades} | daily_profit_target={agent.daily_profit_target_pct}%")
     system_log.push(
         "ai",
-        f"Agent config applied: risk={payload.stop_loss_pct}% | max_concurrent_trades={agent.max_concurrent_trades} | daily_profit={payload.daily_profit_pct}%",
+        f"Agent config applied: capital_risk={payload.stop_loss_pct}% | max_concurrent_trades={agent.max_concurrent_trades} | daily_profit={payload.daily_profit_pct}%",
         {"risk_level_pct": payload.stop_loss_pct, "max_concurrent_trades": agent.max_concurrent_trades},
     )
     return {
@@ -3374,9 +3375,9 @@ async def set_agent_config(payload: AgentConfigPayload):
 @app.get("/agent/config")
 async def get_agent_config():
     """ Lets the modal show the currently-applied config when reopened. """
-    # Derive the popup risk % from the stored concurrent-trades cap (inverse of * 1.5).
+    # Inverse of * 2 trade capacity (default capital risk 5% → 10 trades).
     risk_pct = agent.risk_level_pct or (
-        round(agent.max_concurrent_trades / 1.5, 1) if agent.max_concurrent_trades else 3.0
+        round(agent.max_concurrent_trades / 2.0, 1) if agent.max_concurrent_trades else 5.0
     )
     return {
         "stop_loss_pct": risk_pct,
@@ -3792,6 +3793,21 @@ async def portfolio_feed(websocket: WebSocket):
 
             baseline = agent.get_session_baseline()
             portfolio_drop = ((baseline - total_value) / baseline) * 100 if baseline else 0
+
+            # Total capital risk % (from AI Engine Instructions): when session portfolio
+            # mark-to-market drop hits the limit → Hold-stop (no new fires; open trades
+            # keep path TP/SL until they exit on their own).
+            if (
+                agent.is_active
+                and float(agent.risk_level_pct or 0) > 0
+                and not agent.emergency_triggered
+                and not agent.session_hold_mode
+                and portfolio_drop >= float(agent.risk_level_pct)
+            ):
+                agent.hold_stop(
+                    f"Total capital risk {agent.risk_level_pct:g}% hit "
+                    f"(portfolio −{portfolio_drop:.2f}%) — Hold stop"
+                )
 
             tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
             scan = system_log.last_taapi_scan

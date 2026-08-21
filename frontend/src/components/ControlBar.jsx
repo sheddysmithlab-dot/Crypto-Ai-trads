@@ -1,3 +1,6 @@
+import SessionEngineFab from './SessionEngineFab';
+import InfoTip from './InfoTip';
+
 export default function ControlBar({
   botIsActive,
   botLoading,
@@ -7,6 +10,7 @@ export default function ControlBar({
   onClick,
   onManualBuy,
   onManualSell,
+  onOpenSessionModal,
 }) {
   const mainBtnColor = botLoading
     ? 'bg-amber-500 cursor-wait'
@@ -23,6 +27,11 @@ export default function ControlBar({
 
   return (
     <div className="bg-lightCard dark:bg-darkCard border-t border-gray-300 dark:border-gray-800 px-4 py-4 shrink-0 flex flex-col items-center justify-center space-y-3">
+      <div className="w-full max-w-4xl flex items-center justify-center gap-2">
+        <SessionEngineFab enabled={sessionEngineEnabled} onClick={onOpenSessionModal} />
+        <InfoTip text="Timed momentum windows (IST). When ON, main AI Engine stays OFF — only one mode at a time." />
+      </div>
+
       <div className="w-full max-w-4xl flex items-stretch gap-2">
         <button
           type="button"
@@ -82,7 +91,7 @@ export default function ControlBar({
       <div className="w-full max-w-4xl flex flex-col sm:flex-row items-center justify-between text-xs text-gray-500 dark:text-gray-400 font-medium gap-3 px-2">
         <div className="flex items-center gap-2">
           <i className="fas fa-hourglass-start text-blue-500" />
-          <span>Session:</span>
+          <span className="inline-flex items-center gap-1">Session <InfoTip text="How long this AI session has been running." /></span>
           <span className="text-gray-800 dark:text-gray-200 font-bold">{uptime.formatted}</span>
           <span className={botIsActive ? 'text-green-500' : 'text-gray-500'}>
             {botIsActive ? '(Running)' : '(Stopped)'}
