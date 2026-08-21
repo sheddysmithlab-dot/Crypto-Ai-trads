@@ -81,7 +81,7 @@ export default function Header({
             className={`font-bold text-sm sm:text-base tabular-nums ${
               exitedProfit ? 'text-green-500' : 'text-red-500'
             }`}
-            title="Closed trades net P&L ($)"
+            title="Closed trades this AI session — gross $ (fees not deducted)"
           >
             {exitedPnlStr}
           </span>

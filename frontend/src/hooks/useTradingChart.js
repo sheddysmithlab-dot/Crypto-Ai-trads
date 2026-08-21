@@ -25,6 +25,7 @@ import {
   renderTradeFireOverlay,
   clearTradeFireOverlay,
   tradeFireTooltipFromLookup,
+  latestTradeFireToast,
 } from '../utils/tradeFireChart';
 import {
   renderBlueBoxChartOverlay,
@@ -351,6 +352,16 @@ export function useTradingChart({
       intervalSecs: currentIntervalRef.current,
       hoveredTime: hoveredTradeFireTimeRef.current,
     });
+
+    const autoToast = latestTradeFireToast(lookup);
+    setReadouts((prev) => {
+      const same =
+        prev.tradeFireTooltip?.stage === autoToast?.stage &&
+        prev.tradeFireTooltip?.time === autoToast?.time &&
+        prev.tradeFireTooltip?.pattern === autoToast?.pattern;
+      if (same) return prev;
+      return { ...prev, tradeFireTooltip: autoToast };
+    });
   }, []);
 
   redrawTradeFireOverlayRef.current = redrawTradeFireOverlay;
@@ -361,6 +372,7 @@ export function useTradingChart({
       series?.setData([]);
       clearTradeFireOverlay(tradeFireOverlayElRef.current);
       tradeFireLookupRef.current = new Map();
+      setReadouts((prev) => (prev.tradeFireTooltip ? { ...prev, tradeFireTooltip: null } : prev));
       return;
     }
     series.setData(decorateCandlestickSeries(data));
@@ -894,7 +906,8 @@ export function useTradingChart({
       if (!param.time) {
         if (hoveredTradeFireTimeRef.current != null) {
           hoveredTradeFireTimeRef.current = null;
-          setReadouts((prev) => ({ ...prev, tradeFireTooltip: null }));
+          const autoToast = latestTradeFireToast(tradeFireLookupRef.current);
+          setReadouts((prev) => ({ ...prev, tradeFireTooltip: autoToast }));
           redrawTradeFireOverlayRef.current();
         }
         return;
@@ -907,7 +920,10 @@ export function useTradingChart({
       const nextHover = tip ? param.time : null;
       if (prevHover !== nextHover) {
         hoveredTradeFireTimeRef.current = nextHover;
-        setReadouts((prev) => ({ ...prev, tradeFireTooltip: tip }));
+        setReadouts((prev) => ({
+          ...prev,
+          tradeFireTooltip: tip || latestTradeFireToast(tradeFireLookupRef.current),
+        }));
         redrawTradeFireOverlayRef.current();
       }
     });

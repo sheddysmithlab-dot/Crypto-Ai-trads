@@ -714,6 +714,7 @@ class AITradingAgent:
             "daily_broker_fee": 0.0,
             "ai_season_profit": 0.0,
             "ai_season_profit_pct": 0.0,
+            "exited_booked_usd": 0.0,
             "open_positions": 0,
         }
 
@@ -1016,6 +1017,7 @@ class AITradingAgent:
                 # Trade list shows gross profit only — fees live in header broker-fee total.
                 row["pnl"] = round(metrics["gross_pct"], 4)
                 row["gross_pnl_pct"] = round(metrics["gross_pct"], 4)
+                row["gross_pnl_usd"] = round(float(metrics.get("gross_usd") or 0), 2)
                 row["net_pnl_usd"] = round(metrics["net_usd"], 2)
                 row["exit_fee_usd"] = round(metrics["exit_fee_usd"], 4)
                 row["status"] = "sold"
@@ -1070,10 +1072,14 @@ class AITradingAgent:
                 continue
             entry_f = float(row.get("entry_fee_usd") or 0)
             exit_f = float(row.get("exit_fee_usd") or 0)
-            net_u = float(row.get("net_pnl_usd") or 0)
             closed_fees += entry_f + exit_f
-            # net = gross - fees → gross = net + fees
-            closed_gross += net_u + entry_f + exit_f
+            stored_gross = row.get("gross_pnl_usd")
+            if stored_gross is not None:
+                closed_gross += float(stored_gross)
+            else:
+                # Legacy rows: net = gross - fees → gross = net + fees
+                net_u = float(row.get("net_pnl_usd") or 0)
+                closed_gross += net_u + entry_f + exit_f
 
         gross = open_gross + closed_gross
         fees = open_fees + closed_fees
@@ -1105,6 +1111,7 @@ class AITradingAgent:
             "daily_broker_fee": 0.0,
             "ai_season_profit": 0.0,
             "ai_season_profit_pct": 0.0,
+            "exited_booked_usd": 0.0,
             "open_positions": 0,
         }
 
@@ -1113,6 +1120,7 @@ class AITradingAgent:
         book = fee_book if fee_book is not None else self.get_session_gross_and_fees_usd()
         gross = float(book.get("gross_usd") or 0)
         fees = float(book.get("broker_fee_usd") or 0)
+        exited = float(book.get("closed_gross_usd") or 0)
         baseline = float(
             self.ai_season_start_capital
             if self.ai_season_start_capital is not None
@@ -1129,6 +1137,7 @@ class AITradingAgent:
             "daily_broker_fee": round(fees, 4),
             "ai_season_profit": round(gross, 2),
             "ai_season_profit_pct": round(pct, 2),
+            "exited_booked_usd": round(exited, 2),
             "open_positions": len(session_open),
         }
         self.session_stats_frozen = True
@@ -1292,6 +1301,7 @@ class AITradingAgent:
             return
         self.timeframe_seconds = seconds
         LAST_CANDLE_TIMESTAMPS.clear()
+        _clear_entry_pipeline()
         reset_blue_box_state()
         _invalidate_kline_cache()
         print(f"[TIMEFRAME SYNC] Backend trading timeframe set to {seconds}s.")
@@ -2095,6 +2105,7 @@ class AITradingAgent:
         cannot immediately re-fire on the next page load or restart. """
         print("[RULE 8: EMERGENCY EXIT CONFIRMED] Selling all positions and halting.")
         self.session_hold_mode = False
+        _clear_entry_pipeline()
         self._close_all_positions("EMERGENCY SELL ALL TRIGGERED | RULE 8 confirmed by user")
         self.is_active = False
         self.clear_emergency_state()
@@ -2108,6 +2119,7 @@ class AITradingAgent:
         self.session_hold_mode = False
         self._close_all_positions(reason)
         self.is_active = False
+        _clear_entry_pipeline()
         self.end_ai_season(clear_live_table=True, reason="manual_stop")
         self.peak_net_pct = 0.0
         self.is_lock_active = False
@@ -2119,6 +2131,7 @@ class AITradingAgent:
         print(f"[AI ENGINE] HOLD STOP — {reason}")
         self.is_active = False
         self.session_hold_mode = True
+        _clear_entry_pipeline()
         # Keep season_id + start capital so held closes still roll into portfolio counters.
         self.session_stats_frozen = False
         open_n = len(self.trades)
@@ -2139,6 +2152,7 @@ class AITradingAgent:
         print(f"[SESSION SCHEDULE] Soft stop — {reason}")
         self.is_active = False
         self.session_hold_mode = True
+        _clear_entry_pipeline()
         self.session_stats_frozen = False
         system_log.push(
             "ai",
@@ -2307,12 +2321,88 @@ TIMEFRAME_KEY_TO_BYBIT_KLINE = {
 # different candle granularities.
 LAST_CANDLE_TIMESTAMPS = {}
 
-# --- Strategy wiped: auto entry / 3-candle / neon / fire path removed ---
+# Detect on last closed candle → queue → fire at the NEXT candle's open (not on detect bar).
 PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
 PATTERN_NEON_STAGES: list[dict] = []
 THREE_CANDLE_ENTRY = False
 
 _bybit_executor_agent = None
+
+
+def _timeframe_interval_ms(timeframe_key: str) -> int:
+    seconds = {
+        "30s": 30,
+        "1m": 60,
+        "3m": 180,
+        "5m": 300,
+        "10m": 600,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "1D": 86400,
+    }.get(str(timeframe_key or "1m"), 60)
+    return int(seconds * 1000)
+
+
+def _chart_time_sec(raw_ms_or_sec: int | float | None) -> int | None:
+    if raw_ms_or_sec is None:
+        return None
+    raw = int(raw_ms_or_sec)
+    return int(raw // 1000) if raw > 1_000_000_000_000 else raw
+
+
+def _push_pattern_neon(
+    *,
+    pair: str,
+    candle_time_ms: int,
+    stage: str,
+    side: str | None = None,
+    action: str | None = None,
+    pattern: str | None = None,
+    reason: str | None = None,
+) -> None:
+    """Append a chart neon stage (detected / confirming / fired / skipped)."""
+    tsec = _chart_time_sec(candle_time_ms)
+    if tsec is None:
+        return
+    resolved_side = side
+    if not resolved_side and action:
+        resolved_side = "LONG" if action == "BUY" else "SHORT" if action == "SELL" else None
+    entry = {
+        "time": tsec,
+        "signal_candle_time": tsec,
+        "pair": pair,
+        "stage": stage,
+        "side": resolved_side,
+        "action": action,
+        "pattern": pattern or "Pattern",
+        "reason": reason,
+        "opened_at": time.time() if stage == "fired" else None,
+    }
+    # Replace same pair+time+stage; keep higher-rank stage on same bar.
+    rank = {"detected": 1, "confirming": 2, "skipped": 3, "fired": 4}.get(stage, 0)
+    kept: list[dict] = []
+    for prev in PATTERN_NEON_STAGES:
+        if prev.get("pair") == pair and int(prev.get("time") or 0) == tsec:
+            prev_rank = {"detected": 1, "confirming": 2, "skipped": 3, "fired": 4}.get(
+                str(prev.get("stage") or ""), 0
+            )
+            if prev_rank > rank:
+                kept.append(prev)
+            continue
+        kept.append(prev)
+    kept.append(entry)
+    PATTERN_NEON_STAGES[:] = kept[-120:]
+
+
+def _clear_entry_pipeline() -> None:
+    PENDING_ENTRY_SIGNALS.clear()
+
+
+def get_pattern_neon_snapshot(pair: str | None = None) -> list[dict]:
+    if not pair:
+        return list(PATTERN_NEON_STAGES[-80:])
+    return [e for e in PATTERN_NEON_STAGES[-80:] if e.get("pair") == pair]
 
 
 def trade_uses_bybit_executor(trade: dict) -> bool:
@@ -2499,23 +2589,208 @@ async def fetch_closed_candle_history(
 
 
 async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
-    """Closed-candle scan → open auto trade with brain.py-driven SL/TP."""
+    """Scan last CLOSED candle for pattern; fire only at the NEXT candle open.
+
+    Flow:
+      1) Try to fire any queued signal once the next candle has started.
+      2) On a newly closed candle: detect pattern → queue (DETECTED), do NOT fire yet.
+    """
     bybit_symbol = get_bybit_symbol(pair)
     if not bybit_symbol:
         return False
 
-    # Always fetch primary TF candles plus one higher TF for top-down alignment.
+    interval_ms = _timeframe_interval_ms(timeframe_key)
+
+    async def _skip_pending(pending: dict, reason: str, *, fire_candle_ms: int | None = None) -> bool:
+        detect = pending.get("detect") or {}
+        side = pending.get("side") or ("LONG" if detect.get("action") == "BUY" else "SHORT")
+        candle_ms = int(fire_candle_ms or pending.get("fire_candle_time") or pending.get("signal_candle_time") or 0)
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=candle_ms,
+            stage="skipped",
+            side=side,
+            action=detect.get("action"),
+            pattern=detect.get("pattern"),
+            reason=reason,
+        )
+        system_log.push_agent_chat(
+            f"SKIPPED {side} on {pair}: {reason}",
+            status="no_match",
+            details={"pair": pair, "side": side, "reason": reason, "detect": detect},
+        )
+        system_log.set_last_trade_fire(
+            {
+                "success": False,
+                "skipped": True,
+                "action": detect.get("action"),
+                "symbol": bybit_symbol,
+                "pattern": detect.get("pattern"),
+                "pair": pair,
+                "error": reason,
+            }
+        )
+        PENDING_ENTRY_SIGNALS.pop(pair, None)
+        print(f"[BRAIN] SKIPPED {side} {pair}: {reason}")
+        return False
+
+    async def _execute_queued_fire(pending: dict) -> bool:
+        detect = dict(pending.get("detect") or {})
+        side = pending["side"]
+        detect_candle_ms = int(pending["signal_candle_time"])
+        fire_candle_ms = int(pending["fire_candle_time"])
+        candle_close = float(pending.get("detect_close") or detect.get("entry") or 0)
+
+        if len(agent.trades) >= agent.max_concurrent_trades:
+            return await _skip_pending(
+                pending,
+                f"Max concurrent trades ({agent.max_concurrent_trades}) reached "
+                f"({len(agent.trades)} open)",
+                fire_candle_ms=fire_candle_ms,
+            )
+        if agent.daily_target_reached:
+            return await _skip_pending(pending, "Daily profit target already reached", fire_candle_ms=fire_candle_ms)
+        if not agent.has_same_side_auto_capacity(side, pair):
+            return await _skip_pending(
+                pending,
+                f"{side} already open on {pair} (max {MAX_SAME_SIDE_AUTO_PER_PAIR} same-side)",
+                fire_candle_ms=fire_candle_ms,
+            )
+        if agent.has_duplicate_auto_entry(
+            side, pair, detect.get("pattern"), detect_candle_ms, candle_close or float(detect.get("entry") or 0)
+        ):
+            return await _skip_pending(
+                pending,
+                f"Duplicate entry on same detect candle/pattern for {pair}",
+                fire_candle_ms=fire_candle_ms,
+            )
+
+        mark_px = agent.mark_price_for(pair) or float(detect.get("entry") or candle_close or 0)
+        if not mark_px or mark_px <= 0:
+            return await _skip_pending(pending, f"No usable mark price for {pair}", fire_candle_ms=fire_candle_ms)
+
+        plan = compute_auto_trade_plan(agent, price=mark_px, pair=pair)
+        if plan is None:
+            return await _skip_pending(pending, "Size plan failed (capital/lot)", fire_candle_ms=fire_candle_ms)
+
+        brain_sl = detect.get("sl")
+        brain_tp = detect.get("tp")
+        if brain_sl and brain_tp and float(brain_sl) > 0 and float(brain_tp) > 0:
+            sl_price = round(float(brain_sl), price_decimals_for_mark(mark_px))
+            tp_price = round(float(brain_tp), price_decimals_for_mark(mark_px))
+            exit_label = f"brain SL={sl_price} TP={tp_price}"
+        else:
+            sl_price, tp_price = agent._fixed_exit_prices(
+                float(mark_px), side, loss_pct=PATH_SL_TIGHT_PCT, profit_pct=PATH_TP_WIDE_PCT
+            )
+            exit_label = (
+                f"path SL {PATH_SL_TIGHT_PCT:g}/{PATH_SL_WIDE_PCT:g}% "
+                f"TP {PATH_TP_TIGHT_PCT:g}/{PATH_TP_WIDE_PCT:g}% SL={sl_price} TP={tp_price}"
+            )
+
+        rr = detect.get("risk_reward") or (FIXED_EXIT_PROFIT_PCT / FIXED_EXIT_LOSS_PCT)
+        trade = agent.open_trade(
+            side=side,
+            reason=detect.get("reason") or f"Brain {detect.get('pattern')}",
+            source="auto",
+            position_size_usd=plan["position_usd"],
+            qty=plan["qty"],
+            entry_price=mark_px,
+            bybit_symbol=bybit_symbol,
+            pattern=detect.get("pattern"),
+            # Chart FIRED neon on the NEXT candle (not the detect bar).
+            signal_candle_time=fire_candle_ms,
+            taapi_action=detect["action"],
+            sl_price=sl_price,
+            tp_price=tp_price,
+            target_mult=float(rr),
+            pair=pair,
+            timeframe_key=timeframe_key,
+        )
+        if not trade:
+            return await _skip_pending(
+                pending,
+                agent.last_open_skip_reason or "open_trade returned None",
+                fire_candle_ms=fire_candle_ms,
+            )
+
+        PENDING_ENTRY_SIGNALS.pop(pair, None)
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=fire_candle_ms,
+            stage="fired",
+            side=side,
+            action=detect.get("action"),
+            pattern=detect.get("pattern"),
+            reason=detect.get("reason"),
+        )
+        system_log.push_agent_chat(
+            brain_chat_summary(detect) + f" → FIRED {side} on {pair} (next-candle open)",
+            status="match",
+            details={
+                "pair": pair,
+                "trade_id": trade.get("id"),
+                "sl": trade.get("sl_price"),
+                "tp": trade.get("tp_price"),
+                "exit": exit_label,
+                "detect_candle": detect_candle_ms,
+                "fire_candle": fire_candle_ms,
+            },
+        )
+        system_log.set_last_trade_fire(
+            {
+                "success": True,
+                "action": detect["action"],
+                "symbol": bybit_symbol,
+                "pattern": detect.get("pattern"),
+                "pair": pair,
+                "entry": mark_px,
+                "sl": trade.get("sl_price"),
+                "tp": trade.get("tp_price"),
+                "detect_candle": detect_candle_ms,
+                "fire_candle": fire_candle_ms,
+            }
+        )
+        print(
+            f"[BRAIN] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} "
+            f"detect@{detect_candle_ms} fire@{fire_candle_ms} {exit_label}"
+        )
+        return True
+
+    # --- 1) Fire queued signal once the next candle has started ---
+    pending = PENDING_ENTRY_SIGNALS.get(pair)
+    if pending and pending.get("timeframe_key") == timeframe_key:
+        fire_candle_ms = int(pending["fire_candle_time"])
+        now_ms = int(time.time() * 1000)
+        # Expire if we missed the fire window by more than one full candle.
+        if now_ms > fire_candle_ms + interval_ms:
+            await _skip_pending(pending, "Next-candle fire window expired", fire_candle_ms=fire_candle_ms)
+        elif now_ms >= fire_candle_ms:
+            _push_pattern_neon(
+                pair=pair,
+                candle_time_ms=fire_candle_ms,
+                stage="confirming",
+                side=pending.get("side"),
+                action=(pending.get("detect") or {}).get("action"),
+                pattern=(pending.get("detect") or {}).get("pattern"),
+                reason="Waiting next-candle open → firing",
+            )
+            if await _execute_queued_fire(pending):
+                return True
+    elif pending and pending.get("timeframe_key") != timeframe_key:
+        PENDING_ENTRY_SIGNALS.pop(pair, None)
+
+    # --- 2) Scan only the latest CLOSED candle (forming bar already dropped) ---
     lookback = max(MIN_CANDLES, 100)
     history = await fetch_closed_candle_history(client, bybit_symbol, timeframe_key, limit=lookback)
     if len(history) < MIN_CANDLES:
         return False
 
-    close_time = int(history[-1]["close_time"])
+    close_time = int(history[-1]["close_time"])  # Bybit startTime of last closed bar
     if close_time <= LAST_CANDLE_TIMESTAMPS.get(pair, 0):
         return False
     LAST_CANDLE_TIMESTAMPS[pair] = close_time
 
-    # Determine a higher-TF series for brain top-down alignment.
     _HTF_MAP = {"1m": "5m", "5m": "15m", "15m": "1h", "1h": "1D", "30s": "5m"}
     tf_l = timeframe_key.lower()
     htf_key = _HTF_MAP.get(tf_l)
@@ -2526,7 +2801,6 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         except Exception:
             htf_candles = None
 
-    # Order-flow TRAP engine needs 1M (execution) + 5M (directional bias).
     candles_1m = history if tf_l in ("1m", "30s") else None
     candles_5m = history if tf_l == "5m" else (htf_candles if tf_l in ("1m", "30s") else None)
     try:
@@ -2537,7 +2811,6 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     except Exception as exc:
         print(f"[TRAP-OF] 1m/5m fetch failed on {pair}: {exc}")
 
-    # AI-driven brain: brain.py + order-flow trap → AI API decides BUY/SELL/HOLD.
     balance = agent.get_available_capital() or agent.get_trading_capital_base() or 10000.0
     risk_pct = max(float(getattr(agent, "risk_level_pct", 1.0) or 1.0), 0.5) / 100.0
     risk_pct = min(risk_pct, 0.02)
@@ -2577,58 +2850,51 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         system_log.push_agent_chat(
             f"AI-Brain scan {pair} @ {timeframe_key}: {detect.get('reason', 'HOLD')}",
             status="scanning",
-            details={"pair": pair, "timeframe": timeframe_key, "engine": detect.get("engine"),
-                     "ai_driven": detect.get("ai_driven"), "brain_verdict": detect.get("brain_verdict"),
-                     "orderflow_trap": (detect.get("orderflow_trap") or {}).get("line")},
+            details={
+                "pair": pair,
+                "timeframe": timeframe_key,
+                "engine": detect.get("engine"),
+                "ai_driven": detect.get("ai_driven"),
+                "brain_verdict": detect.get("brain_verdict"),
+                "orderflow_trap": (detect.get("orderflow_trap") or {}).get("line"),
+            },
         )
         return False
 
-    # Seed mark from closed candle so watchlist pairs can size even before ticker poll.
     candle_close = float(history[-1].get("close") or 0)
     if candle_close > 0:
         agent.set_pair_mark(pair, candle_close)
 
     side = "LONG" if detect["action"] == "BUY" else "SHORT"
+    fire_candle_ms = close_time + interval_ms
 
-    def _skip_fire(reason: str, *, cost_aware: bool = False) -> bool:
-        system_log.push_agent_chat(
-            f"SKIPPED {side} on {pair}: {reason}",
-            status="no_match",
-            details={"pair": pair, "side": side, "reason": reason, "detect": detect},
-        )
-        system_log.set_last_trade_fire(
-            {
-                "success": False,
-                "skipped": True,
-                "cost_aware": cost_aware,
-                "action": detect["action"],
-                "symbol": bybit_symbol,
-                "pattern": detect.get("pattern"),
-                "pair": pair,
-                "error": reason,
-            }
-        )
-        print(f"[BRAIN] SKIPPED {side} {pair}: {reason}")
-        return False
-
-    # Capacity gates before AI consult / sizing (avoids silent drop after BUY/SELL log).
+    # Soft capacity checks at queue time (re-checked at fire).
     if len(agent.trades) >= agent.max_concurrent_trades:
-        return _skip_fire(
-            f"Max concurrent trades ({agent.max_concurrent_trades}) reached "
-            f"({len(agent.trades)} open)"
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=close_time,
+            stage="skipped",
+            side=side,
+            action=detect.get("action"),
+            pattern=detect.get("pattern"),
+            reason="Max concurrent trades reached",
         )
+        return False
     if agent.daily_target_reached:
-        return _skip_fire("Daily profit target already reached")
+        return False
     if not agent.has_same_side_auto_capacity(side, pair):
-        return _skip_fire(
-            f"{side} already open on {pair} (max {MAX_SAME_SIDE_AUTO_PER_PAIR} same-side)"
-        )
+        return False
     if agent.has_duplicate_auto_entry(
         side, pair, detect.get("pattern"), close_time, candle_close or float(detect.get("entry") or 0)
     ):
-        return _skip_fire(f"Duplicate entry on same candle/pattern for {pair}")
+        return False
 
-    # AI provider consulted for observability — never blocks execution.
+    # If already waiting on this detect candle, keep it; newer candle replaces.
+    existing = PENDING_ENTRY_SIGNALS.get(pair)
+    if existing and int(existing.get("signal_candle_time") or 0) == close_time:
+        return False
+
+    # AI consult for observability (does not block queue / fire).
     ai_decision = None
     try:
         ai_decision = await consult_ai_provider(
@@ -2644,7 +2910,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 "candle_height": history[-1].get("high", 0) - history[-1].get("low", 0),
                 "prev_candle_height": (
                     history[-2].get("high", 0) - history[-2].get("low", 0)
-                    if len(history) >= 2 else None
+                    if len(history) >= 2
+                    else None
                 ),
             }
         )
@@ -2657,76 +2924,49 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     if ai_note != "SKIP":
         detect["reason"] = f"{detect.get('reason', '')} | AI={ai_note}"
 
-    mark_px = agent.mark_price_for(pair) or float(detect.get("entry") or candle_close or 0)
-    if not mark_px or mark_px <= 0:
-        return _skip_fire(f"No usable mark price for {pair}")
-
-    plan = compute_auto_trade_plan(agent, price=mark_px, pair=pair)
-    if plan is None:
-        return _skip_fire("Size plan failed (capital/lot)")
-
-    # Use brain-driven SL/TP when available; fall back to fixed %.
-    brain_sl = detect.get("sl")
-    brain_tp = detect.get("tp")
-    if brain_sl and brain_tp and float(brain_sl) > 0 and float(brain_tp) > 0:
-        sl_price = round(float(brain_sl), price_decimals_for_mark(mark_px))
-        tp_price = round(float(brain_tp), price_decimals_for_mark(mark_px))
-        exit_label = f"brain SL={sl_price} TP={tp_price}"
-    else:
-        sl_price, tp_price = agent._fixed_exit_prices(
-            float(mark_px), side, loss_pct=PATH_SL_TIGHT_PCT, profit_pct=PATH_TP_WIDE_PCT
-        )
-        exit_label = (
-            f"path SL {PATH_SL_TIGHT_PCT:g}/{PATH_SL_WIDE_PCT:g}% "
-            f"TP {PATH_TP_TIGHT_PCT:g}/{PATH_TP_WIDE_PCT:g}% SL={sl_price} TP={tp_price}"
-        )
-
-    rr = detect.get("risk_reward") or (FIXED_EXIT_PROFIT_PCT / FIXED_EXIT_LOSS_PCT)
-    trade = agent.open_trade(
-        side=side,
-        reason=detect.get("reason") or f"Brain {detect.get('pattern')}",
-        source="auto",
-        position_size_usd=plan["position_usd"],
-        qty=plan["qty"],
-        entry_price=mark_px,
-        bybit_symbol=bybit_symbol,
-        pattern=detect.get("pattern"),
-        signal_candle_time=close_time,
-        taapi_action=detect["action"],
-        sl_price=sl_price,
-        tp_price=tp_price,
-        target_mult=float(rr),
+    PENDING_ENTRY_SIGNALS[pair] = {
+        "detect": detect,
+        "side": side,
+        "signal_candle_time": close_time,
+        "fire_candle_time": fire_candle_ms,
+        "timeframe_key": timeframe_key,
+        "detect_close": candle_close,
+        "queued_at": time.time(),
+    }
+    _push_pattern_neon(
         pair=pair,
-        timeframe_key=timeframe_key,
+        candle_time_ms=close_time,
+        stage="detected",
+        side=side,
+        action=detect.get("action"),
+        pattern=detect.get("pattern"),
+        reason=detect.get("reason"),
     )
-    if not trade:
-        return _skip_fire(agent.last_open_skip_reason or "open_trade returned None")
-
+    _push_pattern_neon(
+        pair=pair,
+        candle_time_ms=fire_candle_ms,
+        stage="confirming",
+        side=side,
+        action=detect.get("action"),
+        pattern=detect.get("pattern"),
+        reason="Fire at next candle open",
+    )
     system_log.push_agent_chat(
-        brain_chat_summary(detect) + f" → FIRED {side} on {pair}",
+        f"DETECTED {side} on {pair}: {detect.get('pattern')} — fire at next candle open",
         status="match",
         details={
             "pair": pair,
-            "trade_id": trade.get("id"),
-            "sl": trade.get("sl_price"),
-            "tp": trade.get("tp_price"),
-            "exit": exit_label,
+            "detect_candle": close_time,
+            "fire_candle": fire_candle_ms,
+            "pattern": detect.get("pattern"),
         },
     )
-    system_log.set_last_trade_fire(
-        {
-            "success": True,
-            "action": detect["action"],
-            "symbol": bybit_symbol,
-            "pattern": detect.get("pattern"),
-            "pair": pair,
-            "entry": mark_px,
-            "sl": trade.get("sl_price"),
-            "tp": trade.get("tp_price"),
-        }
+    print(
+        f"[BRAIN] DETECTED {side} {pair} pattern={detect.get('pattern')} "
+        f"on closed@{close_time} → queue fire@{fire_candle_ms}"
     )
-    print(f"[BRAIN] {side} {pair} @ {mark_px} | pattern={detect.get('pattern')} {exit_label}")
-    return True
+    return False
+
 
 
 async def auto_buy_loop():
@@ -3764,6 +4004,7 @@ async def portfolio_feed(websocket: WebSocket):
                 daily_profit_pct = (daily_profit / baseline) * 100 if baseline else 0
                 ai_season_profit = daily_gross
                 ai_season_profit_pct = daily_profit_pct
+                exited_booked_usd = float(fee_book.get("closed_gross_usd") or 0)
             else:
                 snap = agent.session_stats_snapshot
                 trade_notional = float(snap.get("trade_notional") or 0)
@@ -3774,6 +4015,7 @@ async def portfolio_feed(websocket: WebSocket):
                 ai_season_profit = float(snap.get("ai_season_profit") or 0)
                 ai_season_profit_pct = float(snap.get("ai_season_profit_pct") or 0)
                 daily_gross = daily_profit
+                exited_booked_usd = float(snap.get("exited_booked_usd") or 0)
 
             if (
                 agent.is_active
@@ -3830,6 +4072,7 @@ async def portfolio_feed(websocket: WebSocket):
                 "daily_profit_pct": round(daily_profit_pct, 2),
                 "daily_broker_fee": round(broker_fee, 4),
                 "daily_gross_profit": round(daily_gross, 2),
+                "exited_booked_usd": round(exited_booked_usd, 2),
                 "ai_season_profit": round(ai_season_profit, 2),
                 "ai_season_profit_pct": round(ai_season_profit_pct, 2),
                 "ai_season_active": season_active,
@@ -3890,7 +4133,7 @@ async def trades_feed(websocket: WebSocket):
                 "active_count": len(agent.trades),
                 "lock_active": agent.is_lock_active,
                 "entry_candles": agent.get_entry_candle_highlights(),
-                "pattern_neon": [],
+                "pattern_neon": get_pattern_neon_snapshot(agent.active_pair),
             }
             await websocket.send_json(payload)
             await asyncio.sleep(1)

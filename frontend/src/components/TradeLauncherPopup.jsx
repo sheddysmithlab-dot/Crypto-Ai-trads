@@ -42,8 +42,8 @@ function defaultPos() {
 }
 
 /**
- * Trade launcher: minimized coin chips sit LEFT of "+" (all pairs allowed).
- * Popup is draggable; coin pick is popup-only (main chart unchanged).
+ * Trade launcher: minimized coin chips sit LEFT of "+".
+ * When AI is running chips stay edit-locked, but click swaps that coin with the main chart.
  */
 export default function TradeLauncherPopup({
   slots = [],
@@ -54,6 +54,7 @@ export default function TradeLauncherPopup({
   onMinimizeToSlot,
   onRestoreSlot,
   onRemoveSlot,
+  onSwapWithMain,
   pairs = TRADING_PAIRS,
   activeSymbol,
   timeframe,
@@ -179,8 +180,8 @@ export default function TradeLauncherPopup({
 
   return (
     <div
-      className={`flex flex-wrap items-center gap-1.5 shrink-0 max-w-[min(100%,52rem)] ${locked ? 'opacity-45' : ''}`}
-      title={locked ? 'Stop AI automation to change coins' : undefined}
+      className={`flex flex-wrap items-center gap-1.5 shrink-0 max-w-[min(100%,52rem)] ${locked ? 'opacity-90' : ''}`}
+      title={locked ? 'AI running — click a chip to swap charts with main' : undefined}
     >
       {slots.map((slot) => {
         const meta = pairs.find((p) => p.symbol === slot.symbol) || {
@@ -189,23 +190,37 @@ export default function TradeLauncherPopup({
           color: '#10b981',
         };
         const isActiveEdit = showEditor && editingId === slot.id;
+        const isMainChip = slot.symbol === activeSymbol;
         return (
           <div key={slot.id} className="relative group flex items-center">
             <button
               type="button"
-              disabled={locked}
               onClick={() => {
+                if (isMainChip) {
+                  if (!locked) onRestoreSlot?.(slot.id);
+                  return;
+                }
+                // Chart-only swap: docked coin ↔ main (works while AI is edit-locked too).
+                onSwapWithMain?.(slot.id);
+              }}
+              onDoubleClick={() => {
                 if (locked) return;
                 onRestoreSlot?.(slot.id);
               }}
               title={
                 locked
-                  ? 'Stop AI automation to edit coins'
-                  : `Restore ${slot.symbol} ${slot.timeframe}`
+                  ? isMainChip
+                    ? `${slot.symbol} is already on the main chart`
+                    : `Swap charts: ${slot.symbol} → main (main moves here)`
+                  : isMainChip
+                    ? `Edit ${slot.symbol}`
+                    : `Click: swap with main · Double-click: edit ${slot.symbol}`
               }
               className={`flex items-center gap-1.5 pl-1.5 pr-2 py-1 rounded-md border text-[11px] font-bold shadow-lg transition-colors ${
                 locked
-                  ? 'border-emerald-900/60 bg-black/70 text-emerald-800 cursor-not-allowed'
+                  ? isMainChip
+                    ? 'border-emerald-400/80 bg-emerald-500/20 text-emerald-200 cursor-default'
+                    : 'border-emerald-900/60 bg-black/70 text-emerald-500/80 hover:border-emerald-400/50 hover:text-emerald-200 cursor-pointer'
                   : isActiveEdit
                     ? 'border-emerald-300 bg-emerald-500/20 text-emerald-100'
                     : 'border-emerald-500/70 bg-black/90 text-emerald-300 hover:bg-emerald-500/10'
@@ -213,7 +228,7 @@ export default function TradeLauncherPopup({
             >
               <span
                 className="w-4 h-4 rounded-full flex items-center justify-center text-[8px] text-white shrink-0"
-                style={{ background: meta.color, opacity: locked ? 0.5 : 1 }}
+                style={{ background: meta.color, opacity: locked && !isMainChip ? 0.55 : 1 }}
               >
                 {meta.icon}
               </span>

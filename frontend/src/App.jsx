@@ -378,6 +378,24 @@ export default function App() {
     if (nextSlots) syncWatchlist(nextSlots);
   }
 
+  /** Chart-only: docked coin ↔ main chart; slot keeps the previous main (edit-locked when AI on). */
+  function handleLauncherSwapWithMain(slotId) {
+    const slot = launcherSlots.find((s) => s.id === slotId);
+    if (!slot) return;
+    const mainSym = pairSelector.activeSymbol;
+    if (!mainSym || slot.symbol === mainSym) return;
+    const incoming = slot.symbol;
+    const nextSlots = launcherSlots.map((s) =>
+      s.id === slotId ? { ...s, symbol: mainSym, timeframe: timeframe || s.timeframe } : s,
+    );
+    setLauncherSlots(nextSlots);
+    setLauncherEditorOpen(false);
+    setLauncherEditingId(null);
+    syncWatchlist(nextSlots);
+    pairSelector.selectPair(incoming, { silent: true });
+    pushActionLog(`Chart swap: ${incoming}/USDT → main, ${mainSym}/USDT → dock`);
+  }
+
   async function handleManualBuy() {
     pushActionLog('Manual BUY (LONG) clicked. Sending open-trade request.');
     debugLog('Manual BUY (LONG) clicked. Sending POST /open-trade to Backend...');
@@ -480,9 +498,7 @@ export default function App() {
         seasonProfitPct={seasonProfitPct}
         seasonActive={seasonActive}
         tradesCount={sessionOpenPositions}
-        exitedPnlUsd={trades
-          .filter((t) => t.status === 'sold')
-          .reduce((sum, t) => sum + (Number(t.net_pnl_usd) || 0), 0)}
+        exitedPnlUsd={Number(portfolio.exitedBookedUsd) || 0}
         apiStatus={apiStatus}
         tradingMode={portfolio.tradingMode}
         dayHigh={dayStats.high}
@@ -538,6 +554,7 @@ export default function App() {
               setLauncherEditingId(id);
               setLauncherEditorOpen(true);
             },
+            onSwapWithMain: handleLauncherSwapWithMain,
             onRemoveSlot: (id) => {
               if (effectiveBotActive) return;
               setLauncherSlots((prev) => {

@@ -41,18 +41,24 @@ export default function ChartPanel({
         <div className="flex flex-wrap justify-end items-center gap-2 text-xs font-semibold">
           {readouts.tradeFireTooltip ? (
             <div
-              className={`flex flex-col gap-0.5 px-2 py-1 rounded border text-[10px] font-bold uppercase tracking-wide ${
-                readouts.tradeFireTooltip.side === 'SHORT'
-                  ? 'border-fuchsia-500/50 bg-fuchsia-500/10 text-fuchsia-200'
-                  : 'border-lime-500/50 bg-lime-500/10 text-lime-200'
+              className={`flex flex-col gap-0.5 px-2 py-1 rounded border text-[10px] font-bold uppercase tracking-wide max-w-[14rem] ${
+                readouts.tradeFireTooltip.stage === 'detected'
+                  ? 'border-cyan-400/60 bg-cyan-500/10 text-cyan-100'
+                  : readouts.tradeFireTooltip.stage === 'confirming'
+                    ? 'border-amber-400/60 bg-amber-500/10 text-amber-100'
+                    : readouts.tradeFireTooltip.stage === 'skipped'
+                      ? 'border-red-400/60 bg-red-500/10 text-red-100'
+                      : readouts.tradeFireTooltip.side === 'SHORT'
+                        ? 'border-fuchsia-500/50 bg-fuchsia-500/10 text-fuchsia-200'
+                        : 'border-lime-500/50 bg-lime-500/10 text-lime-200'
               }`}
-              title="Pattern-detected trade fire candle"
+              title={readouts.tradeFireTooltip.reason || 'Pattern pipeline on candle'}
             >
               <span className="flex items-center gap-1">
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
-                {readouts.tradeFireTooltip.pattern}
+                {readouts.tradeFireTooltip.stageLabel || 'PATTERN'} · {readouts.tradeFireTooltip.pattern}
               </span>
-              <span className="text-[9px] font-mono font-normal normal-case tracking-normal text-gray-400">
+              <span className="text-[9px] font-mono font-normal normal-case tracking-normal text-gray-400 truncate">
                 {formatTradeFireTime(
                   readouts.tradeFireTooltip.opened_at || readouts.tradeFireTooltip.signal_candle_time,
                 )}
@@ -81,6 +87,7 @@ export default function ChartPanel({
             onMinimizeToSlot={launcher?.onMinimizeToSlot}
             onRestoreSlot={launcher?.onRestoreSlot}
             onRemoveSlot={launcher?.onRemoveSlot}
+            onSwapWithMain={launcher?.onSwapWithMain}
             pairs={pairSelector.pairs}
             activeSymbol={pairSelector.activePair.symbol}
             timeframe={timeframe}

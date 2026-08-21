@@ -290,7 +290,11 @@ export function renderTradeFireOverlay({
 
     overlayEl.appendChild(wrap);
 
-    if (isHovered) {
+    // Always show the small toast on detect/confirm candles; hover for fired/skipped.
+    const stage = entry.stage || 'fired';
+    const showToast =
+      isHovered || stage === 'detected' || stage === 'confirming';
+    if (showToast) {
       appendTooltip(overlayEl, xCenter, top, entry, neon);
     }
   }
@@ -309,5 +313,37 @@ export function tradeFireTooltipFromLookup(lookup, chartTime) {
     signal_candle_time: hit.signal_candle_time,
     side: hit.side,
     time: hit.time,
+    reason: hit.reason || null,
+  };
+}
+
+/** Newest pipeline stage for the chart header toast strip. */
+export function latestTradeFireToast(lookup) {
+  if (!lookup?.size) return null;
+  let best = null;
+  let bestRank = -1;
+  let bestTime = -1;
+  for (const [, entry] of lookup) {
+    const stage = entry.stage || 'fired';
+    const rank = STAGE_RANK[stage] || 0;
+    const t = Number(entry.time) || 0;
+    // Prefer the newest candle; on the same bar prefer higher stage.
+    if (t > bestTime || (t === bestTime && rank >= bestRank)) {
+      bestRank = rank;
+      bestTime = t;
+      best = entry;
+    }
+  }
+  if (!best) return null;
+  const neon = neonForEntry(best);
+  return {
+    pattern: formatPatternLabel(best.pattern),
+    stage: best.stage || 'fired',
+    stageLabel: neon.label,
+    opened_at: best.opened_at,
+    signal_candle_time: best.signal_candle_time,
+    side: best.side,
+    time: best.time,
+    reason: best.reason || null,
   };
 }

@@ -27,7 +27,7 @@ export default function ControlBar({
 
   return (
     <div className="bg-lightCard dark:bg-darkCard border-t border-gray-300 dark:border-gray-800 px-4 py-4 shrink-0 flex flex-col items-center justify-center space-y-3">
-      <div className="w-full max-w-4xl flex items-center justify-center gap-2">
+      <div className="w-full max-w-4xl flex items-center justify-start gap-2">
         <SessionEngineFab enabled={sessionEngineEnabled} onClick={onOpenSessionModal} />
         <InfoTip text="Timed momentum windows (IST). When ON, main AI Engine stays OFF — only one mode at a time." />
       </div>
