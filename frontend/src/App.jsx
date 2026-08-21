@@ -17,16 +17,17 @@ import { usePaperTrading } from './hooks/usePaperTrading';
 import { useSessionEngine } from './hooks/useSessionEngine';
 
 import Header from './components/Header';
-import MobilePortfolioCard from './components/MobilePortfolioCard';
 import ChartPanel from './components/ChartPanel';
 import LiveTradesPanel from './components/LiveTradesPanel';
 import ControlBar from './components/ControlBar';
 import PaperTradingModal from './components/PaperTradingModal';
 import SessionMomentumModal from './components/SessionMomentumModal';
+import SessionEngineFab from './components/SessionEngineFab';
 import AlertModal from './components/AlertModal';
 import SettingsModal from './components/SettingsModal';
 import AgentInstructionsModal from './components/AgentInstructionsModal';
 import StartConfirmModal from './components/StartConfirmModal';
+import StopEngineModal from './components/StopEngineModal';
 import TradeExitConfirmModal from './components/TradeExitConfirmModal';
 import SystemLogModal from './components/SystemLogModal';
 import AgentChatStrip from './components/AgentChatStrip';
@@ -76,6 +77,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const [startConfirmOpen, setStartConfirmOpen] = useState(false);
+  const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
   const [pendingConfig, setPendingConfig] = useState(null);
   const [logModalOpen, setLogModalOpen] = useState(false);
   const [statementOpen, setStatementOpen] = useState(false);
@@ -213,11 +215,16 @@ export default function App() {
   }
 
   // START → Instructions popup → Safety check → /agent/config + /bot/start
-  // STOP  → /bot/stop directly
+  // STOP  → Hold vs Emergency popup (or direct stop if no open trades)
   async function handleControlClick() {
     if (effectiveBotActive) {
+      if (activeCount > 0) {
+        pushActionLog('AI Engine STOP — choose Hold or Emergency…');
+        setStopConfirmOpen(true);
+        return;
+      }
       pushActionLog('AI Engine STOP…');
-      const ok = await stopBotEngine();
+      const ok = await stopBotEngine('hold');
       pushActionLog(ok ? 'AI Engine OFF.' : 'AI Engine stop failed.');
       debugLog(ok ? 'AI Engine stopped' : 'AI Engine stop failed');
       return;
@@ -225,6 +232,24 @@ export default function App() {
     pushActionLog('AI Engine START requested. Opening instructions popup.');
     debugLog('Opening AI Engine Instructions modal…');
     setAgentModalOpen(true);
+  }
+
+  async function handleStopHold() {
+    setStopConfirmOpen(false);
+    pushActionLog(`AI Engine STOP (Hold) — ${activeCount} trade(s) stay managed…`);
+    const ok = await stopBotEngine('hold');
+    pushActionLog(
+      ok
+        ? 'AI Engine OFF (Hold). Open trades keep TP/SL; portfolio still updates.'
+        : 'AI Engine hold-stop failed.',
+    );
+  }
+
+  async function handleStopEmergency() {
+    setStopConfirmOpen(false);
+    pushActionLog('AI Engine STOP (Emergency) — closing all…');
+    const ok = await stopBotEngine('emergency');
+    pushActionLog(ok ? 'AI Engine OFF. All positions closed.' : 'AI Engine emergency stop failed.');
   }
 
   function handleAgentStartRequest(config) {
@@ -422,32 +447,17 @@ export default function App() {
     return { title: '', message: '', confirmLabel: 'Confirm' };
   })();
 
-  // Prefer live portfolio WS; fall back to open-trade rollups if WS lags at zeros.
+  // Prefer live portfolio WS session counters (AI session only; frozen after STOP).
   const openTrades = trades.filter((t) => t.status !== 'sold');
-  const tradesNetUsd = openTrades.reduce((sum, t) => sum + (Number(t.net_pnl_usd) || 0), 0);
-  const tradesFeeUsd = openTrades.reduce((sum, t) => sum + (Number(t.entry_fee_usd) || 0), 0);
   const wsDaily = Number(portfolio.dailyProfit) || 0;
   const wsFee = Number(portfolio.dailyBrokerFee) || 0;
   const wsSeason = Number(portfolio.seasonProfit) || 0;
-  const pnlFallbackNeeded =
-    openTrades.length > 0 &&
-    wsDaily === 0 &&
-    wsFee === 0 &&
-    (Math.abs(tradesNetUsd) > 0.0001 || tradesFeeUsd > 0.0001);
-  const dailyProfit = pnlFallbackNeeded ? tradesNetUsd : wsDaily;
-  const dailyBrokerFee = pnlFallbackNeeded ? tradesFeeUsd : wsFee;
-  const seasonProfit =
-    portfolio.seasonActive || openTrades.length > 0
-      ? (pnlFallbackNeeded ? tradesNetUsd : wsSeason)
-      : wsSeason;
-  const seasonActive = Boolean(portfolio.seasonActive || openTrades.length > 0);
-  const capitalBase = Number(portfolio.cashLedger || portfolio.totalCapital || paperCapital || 0) || 1;
-  const dailyProfitPct = pnlFallbackNeeded
-    ? (dailyProfit / capitalBase) * 100
-    : (Number(portfolio.dailyProfitPct) || 0);
-  const seasonProfitPct = pnlFallbackNeeded
-    ? (seasonProfit / capitalBase) * 100
-    : (Number(portfolio.seasonProfitPct) || 0);
+  const dailyProfit = wsDaily;
+  const dailyBrokerFee = wsFee;
+  const seasonProfit = wsSeason;
+  const seasonActive = Boolean(portfolio.seasonActive);
+  const dailyProfitPct = Number(portfolio.dailyProfitPct) || 0;
+  const seasonProfitPct = Number(portfolio.seasonProfitPct) || 0;
 
   // Total Capital from portfolio ledger (WS). Paper hook is only a seed.
   const totalEquity =
@@ -456,9 +466,8 @@ export default function App() {
       : (paperCapital != null && Number.isFinite(Number(paperCapital))
           ? Number(paperCapital)
           : (portfolio.cashLedger ?? portfolio.totalCapital ?? 0));
-  const tradeValue = portfolio.tradeNotional > 0
-    ? portfolio.tradeNotional
-    : openTrades.reduce((sum, t) => sum + (Number(t.position_size) || 0), 0);
+  const tradeValue = Number(portfolio.tradeNotional) || 0;
+  const sessionOpenPositions = Number(portfolio.sessionOpenPositions) || 0;
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -471,7 +480,10 @@ export default function App() {
         seasonProfit={seasonProfit}
         seasonProfitPct={seasonProfitPct}
         seasonActive={seasonActive}
-        tradesCount={activeCount}
+        tradesCount={sessionOpenPositions}
+        exitedPnlUsd={trades
+          .filter((t) => t.status === 'sold')
+          .reduce((sum, t) => sum + (Number(t.net_pnl_usd) || 0), 0)}
         apiStatus={apiStatus}
         tradingMode={portfolio.tradingMode}
         dayHigh={dayStats.high}
@@ -486,23 +498,11 @@ export default function App() {
           if (portfolio.tradingMode === 'LIVE_TRADING') return;
           setPaperModalOpen(true);
         }}
-        onOpenSessionModal={() => setSessionModalOpen(true)}
-        sessionEngineEnabled={sessionEngineEnabled}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenLog={() => setLogModalOpen(true)}
         onOpenStatement={() => setStatementOpen(true)}
         onLogout={logout}
         username={username}
-      />
-
-      <MobilePortfolioCard
-        totalCapital={totalEquity}
-        tradeValue={tradeValue}
-        dailyProfit={dailyProfit}
-        dailyBrokerFee={dailyBrokerFee}
-        seasonProfit={seasonProfit}
-        seasonActive={seasonActive}
-        tradesCount={activeCount}
       />
 
       <main className="flex-grow flex flex-col min-h-0 p-2 lg:p-4 gap-3">
@@ -563,6 +563,11 @@ export default function App() {
         />
       </main>
 
+      <SessionEngineFab
+        enabled={sessionEngineEnabled}
+        onClick={() => setSessionModalOpen(true)}
+      />
+
       <ControlBar
         botIsActive={effectiveBotActive}
         botLoading={botLoading}
@@ -614,6 +619,15 @@ export default function App() {
         activeCount={activeCount}
         onContinue={handleConfirmContinue}
         onExit={handleConfirmExit}
+      />
+
+      <StopEngineModal
+        open={stopConfirmOpen}
+        openCount={activeCount}
+        loading={botLoading}
+        onHold={handleStopHold}
+        onEmergency={handleStopEmergency}
+        onCancel={() => setStopConfirmOpen(false)}
       />
 
       <TradeExitConfirmModal

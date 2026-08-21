@@ -166,9 +166,9 @@ export default function ChartPanel({
               AI Engine live
             </div>
             <div className="text-[8px] text-emerald-200/80 font-mono text-right leading-tight">
-              TP +0.5% · SL 0.5%/0.7%
+              TP 0.5%/0.7% · SL 0.5%/0.7%
               <br />
-              path stop · brain entry
+              path exit · brain entry
             </div>
           </div>
         ) : null}

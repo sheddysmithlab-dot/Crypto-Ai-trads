@@ -16,16 +16,18 @@ const SECTIONS = [
     ],
   },
   {
-    title: 'Take-profit',
+    title: 'Take-profit (per trade)',
     items: [
-      'Auto book at +0.50% gross from entry (hard TP — not delayed by far targets).',
+      'Continuous run +++ (clean climb) → hold past +0.50%, book at +0.70%.',
+      'Choppy path -+-+ (dip while in profit) → book at +0.50%.',
+      'Hard ceiling always +0.70%.',
     ],
   },
   {
     title: 'Controls',
     items: [
       'Manual BUY/SELL when AI is OFF; trash icon force-closes one position.',
-      'Emergency STOP closes all. PAPER = simulated; Testnet = real orders with keys.',
+      'STOP popup: Hold (keep TP/SL) or Emergency (close all). PAPER / Testnet supported.',
       'Session Momentum Engine: timed IST windows (mutually exclusive with main AI).',
     ],
   },

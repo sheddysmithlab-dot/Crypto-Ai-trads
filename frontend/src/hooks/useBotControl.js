@@ -47,14 +47,18 @@ export function useBotControl({ serverIsActive = false } = {}) {
     }
   }, [loading]);
 
-  const stop = useCallback(async () => {
+  const stop = useCallback(async (mode = 'hold') => {
     if (loading) return false;
     setLoading(true);
     setError(null);
     // Optimistic UI — flip red→green immediately
     setIsActive(false);
     try {
-      const res = await authFetch('/bot/stop', { method: 'POST' });
+      const res = await authFetch('/bot/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.status === 'error') {
         setIsActive(true);

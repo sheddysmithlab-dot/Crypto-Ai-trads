@@ -115,6 +115,12 @@ class LoginPayload(BaseModel):
     username: str = ""
     password: str = ""
 
+
+class BotStopPayload(BaseModel):
+    """AI Engine STOP choice from frontend popup."""
+    mode: str = "hold"  # hold | emergency
+
+
 PUBLIC_HTTP_PATHS = {"/health", "/auth/login", "/docs", "/openapi.json", "/redoc"}
 
 @app.middleware("http")
@@ -610,16 +616,22 @@ bybit_api = BybitAPIWrapper()
 # Manual-mode defaults (auto strategy wiped)
 MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "5"))
 MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "1"))
-AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path-based SL + fixed profit book
+AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path-based SL + path-based profit book
 INVERT_AUTO_TRADE_FIRE = False
-# Profit book (gross % from entry) — same both sides.
-FIXED_EXIT_PROFIT_PCT = 0.5  # book profit at ≥ +0.5%
+# Path-based profit book (gross % from entry):
+#   continuous favorable +++ (3 steps) → hold through +0.50%, exit at +0.70%
+#   choppy -+-+ path → book at +0.50%
+#   hard ceiling always +0.70%
+PATH_TP_TIGHT_PCT = 0.5
+PATH_TP_WIDE_PCT = 0.7
+FIXED_EXIT_PROFIT_PCT = PATH_TP_TIGHT_PCT  # legacy alias (choppy / min book)
 # Path-based stop-loss (per trade, tick path):
 #   continuous adverse --- (3 steps) → exit at -0.50%
 #   choppy -+-+ path → hold past 0.50%, exit at -0.70%
 PATH_SL_TIGHT_PCT = 0.5
 PATH_SL_WIDE_PCT = 0.7
 PATH_SL_ADVERSE_STEPS = 3
+PATH_TP_FAVORABLE_STEPS = 3
 # Legacy alias (tight SL) — used for initial UI SL price on open.
 FIXED_EXIT_LOSS_PCT = PATH_SL_TIGHT_PCT
 BTC_REGIME_GATE = False
@@ -691,6 +703,19 @@ class AITradingAgent:
         self.ai_season_id: int | None = None
         self.ai_season_started_at: float | None = None
         self.ai_season_end_reason: str | None = None
+        # Portfolio modal session counters: live while AI season active; frozen on STOP;
+        # reset to 0 on next START (not calendar-day / all-time).
+        self.session_stats_frozen = False
+        self.session_hold_mode = False  # STOP→Hold: no new entries; open trades still auto-exit
+        self.session_stats_snapshot: dict = {
+            "trade_notional": 0.0,
+            "daily_profit": 0.0,
+            "daily_profit_pct": 0.0,
+            "daily_broker_fee": 0.0,
+            "ai_season_profit": 0.0,
+            "ai_season_profit_pct": 0.0,
+            "open_positions": 0,
+        }
 
         # RULE 1: Position Sizing & Leverage (The "100/1" Rule)
         self.leverage = 100
@@ -987,7 +1012,7 @@ class AITradingAgent:
             exit_px = self.mark_price_for(trade.get("pair")) or trade.get("entry")
         for row in self.trade_history:
             if row["id"] == trade["id"]:
-                row["current"] = round(float(exit_px), 4)
+                row["current"] = round(float(exit_px), price_decimals_for_mark(float(exit_px)))
                 # Trade list shows gross profit only — fees live in header broker-fee total.
                 row["pnl"] = round(metrics["gross_pct"], 4)
                 row["gross_pnl_pct"] = round(metrics["gross_pct"], 4)
@@ -995,6 +1020,7 @@ class AITradingAgent:
                 row["exit_fee_usd"] = round(metrics["exit_fee_usd"], 4)
                 row["status"] = "sold"
                 row["closed_reason"] = reason
+                row["closed_at"] = time.time()
                 break
         try:
             trade_db.finalize_trade(
@@ -1014,11 +1040,18 @@ class AITradingAgent:
         return sum(self._trade_metrics(t)["net_usd"] for t in self.trades)
 
     def get_session_gross_and_fees_usd(self) -> dict:
-        """Gross trade P&L + Bybit broker fees (open entry + est. exit + closed)."""
+        """Gross trade P&L + Bybit broker fees for the CURRENT AI season only.
+
+        Open + closed rows are filtered by `season_id` so Daily / Season / Fee
+        portfolio stats never mix calendar-day or prior-session trades.
+        """
         open_gross = 0.0
         open_fees = 0.0
         fee_rate = float(bybit_api.get_taker_fee_pct() or 0.055) / 100.0
+        sid = self.ai_season_id
         for t in self.trades:
+            if sid is not None and t.get("season_id") != sid:
+                continue
             m_open = self._trade_metrics(t, for_close=False)
             m_close = self._trade_metrics(t, for_close=True)
             open_gross += float(m_open["gross_usd"])
@@ -1032,6 +1065,8 @@ class AITradingAgent:
         closed_fees = 0.0
         for row in self.trade_history:
             if row.get("status") != "sold":
+                continue
+            if sid is not None and row.get("season_id") != sid:
                 continue
             entry_f = float(row.get("entry_fee_usd") or 0)
             exit_f = float(row.get("exit_fee_usd") or 0)
@@ -1051,6 +1086,56 @@ class AITradingAgent:
             "open_fee_usd": open_fees,
             "closed_fee_usd": closed_fees,
         }
+
+    def _session_open_trades(self) -> list:
+        """Open positions that belong to the current AI season (for portfolio counters)."""
+        sid = self.ai_season_id
+        if sid is None:
+            return []
+        return [t for t in self.trades if t.get("season_id") == sid]
+
+    def _reset_session_stats(self) -> None:
+        """New AI session — portfolio counters start at 0.0 (live updating resumes)."""
+        self.session_stats_frozen = False
+        self.session_hold_mode = False
+        self.session_stats_snapshot = {
+            "trade_notional": 0.0,
+            "daily_profit": 0.0,
+            "daily_profit_pct": 0.0,
+            "daily_broker_fee": 0.0,
+            "ai_season_profit": 0.0,
+            "ai_season_profit_pct": 0.0,
+            "open_positions": 0,
+        }
+
+    def _freeze_session_stats(self, fee_book: dict | None = None) -> None:
+        """STOP — lock Trade Value / Gross Profit / Fees / Open Positions (separate, not netted)."""
+        book = fee_book if fee_book is not None else self.get_session_gross_and_fees_usd()
+        gross = float(book.get("gross_usd") or 0)
+        fees = float(book.get("broker_fee_usd") or 0)
+        baseline = float(
+            self.ai_season_start_capital
+            if self.ai_season_start_capital is not None
+            else (self.starting_capital or 0)
+        )
+        pct = (gross / baseline) * 100 if baseline else 0.0
+        session_open = self._session_open_trades()
+        self.session_stats_snapshot = {
+            "trade_notional": round(
+                sum(float(t.get("position_size") or 0) for t in session_open), 2
+            ),
+            "daily_profit": round(gross, 2),
+            "daily_profit_pct": round(pct, 2),
+            "daily_broker_fee": round(fees, 4),
+            "ai_season_profit": round(gross, 2),
+            "ai_season_profit_pct": round(pct, 2),
+            "open_positions": len(session_open),
+        }
+        self.session_stats_frozen = True
+        print(
+            f"[AI SEASON] Portfolio stats frozen — "
+            f"gross ${gross:,.2f} · fees ${fees:,.2f} · open {len(session_open)}"
+        )
 
     def get_available_capital(self):
         """Free cash for the next 10% auto slot (paper ledger after open reserves)."""
@@ -1076,6 +1161,7 @@ class AITradingAgent:
         self.ai_season_start_capital = None
         self.ai_season_id = None
         self.ai_season_started_at = None
+        self._reset_session_stats()
         self.is_active = False
         self.daily_target_reached = False
         self.is_lock_active = False
@@ -1113,6 +1199,7 @@ class AITradingAgent:
         if self.ai_season_id is not None:
             self.end_ai_season(clear_live_table=False, reason="restarted")
         self.trade_history = []
+        self._reset_session_stats()
         self.ai_season_start_capital = self.get_total_portfolio_value()
         self.ai_season_started_at = time.time()
         self.ai_season_end_reason = None
@@ -1130,12 +1217,19 @@ class AITradingAgent:
         )
 
     def end_ai_season(self, *, clear_live_table: bool = False, reason: str | None = None):
-        """ Called on STOP / Emergency Exit — persist season totals, optionally clear live table. """
+        """ Called on STOP / Emergency Exit — persist season totals, freeze portfolio stats. """
         end_reason = reason or self.ai_season_end_reason or "stopped"
         if self.ai_season_start_capital is not None or self.ai_season_id is not None:
             fee_book = self.get_session_gross_and_fees_usd()
+            # Freeze BEFORE clearing season id / live table so UI stays on final numbers.
+            self._freeze_session_stats(fee_book)
             end_cap = self.get_total_portfolio_value()
-            sold = [r for r in self.trade_history if r.get("status") == "sold"]
+            sold = [
+                r
+                for r in self.trade_history
+                if r.get("status") == "sold"
+                and (self.ai_season_id is None or r.get("season_id") == self.ai_season_id)
+            ]
             wins = sum(1 for r in sold if float(r.get("net_pnl_usd") or 0) > 0)
             losses = sum(1 for r in sold if float(r.get("net_pnl_usd") or 0) < 0)
             try:
@@ -1163,6 +1257,10 @@ class AITradingAgent:
         if clear_live_table:
             self.trades = []
             self.trade_history = []
+            # After hard stop all positions are closed — keep PnL/fees frozen, zero open book.
+            snap = self.session_stats_snapshot
+            snap["trade_notional"] = 0.0
+            snap["open_positions"] = 0
             print("[AI SEASON] Live trades table cleared.")
 
     def clear_emergency_state(self):
@@ -1333,11 +1431,16 @@ class AITradingAgent:
         entry_fee_usd = round(position_size * (entry_fee_pct / 100), 4)
 
         # Manual: keep SL+TP from signal when provided.
-        # Auto: path-based SL (--- → 0.5%, -+-+ → 0.7%) + fixed +0.5% TP prices for UI.
+        # Auto: path SL (--- → 0.5%, -+-+ → 0.7%) + path TP (+++ → 0.7%, -+-+ → 0.5%).
         clean_sl = None
         clean_tp = None
         if source == "auto":
-            clean_sl, clean_tp = self._fixed_exit_prices(filled_price, side)
+            clean_sl, clean_tp = self._fixed_exit_prices(
+                filled_price,
+                side,
+                loss_pct=PATH_SL_TIGHT_PCT,
+                profit_pct=PATH_TP_WIDE_PCT,
+            )
         else:
             if sl_price is not None:
                 try:
@@ -1383,12 +1486,18 @@ class AITradingAgent:
             "timeframe_key": timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m"),
             "exit_mode": "path_sl" if source == "auto" else "manual",
             "entry_pattern": ENTRY_PATTERN_NAME,
-            # Path-based SL state (auto): --- → exit -0.5%; -+-+ → hold to -0.7%
+            # Path-based SL/TP state (auto):
+            #   SL --- → −0.5%; SL -+-+ → −0.7%
+            #   TP +++ → +0.7%; TP -+-+ → +0.5%
             "path_last_gross_pct": 0.0,
             "path_adverse_streak": 0,
-            "path_choppy": False,       # True once a + recovery broke a --- run
-            "path_continuous_dump": False,  # True after 3 consecutive adverse steps
+            "path_favorable_streak": 0,
+            "path_choppy": False,          # bounce while in loss → wide SL
+            "path_profit_choppy": False,   # dip while in profit → tight TP
+            "path_continuous_dump": False,  # 3 consecutive adverse steps
+            "path_continuous_run": False,   # 3 consecutive favorable steps
             "path_sl_pct": PATH_SL_TIGHT_PCT,
+            "path_tp_pct": PATH_TP_WIDE_PCT,  # default: let clean +++ run to 0.7%
         }
         self.trades.append(trade)
         self.set_pair_mark(trade_pair, filled_price)
@@ -1468,17 +1577,25 @@ class AITradingAgent:
             print(f"[PILLAR 3: AI AGENT] Active pair refreshed to {pair} @ {self.current_price}.")
 
     def get_trades_snapshot(self):
-        """Active trades on top, then session exits (sold) listed below for the UI."""
+        """Active trades on top (newest first), then session exits (newest first)."""
         open_ids = {t["id"] for t in self.trades}
         snapshot = []
-        for trade in self.trades:
+        # Latest open trade first, oldest at the bottom of the Open section.
+        open_trades = sorted(
+            self.trades,
+            key=lambda t: (float(t.get("opened_at") or 0), int(t.get("id") or 0)),
+            reverse=True,
+        )
+        for trade in open_trades:
             m = self._trade_metrics(trade)
             mark = m.get("mark_price")
             if mark is None:
                 mark = self.mark_price_for(trade.get("pair")) or trade.get("entry") or 0
+            # PEPE/DOGE-scale: never force 4dp — that flips 0.00345↔0.0035 and ±1% PnL every tick.
+            px_decimals = price_decimals_for_mark(float(mark) if mark else float(trade.get("entry") or 0))
             out = dict(trade)
             out.update({
-                "current": round(float(mark), 4),
+                "current": round(float(mark), px_decimals),
                 "gross_pnl_pct": round(m["gross_pct"], 4),
                 # UI trade list: price profit only (no fee). Fees roll up in header.
                 "pnl": round(m["gross_pct"], 4),
@@ -1506,12 +1623,15 @@ class AITradingAgent:
             })
             snapshot.append(out)
 
-        # Newest exits first under the open list (profit-lock / force-close / STOP).
+        # Newest exits first under the open list (by close time, then id).
         sold_rows = [
             row for row in self.trade_history
             if row.get("status") == "sold" and row.get("id") not in open_ids
         ]
-        sold_rows.sort(key=lambda r: r.get("id") or 0, reverse=True)
+        sold_rows.sort(
+            key=lambda r: (float(r.get("closed_at") or r.get("opened_at") or 0), int(r.get("id") or 0)),
+            reverse=True,
+        )
         for row in sold_rows:
             out = dict(row)
             out.setdefault("protected", out.get("source") == "manual")
@@ -1554,7 +1674,7 @@ class AITradingAgent:
         self._sync_agent_trailing_lock_state()
 
     def _run_auto_exits(self) -> int:
-        """Close auto trades that hit path-SL / +0.5% TP. Returns number closed."""
+        """Close auto trades that hit path-SL / path-TP. Returns number closed."""
         still_open = []
         closed_n = 0
         for trade in list(self.trades):
@@ -1618,11 +1738,14 @@ class AITradingAgent:
         )
 
     def _update_path_sl_state(self, trade: dict, gross_pct: float) -> None:
-        """Track adverse vs recovery steps for path-based stop.
+        """Track adverse/favorable steps for path-based SL + TP.
 
-        Adverse step (-): gross PnL worsened (more red / less green).
-        Recovery step (+): gross improved or unchanged → marks path choppy.
-        Three consecutive adverse steps → continuous dump mode (tight −0.50% SL).
+        Loss path:
+          Adverse (-) → dump streak; 3× → continuous --- → tight −0.50% SL.
+          Bounce (+) while in loss → choppy → wide −0.70% SL.
+        Profit path:
+          Favorable (+) → run streak; 3× → continuous +++ → hold to +0.70% TP.
+          Dip (-) while in profit → profit-choppy → book at +0.50% TP.
         """
         last = float(trade.get("path_last_gross_pct") if trade.get("path_last_gross_pct") is not None else 0.0)
         # First sample after open: seed only.
@@ -1630,44 +1753,67 @@ class AITradingAgent:
             trade["path_last_gross_pct"] = gross_pct
             trade["path_seeded"] = True
             trade["path_adverse_streak"] = 0
+            trade["path_favorable_streak"] = 0
             return
 
         eps = 1e-6
         if gross_pct < last - eps:
-            # Adverse step
+            # Adverse step (PnL worsened)
             streak = int(trade.get("path_adverse_streak") or 0) + 1
             trade["path_adverse_streak"] = streak
+            trade["path_favorable_streak"] = 0
             if streak >= PATH_SL_ADVERSE_STEPS:
                 trade["path_continuous_dump"] = True
+            # Dip while already in profit → choppy profit path (book early at +0.5%)
+            if last > eps or gross_pct > eps:
+                trade["path_profit_choppy"] = True
         elif gross_pct > last + eps:
-            # Recovery / bounce — reset streak; choppy only if bounce while in loss path
+            # Favorable step (PnL improved)
+            fav = int(trade.get("path_favorable_streak") or 0) + 1
+            trade["path_favorable_streak"] = fav
             trade["path_adverse_streak"] = 0
+            if fav >= PATH_TP_FAVORABLE_STEPS:
+                trade["path_continuous_run"] = True
+            # Bounce while in loss → choppy loss path (wide SL)
             if last < -eps or gross_pct < -eps:
                 trade["path_choppy"] = True
         else:
-            # Flat — do not count as adverse continuity
+            # Flat — break both continuity streaks
             trade["path_adverse_streak"] = 0
+            trade["path_favorable_streak"] = 0
 
         trade["path_last_gross_pct"] = gross_pct
 
-        # Active SL distance for UI: tight if continuous dump and not choppy; else wide once choppy.
+        # Active SL distance for UI
         if trade.get("path_choppy") and not trade.get("path_continuous_dump"):
             trade["path_sl_pct"] = PATH_SL_WIDE_PCT
         elif trade.get("path_continuous_dump") and not trade.get("path_choppy"):
             trade["path_sl_pct"] = PATH_SL_TIGHT_PCT
         elif trade.get("path_choppy"):
-            # Saw both bounce and later a dump — still treat as wide (user: -+-+ → 0.7%)
             trade["path_sl_pct"] = PATH_SL_WIDE_PCT
         else:
             trade["path_sl_pct"] = PATH_SL_TIGHT_PCT
 
-        # Keep sl_price in sync for UI (TP unchanged).
+        # Active TP distance for UI: choppy profit → tight 0.5%; clean +++ → wide 0.7%
+        if trade.get("path_profit_choppy"):
+            trade["path_tp_pct"] = PATH_TP_TIGHT_PCT
+        else:
+            trade["path_tp_pct"] = PATH_TP_WIDE_PCT
+
+        # Keep sl_price / tp_price in sync for UI.
         entry = float(trade.get("entry") or 0)
         side = trade.get("side")
         if entry > 0 and side in ("LONG", "SHORT"):
-            sl, _tp = self._fixed_exit_prices(entry, side, loss_pct=float(trade["path_sl_pct"]))
+            sl, tp = self._fixed_exit_prices(
+                entry,
+                side,
+                loss_pct=float(trade["path_sl_pct"]),
+                profit_pct=float(trade["path_tp_pct"]),
+            )
             if sl is not None:
                 trade["sl_price"] = sl
+            if tp is not None:
+                trade["tp_price"] = tp
 
     def _mark_from_gross_pct(self, entry: float, side: str, gross_pct: float) -> float:
         """Price that realizes exactly gross_pct for side (paper SL/TP fill clamp)."""
@@ -1676,12 +1822,11 @@ class AITradingAgent:
         return entry * (1.0 - float(gross_pct) / 100.0)
 
     def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
-        """Path-based stop-loss + hard +0.5% profit book for auto trades.
+        """Path-based stop-loss + path-based profit book for auto trades.
 
-        Profit is ALWAYS gross-% based (never blocked by a far brain/UI tp_price).
         Loss: continuous --- → −0.50%; choppy -+-+ → −0.70%; hard floor −0.70%.
-        Paper mode: if mark gapped past the stop/TP, settle at the rule price
-        (so a poll gap cannot show −1.70% after a −0.70% floor trip).
+        Profit: continuous +++ → hold to +0.70%; choppy -+-+ → book +0.50%; hard ceiling +0.70%.
+        Paper: if mark gapped past the rule, settle at the rule price.
         """
         trade.pop("_exit_fill_mark", None)
         entry = float(trade.get("entry") or 0)
@@ -1706,20 +1851,19 @@ class AITradingAgent:
             """Clamp paper settlement to the policy level when mark has gapped past it."""
             if not paper:
                 return
-            # Only clamp when mark is past the target (worse loss / extra profit).
             if target_gross >= 0 and gross_pct > target_gross + 1e-9:
                 trade["_exit_fill_mark"] = self._mark_from_gross_pct(entry, side, target_gross)
             elif target_gross < 0 and gross_pct < target_gross - 1e-9:
                 trade["_exit_fill_mark"] = self._mark_from_gross_pct(entry, side, target_gross)
 
-        # Hard profit book — must fire even if stored tp_price is farther away.
-        if gross_pct >= FIXED_EXIT_PROFIT_PCT:
-            _arm_paper_fill(FIXED_EXIT_PROFIT_PCT)
+        # Hard profit ceiling — never hold past +0.70%
+        if gross_pct >= PATH_TP_WIDE_PCT:
+            _arm_paper_fill(PATH_TP_WIDE_PCT)
             gap = ""
             if trade.get("_exit_fill_mark") is not None:
-                gap = f" (gapped {gross_pct:.3f}%→fill +{FIXED_EXIT_PROFIT_PCT:g}%)"
+                gap = f" (gapped {gross_pct:.3f}%→fill +{PATH_TP_WIDE_PCT:g}%)"
             return (
-                f"Auto TP +{FIXED_EXIT_PROFIT_PCT:g}%: {side} gross {gross_pct:.3f}% "
+                f"Path TP +{PATH_TP_WIDE_PCT:g}%: {side} gross {gross_pct:.3f}% "
                 f"(mark {mark:.6f} vs entry {entry:.6f}){gap}"
             )
 
@@ -1734,10 +1878,29 @@ class AITradingAgent:
                 f"(mark {mark:.6f} vs entry {entry:.6f}){gap}"
             )
 
+        # ---- Profit book zone (+0.50% … +0.70%) ----
+        if gross_pct >= PATH_TP_TIGHT_PCT:
+            profit_choppy = bool(trade.get("path_profit_choppy"))
+            continuous_run = bool(trade.get("path_continuous_run"))
+            if profit_choppy:
+                # -+-+ path → book at +0.50%
+                _arm_paper_fill(PATH_TP_TIGHT_PCT)
+                gap = ""
+                if trade.get("_exit_fill_mark") is not None:
+                    gap = f" (gapped {gross_pct:.3f}%→fill +{PATH_TP_TIGHT_PCT:g}%)"
+                return (
+                    f"Path TP +{PATH_TP_TIGHT_PCT:g}% (choppy -+-+): {side} gross {gross_pct:.3f}% "
+                    f"(mark {mark:.6f}){gap}"
+                )
+            # continuous +++ / clean run → hold to +0.70%
+            why = "continuous +++" if continuous_run else "clean run"
+            trade["path_tp_pct"] = PATH_TP_WIDE_PCT
+            return None  # hold to hard ceiling
+
+        # ---- Loss zone (−0.50% … −0.70%) ----
         if gross_pct > -PATH_SL_TIGHT_PCT:
             return None
 
-        # At or beyond −0.50%
         choppy = bool(trade.get("path_choppy"))
         continuous = bool(trade.get("path_continuous_dump"))
 
@@ -1823,6 +1986,16 @@ class AITradingAgent:
             f"Net P&L: ${metrics['net_usd']:.2f} ({metrics['net_pct']:.3f}%)",
             "success" if metrics["net_usd"] >= 0 else "error",
         )
+        # Hold-stop: when last held position exits, freeze that session book.
+        if self.session_hold_mode:
+            remaining = [
+                t for t in self._session_open_trades()
+                if t.get("id") != trade.get("id")
+            ]
+            if not remaining:
+                self.session_hold_mode = False
+                if self.ai_season_start_capital is not None or self.ai_season_id is not None:
+                    self.end_ai_season(clear_live_table=False, reason="hold_drained")
         return True
 
     def has_opposite_position(self, side: str, pair: str) -> bool:
@@ -1921,6 +2094,7 @@ class AITradingAgent:
         initial stop-loss detection. Fully resets emergency + AI season so the popup
         cannot immediately re-fire on the next page load or restart. """
         print("[RULE 8: EMERGENCY EXIT CONFIRMED] Selling all positions and halting.")
+        self.session_hold_mode = False
         self._close_all_positions("EMERGENCY SELL ALL TRIGGERED | RULE 8 confirmed by user")
         self.is_active = False
         self.clear_emergency_state()
@@ -1929,8 +2103,9 @@ class AITradingAgent:
         self.is_lock_active = False
 
     def manual_stop(self, reason="Manual Kill Switch Activated from Frontend"):
-        """ Plain STOP TRADING button — emergency exit: sell all open positions and halt AI. """
+        """Emergency STOP — sell all open positions and halt AI."""
         print(f"[PILLAR 2: BACKEND] {reason}")
+        self.session_hold_mode = False
         self._close_all_positions(reason)
         self.is_active = False
         self.end_ai_season(clear_live_table=True, reason="manual_stop")
@@ -1939,14 +2114,32 @@ class AITradingAgent:
         system_log.push("ai", "AI automation STOPPED — emergency exit, all positions closed.", {"reason": reason})
         notifications.push("EMERGENCY EXIT: All positions closed and AI automation stopped.", "error")
 
+    def hold_stop(self, reason: str = "AI Engine STOP — hold open trades"):
+        """STOP with Hold: no new fires; open trades keep path-SL / TP auto-exit; portfolio keeps updating."""
+        print(f"[AI ENGINE] HOLD STOP — {reason}")
+        self.is_active = False
+        self.session_hold_mode = True
+        # Keep season_id + start capital so held closes still roll into portfolio counters.
+        self.session_stats_frozen = False
+        open_n = len(self.trades)
+        system_log.push(
+            "ai",
+            f"AI Engine STOPPED (Hold) — {open_n} position(s) still managed until TP/SL.",
+            {"reason": reason, "open_positions": open_n},
+        )
+        notifications.push(
+            f"AI Engine stopped (Hold). {open_n} open trade(s) will auto-exit on TP/SL — no new entries.",
+            "warning",
+        )
+
     def schedule_soft_stop(self, reason: str):
         """Session schedule off-window: stop new entries, keep open trades + season PnL."""
         if not self.is_active:
             return
         print(f"[SESSION SCHEDULE] Soft stop — {reason}")
         self.is_active = False
-        # Do NOT end_ai_season here — open positions must keep live Daily/Season PnL
-        # in the header until the user hard-stops or the next window re-arms.
+        self.session_hold_mode = True
+        self.session_stats_frozen = False
         system_log.push(
             "ai",
             f"Session schedule paused AI automation — {reason}",
@@ -2149,7 +2342,7 @@ def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
         "CANDLESTICK BRAIN v2 + path SL | "
-        f"auto TP +{FIXED_EXIT_PROFIT_PCT:g}% gross | "
+        f"auto TP +{PATH_TP_TIGHT_PCT:g}% (choppy) / +{PATH_TP_WIDE_PCT:g}% (continuous +++) | "
         f"SL −{PATH_SL_TIGHT_PCT:g}% (continuous ---) / −{PATH_SL_WIDE_PCT:g}% (choppy -+-+) | "
         "manual BUY/SELL + emergency sell-all"
     )
@@ -2480,8 +2673,13 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         tp_price = round(float(brain_tp), price_decimals_for_mark(mark_px))
         exit_label = f"brain SL={sl_price} TP={tp_price}"
     else:
-        sl_price, tp_price = agent._fixed_exit_prices(float(mark_px), side)
-        exit_label = f"fixed ±{FIXED_EXIT_PROFIT_PCT:g}% SL={sl_price} TP={tp_price}"
+        sl_price, tp_price = agent._fixed_exit_prices(
+            float(mark_px), side, loss_pct=PATH_SL_TIGHT_PCT, profit_pct=PATH_TP_WIDE_PCT
+        )
+        exit_label = (
+            f"path SL {PATH_SL_TIGHT_PCT:g}/{PATH_SL_WIDE_PCT:g}% "
+            f"TP {PATH_TP_TIGHT_PCT:g}/{PATH_TP_WIDE_PCT:g}% SL={sl_price} TP={tp_price}"
+        )
 
     rr = detect.get("risk_reward") or (FIXED_EXIT_PROFIT_PCT / FIXED_EXIT_LOSS_PCT)
     trade = agent.open_trade(
@@ -2668,8 +2866,8 @@ async def self_ping_keepalive():
 
 
 async def auto_exit_watchdog():
-    """Re-check path-SL / +0.5% TP even if a ticker tick was skipped or failed."""
-    print("[AUTO-EXIT] Watchdog online (path SL + hard +0.5% TP).")
+    """Re-check path-SL / path-TP even if a ticker tick was skipped or failed."""
+    print("[AUTO-EXIT] Watchdog online (path SL + path TP 0.5%/0.7%).")
     while True:
         try:
             if AUTO_TRADE_AUTO_EXIT_ENABLED and agent.trades:
@@ -2788,21 +2986,60 @@ async def bot_start():
 
 
 @app.post("/bot/stop")
-async def bot_stop():
-    """Fresh AI Engine STOP — close all positions and halt scanner."""
-    if not agent.is_active and not agent.trades:
+async def bot_stop(payload: BotStopPayload | None = None):
+    """AI Engine STOP.
+
+    Body: ``{"mode": "hold"|"emergency"}``
+      - hold: stop new entries; keep open trades (path SL / TP still auto-exit); portfolio keeps updating
+      - emergency: close all positions and freeze/clear session book
+    No open trades → clean halt (end season).
+    """
+    mode = str((payload.mode if payload else "hold") or "hold").strip().lower()
+    if mode not in ("hold", "emergency"):
+        mode = "hold"
+
+    if not agent.is_active and not agent.trades and not agent.session_hold_mode:
         agent.is_active = False
         return {
             "status": "success",
             "is_active": False,
+            "mode": mode,
             "message": "AI Engine already stopped.",
         }
-    print("[AI ENGINE] STOP — closing positions and halting.")
-    agent.manual_stop("AI Engine STOP from Frontend")
+
+    if mode == "emergency":
+        print("[AI ENGINE] STOP — emergency exit (close all).")
+        agent.manual_stop("AI Engine STOP — Emergency Exit from Frontend")
+        return {
+            "status": "success",
+            "is_active": False,
+            "mode": "emergency",
+            "message": "AI Engine stopped. All positions closed.",
+            "open_positions": 0,
+        }
+
+    if not agent.trades:
+        print("[AI ENGINE] STOP — no open trades; halting scanner.")
+        agent.is_active = False
+        agent.session_hold_mode = False
+        if agent.ai_season_start_capital is not None or agent.ai_season_id is not None:
+            agent.end_ai_season(clear_live_table=True, reason="stop_empty")
+        return {
+            "status": "success",
+            "is_active": False,
+            "mode": "hold",
+            "message": "AI Engine stopped.",
+            "open_positions": 0,
+        }
+
+    print(f"[AI ENGINE] STOP — hold {len(agent.trades)} open trade(s).")
+    agent.hold_stop("AI Engine STOP — Hold from Frontend")
     return {
         "status": "success",
         "is_active": False,
-        "message": "AI Engine stopped. All positions closed.",
+        "mode": "hold",
+        "message": f"AI Engine stopped (Hold). {len(agent.trades)} trade(s) still managed.",
+        "open_positions": len(agent.trades),
     }
 
 
@@ -3510,14 +3747,32 @@ async def portfolio_feed(websocket: WebSocket):
             total_value = agent.get_total_portfolio_value()
             unrealized_net = agent.get_unrealized_net_usd()
             margin_in_use = sum(float(t.get("margin") or 0) for t in agent.trades)
-            trade_notional = sum(float(t.get("position_size") or 0) for t in agent.trades)
 
-            # Fee roll-up for header — trade list shows gross only.
-            fee_book = agent.get_session_gross_and_fees_usd()
-            broker_fee = float(fee_book["broker_fee_usd"])
-            # Daily / season profit = gross − Bybit fees (shown net in header).
-            daily_profit = float(fee_book["net_usd"])
-            daily_profit_pct = (daily_profit / agent.starting_capital) * 100 if agent.starting_capital else 0
+            # Portfolio session counters: live during AI season / Hold-stop; frozen after Emergency.
+            season_live = agent.ai_season_start_capital is not None and not agent.session_stats_frozen
+            if season_live:
+                session_open = agent._session_open_trades()
+                trade_notional = sum(float(t.get("position_size") or 0) for t in session_open)
+                open_positions = len(session_open)
+                fee_book = agent.get_session_gross_and_fees_usd()
+                broker_fee = float(fee_book["broker_fee_usd"])
+                # Portfolio shows GROSS profit and fees separately (never net = profit − fees).
+                daily_gross = float(fee_book["gross_usd"])
+                daily_profit = daily_gross
+                baseline = float(agent.ai_season_start_capital or agent.starting_capital or 0)
+                daily_profit_pct = (daily_profit / baseline) * 100 if baseline else 0
+                ai_season_profit = daily_gross
+                ai_season_profit_pct = daily_profit_pct
+            else:
+                snap = agent.session_stats_snapshot
+                trade_notional = float(snap.get("trade_notional") or 0)
+                open_positions = int(snap.get("open_positions") or 0)
+                broker_fee = float(snap.get("daily_broker_fee") or 0)
+                daily_profit = float(snap.get("daily_profit") or 0)
+                daily_profit_pct = float(snap.get("daily_profit_pct") or 0)
+                ai_season_profit = float(snap.get("ai_season_profit") or 0)
+                ai_season_profit_pct = float(snap.get("ai_season_profit_pct") or 0)
+                daily_gross = daily_profit
 
             if (
                 agent.is_active
@@ -3533,24 +3788,7 @@ async def portfolio_feed(websocket: WebSocket):
                     "success",
                 )
 
-            # AI Season / live book profit — keep showing while season baseline exists
-            # OR while open positions remain (soft-pause / orphaned book).
-            if agent.ai_season_start_capital is not None or agent.trades:
-                ai_season_profit = float(fee_book["net_usd"])
-                baseline = (
-                    float(agent.ai_season_start_capital)
-                    if agent.ai_season_start_capital is not None
-                    else float(agent.starting_capital or 0)
-                )
-                ai_season_profit_pct = (ai_season_profit / baseline) * 100 if baseline else 0
-            else:
-                ai_season_profit = 0.0
-                ai_season_profit_pct = 0.0
-
-            season_active = bool(
-                agent.ai_season_start_capital is not None
-                and (agent.is_active or len(agent.trades) > 0)
-            )
+            season_active = bool(season_live and agent.is_active)
 
             baseline = agent.get_session_baseline()
             portfolio_drop = ((baseline - total_value) / baseline) * 100 if baseline else 0
@@ -3575,10 +3813,12 @@ async def portfolio_feed(websocket: WebSocket):
                 "daily_profit": round(daily_profit, 2),
                 "daily_profit_pct": round(daily_profit_pct, 2),
                 "daily_broker_fee": round(broker_fee, 4),
-                "daily_gross_profit": round(float(fee_book["gross_usd"]), 2),
+                "daily_gross_profit": round(daily_gross, 2),
                 "ai_season_profit": round(ai_season_profit, 2),
                 "ai_season_profit_pct": round(ai_season_profit_pct, 2),
                 "ai_season_active": season_active,
+                "session_stats_frozen": bool(agent.session_stats_frozen),
+                "session_hold_mode": bool(agent.session_hold_mode),
                 "portfolio_drop_pct": round(portfolio_drop, 2),
                 "is_active": agent.is_active,
                 "timeframe_seconds": agent.timeframe_seconds,
@@ -3594,7 +3834,7 @@ async def portfolio_feed(websocket: WebSocket):
                 "trading_execution": (
                     "paper_simulation" if bybit_api.mode == "PAPER_TRADING" else "bybit_testnet"
                 ),
-                "trades": len(agent.trades),
+                "trades": open_positions,
                 "agent_chat": system_log.agent_chat[-8:],
                 "blue_box_overlay": blue_box_overlay,
                 "watchlist": list(agent.watchlist),

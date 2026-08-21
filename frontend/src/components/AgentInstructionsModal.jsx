@@ -168,7 +168,8 @@ export default function AgentInstructionsModal({ open, onClose, onStart }) {
 
           {/* Trades info */}
           <p className="text-[11px] text-gray-400 leading-relaxed text-center -mt-2">
-            Per-trade: TP <span className="text-emerald-400 font-bold">+0.5%</span>
+            Per-trade: TP <span className="text-emerald-400 font-bold">+0.7%</span> continuous +++ /
+            <span className="text-emerald-400 font-bold"> +0.5%</span> choppy
             {' · '}SL <span className="text-amber-400 font-bold">-0.5%</span> continuous /
             <span className="text-amber-400 font-bold"> -0.7%</span> choppy. Risk % = max open trades.
           </p>

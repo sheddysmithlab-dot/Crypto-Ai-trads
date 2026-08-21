@@ -1,20 +1,9 @@
 import { useRef, useState } from 'react';
 import NotificationsDropdown from './NotificationsDropdown';
 import BotHelpModal from './BotHelpModal';
-import { fmtNum } from '../data/pairs';
+import PortfolioModal from './PortfolioModal';
 import { formatTfMoveLabel } from '../hooks/useTfMoveStats';
 import { useClickOutside } from '../hooks/useClickOutside';
-
-const STATUS_COLOR = {
-  green: 'text-green-500',
-  yellow: 'text-yellow-500',
-  red: 'text-red-500',
-};
-const DOT_COLOR = {
-  green: 'bg-green-500',
-  yellow: 'bg-yellow-500',
-  red: 'bg-red-500',
-};
 
 export default function Header({
   totalCapital,
@@ -26,6 +15,7 @@ export default function Header({
   seasonProfitPct,
   seasonActive,
   tradesCount,
+  exitedPnlUsd = 0,
   apiStatus,
   tradingMode,
   dayHigh,
@@ -37,8 +27,6 @@ export default function Header({
   unreadCount,
   markAllRead,
   onOpenPaperModal,
-  onOpenSessionModal,
-  sessionEngineEnabled = false,
   onOpenSettings,
   onOpenLog,
   onOpenStatement,
@@ -47,26 +35,17 @@ export default function Header({
 }) {
   const [profileOpen, setProfileOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [portfolioOpen, setPortfolioOpen] = useState(false);
   const profileRef = useRef(null);
   useClickOutside(profileRef, () => setProfileOpen(false), profileOpen);
 
-  const isProfit = dailyProfit >= 0;
-  const isSeasonProfit = seasonProfit >= 0;
-  const capStr = totalCapital.toLocaleString('en-US', { minimumFractionDigits: 2 });
-  const tradeValStr = tradeValue.toLocaleString('en-US', { minimumFractionDigits: 2 });
-  const profitStr = `${isProfit ? '+' : '-'}$${Math.abs(dailyProfit).toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-  })} (${isProfit ? '+' : ''}${dailyProfitPct.toFixed(2)}%)`;
-  const feeStr = `-$${Math.abs(Number(dailyBrokerFee) || 0).toLocaleString('en-US', {
+  const isLive = tradingMode === 'LIVE_TRADING';
+  const exitedPnl = Number(exitedPnlUsd) || 0;
+  const exitedProfit = exitedPnl >= 0;
+  const exitedPnlStr = `${exitedProfit ? '+' : '-'}$${Math.abs(exitedPnl).toLocaleString('en-US', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
-  const seasonStr = seasonActive
-    ? `${isSeasonProfit ? '+' : '-'}$${Math.abs(seasonProfit).toLocaleString('en-US', {
-        minimumFractionDigits: 2,
-      })} (${isSeasonProfit ? '+' : ''}${seasonProfitPct.toFixed(2)}%)`
-    : '$0.00 (0.00%)';
-  const isLive = tradingMode === 'LIVE_TRADING';
   const tfMoveUp = tfMovePct != null && tfMovePct >= 0;
   const tfMoveStr =
     tfMovePct != null
@@ -75,8 +54,8 @@ export default function Header({
   const tfMoveTitle = formatTfMoveLabel(chartTimeframe, tfMoveLabel);
 
   return (
-    <header className="bg-lightCard dark:bg-darkCard shadow-md px-3 py-2 flex justify-between items-center sticky top-0 z-50 border-b border-gray-200 dark:border-gray-800">
-      <div className="flex items-center gap-2">
+    <header className="bg-lightCard dark:bg-darkCard shadow-md px-3 py-2 flex justify-between items-center sticky top-0 z-50 border-b border-gray-200 dark:border-gray-800 gap-2">
+      <div className="flex items-center gap-2 shrink-0">
         <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-black text-white text-xs">
           Ai
         </div>
@@ -92,97 +71,49 @@ export default function Header({
         </button>
       </div>
 
-      {/* Desktop Stats Strip */}
-      <div className="hidden lg:flex space-x-6 text-sm">
-        <div className="flex flex-col">
-          <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Total Capital</span>
-          <span className="font-bold text-sm" title="Available cash for new trades (10% sizing base)">${capStr}</span>
-        </div>
-        <div className="flex flex-col">
-          <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Trade Value</span>
-          <span className="font-bold text-sm text-amber-500" title="Total open notional exposure">${tradeValStr}</span>
-        </div>
-        <div className="flex flex-col">
-          <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Daily Profit</span>
-          <span
-            className={`font-bold text-sm ${isProfit ? 'text-green-500' : 'text-red-500'}`}
-            title="Gross trade profit minus Bybit broker fees"
-          >
-            {profitStr}
+      {/* Center: Exited + Market momentum (chart TF) */}
+      <div className="flex-1 flex items-center justify-center gap-4 sm:gap-8 min-w-0">
+        <div className="flex flex-col items-center min-w-0">
+          <span className="text-gray-500 dark:text-gray-400 text-[9px] sm:text-[10px] uppercase tracking-wider whitespace-nowrap">
+            Exited (booked)
           </span>
-        </div>
-        <div className="flex flex-col">
-          <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Daily Bybit Broker Fee</span>
           <span
-            className="font-bold text-sm text-amber-400"
-            title="Open entry fees + estimated exit fees + closed trade fees"
-          >
-            {feeStr}
-          </span>
-        </div>
-        <div className="flex flex-col">
-          <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">AI Season Profit</span>
-          <span
-            className={`font-bold text-sm ${
-              !seasonActive ? 'text-gray-400' : isSeasonProfit ? 'text-green-500' : 'text-red-500'
+            className={`font-bold text-sm sm:text-base tabular-nums ${
+              exitedProfit ? 'text-green-500' : 'text-red-500'
             }`}
-            title="Season profit after Bybit broker fees"
+            title="Closed trades net P&L ($)"
           >
-            {seasonStr}
+            {exitedPnlStr}
           </span>
         </div>
-        <div className="flex flex-col">
-          <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">Open Positions</span>
-          <span className="font-bold text-sm">
-            {tradesCount} <span className="text-xs font-normal text-gray-400">(Active)</span>
-          </span>
-        </div>
-        <div className="flex flex-col">
-          <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">24H High / Low</span>
-          <span className="font-bold text-sm">
-            {dayHigh != null ? (
-              <>
-                <span className="text-green-500">{fmtNum(dayHigh)}</span>
-                <span className="text-gray-400 font-normal"> / </span>
-                <span className="text-red-500">{fmtNum(dayLow)}</span>
-              </>
-            ) : (
-              <span className="text-gray-400 font-normal">--</span>
-            )}
-          </span>
-        </div>
-        <div className="flex flex-col">
-          <span
-            className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider"
-            title={`Avg candle move over ${tfMoveTitle}`}
-          >
+        <div className="w-px h-7 bg-gray-300 dark:bg-gray-700 shrink-0" aria-hidden="true" />
+        <div className="flex flex-col items-center min-w-0" title={tfMoveTitle}>
+          <span className="text-gray-500 dark:text-gray-400 text-[9px] sm:text-[10px] uppercase tracking-wider whitespace-nowrap">
             Market {chartTimeframe}
           </span>
           <span
-            className={`font-bold text-sm ${
+            className={`font-bold text-sm sm:text-base tabular-nums ${
               tfMovePct == null ? 'text-gray-400' : tfMoveUp ? 'text-green-500' : 'text-red-500'
             }`}
-            title={`${tfMoveTitle} — avg % per ${chartTimeframe} candle`}
           >
             {tfMoveStr}
-            {tfMoveLabel ? (
-              <span className="text-[10px] font-normal text-gray-400 ml-1.5">
-                {(formatTfMoveLabel(chartTimeframe, tfMoveLabel).split('·')[1] || tfMoveLabel).trim()}
-              </span>
-            ) : null}
-          </span>
-        </div>
-        <div className="flex flex-col">
-          <span className="text-gray-500 dark:text-gray-400 text-[10px] uppercase tracking-wider">API Status</span>
-          <span className={`font-bold text-sm flex items-center ${STATUS_COLOR[apiStatus.color]}`}>
-            <span className={`w-2 h-2 rounded-full mr-1.5 animate-pulse ${DOT_COLOR[apiStatus.color]}`}></span>{' '}
-            {apiStatus.label}
           </span>
         </div>
       </div>
 
       {/* Right Icons */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 shrink-0">
+        <button
+          id="portfolio-btn"
+          type="button"
+          onClick={() => setPortfolioOpen(true)}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10px] sm:text-xs font-bold border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 hover:opacity-90 transition"
+          title="Portfolio details"
+        >
+          <i className="fas fa-briefcase" />
+          <span className="hidden sm:inline">PORTFOLIO</span>
+        </button>
+
         <button
           id="trading-mode-badge"
           onClick={onOpenPaperModal}
@@ -194,21 +125,6 @@ export default function Header({
         >
           <i className={`fas ${isLive ? 'fa-bolt' : 'fa-file-invoice-dollar'} mr-1.5`}></i>
           <span>{isLive ? 'LIVE TRADING' : 'PAPER TRADING'}</span>
-        </button>
-
-        <button
-          id="session-momentum-badge"
-          type="button"
-          onClick={onOpenSessionModal}
-          className={`flex items-center px-2 py-1 rounded-full text-[10px] font-bold border hover:opacity-80 transition ${
-            sessionEngineEnabled
-              ? 'bg-cyan-100 dark:bg-cyan-900/30 border-cyan-300 dark:border-cyan-700 text-cyan-800 dark:text-cyan-300'
-              : 'bg-gray-100 dark:bg-gray-800/60 border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300'
-          }`}
-          title="Session Momentum Engine — high-momentum market windows"
-        >
-          <i className="fas fa-clock mr-1.5" />
-          <span>{sessionEngineEnabled ? 'SESSION ENGINE ON' : 'SESSION ENGINE'}</span>
         </button>
 
         <NotificationsDropdown notifications={notifications} unreadCount={unreadCount} markAllRead={markAllRead} />
@@ -279,6 +195,25 @@ export default function Header({
       </div>
 
       <BotHelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
+      <PortfolioModal
+        open={portfolioOpen}
+        onClose={() => setPortfolioOpen(false)}
+        totalCapital={totalCapital}
+        tradeValue={tradeValue}
+        dailyProfit={dailyProfit}
+        dailyProfitPct={dailyProfitPct}
+        dailyBrokerFee={dailyBrokerFee}
+        seasonProfit={seasonProfit}
+        seasonProfitPct={seasonProfitPct}
+        seasonActive={seasonActive}
+        tradesCount={tradesCount}
+        apiStatus={apiStatus}
+        dayHigh={dayHigh}
+        dayLow={dayLow}
+        tfMovePct={tfMovePct}
+        tfMoveLabel={tfMoveLabel}
+        chartTimeframe={chartTimeframe}
+      />
     </header>
   );
 }

@@ -1,21 +1,36 @@
+import { useEffect, useMemo, useState } from 'react';
 import { getPairMeta, fmtNum } from '../data/pairs';
 import { formatTradeFireTime } from '../utils/time';
 
+const PAGE_SIZE = 10;
+
 function isTradeWinning(trade) {
-  // Real mark-to-market vs entry (no fee) — green when price moved in your favor.
+  // Prefer backend gross % — rounded display prices on PEPE can flip sign wrongly.
+  if (trade.gross_pnl_pct != null && Number.isFinite(Number(trade.gross_pnl_pct))) {
+    return Number(trade.gross_pnl_pct) >= 0;
+  }
+  if (trade.pnl != null && Number.isFinite(Number(trade.pnl))) {
+    return Number(trade.pnl) >= 0;
+  }
   if (trade.side === 'LONG' && trade.entry != null && trade.current != null) {
     return Number(trade.current) >= Number(trade.entry);
   }
   if (trade.side === 'SHORT' && trade.entry != null && trade.current != null) {
     return Number(trade.current) <= Number(trade.entry);
   }
-  if (trade.gross_pnl_pct != null) return trade.gross_pnl_pct >= 0;
-  if (trade.pnl != null) return trade.pnl >= 0;
   return false;
 }
 
 function formatMovePct(trade) {
-  // Pure entry→current % — no fee, no suffix text.
+  // Prefer backend gross % so PEPE 4dp display rounding cannot flip ±1% every tick.
+  if (trade.gross_pnl_pct != null && Number.isFinite(Number(trade.gross_pnl_pct))) {
+    const n = Number(trade.gross_pnl_pct);
+    return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+  }
+  if (trade.pnl != null && Number.isFinite(Number(trade.pnl))) {
+    const n = Number(trade.pnl);
+    return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+  }
   const entry = Number(trade.entry);
   const current = Number(trade.current);
   if (Number.isFinite(entry) && entry > 0 && Number.isFinite(current)) {
@@ -27,8 +42,71 @@ function formatMovePct(trade) {
     }
     return `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
   }
-  const n = Number(trade.gross_pnl_pct ?? trade.pnl) || 0;
-  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+  return '+0.00%';
+}
+
+function sortLatestFirst(list) {
+  // Newest first, oldest last — prefer close time for exits, else open time / id.
+  return [...list].sort((a, b) => {
+    const ta = Number(a.closed_at || a.opened_at || 0);
+    const tb = Number(b.closed_at || b.opened_at || 0);
+    if (tb !== ta) return tb - ta;
+    return Number(b.id || 0) - Number(a.id || 0);
+  });
+}
+
+function pageSlice(list, page) {
+  const start = (page - 1) * PAGE_SIZE;
+  return list.slice(start, start + PAGE_SIZE);
+}
+
+function totalPages(count) {
+  return Math.max(1, Math.ceil(count / PAGE_SIZE));
+}
+
+function PaginationBar({ page, total, onChange, label }) {
+  if (total <= 1) return null;
+  const pages = Array.from({ length: total }, (_, i) => i + 1);
+
+  return (
+    <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-t border-gray-100 dark:border-gray-800 bg-gray-50/80 dark:bg-gray-900/30">
+      <span className="text-[10px] text-gray-500 uppercase tracking-wider shrink-0">{label}</span>
+      <div className="flex items-center gap-1 flex-wrap justify-end">
+        <button
+          type="button"
+          disabled={page <= 1}
+          onClick={() => onChange(page - 1)}
+          className="px-2 py-0.5 rounded text-[10px] font-bold border border-gray-300 dark:border-gray-600 disabled:opacity-40 hover:bg-gray-200 dark:hover:bg-gray-800 transition"
+          title="Previous page"
+        >
+          ‹ Prev
+        </button>
+        {pages.map((n) => (
+          <button
+            key={n}
+            type="button"
+            onClick={() => onChange(n)}
+            className={`min-w-[1.5rem] px-1.5 py-0.5 rounded text-[10px] font-bold border transition ${
+              n === page
+                ? 'bg-blue-600 border-blue-600 text-white'
+                : 'border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-800'
+            }`}
+          >
+            {n}
+          </button>
+        ))}
+        <button
+          type="button"
+          disabled={page >= total}
+          onClick={() => onChange(page + 1)}
+          className="px-2 py-0.5 rounded text-[10px] font-bold border border-gray-300 dark:border-gray-600 disabled:opacity-40 hover:bg-gray-200 dark:hover:bg-gray-800 transition"
+          title="Next page"
+        >
+          Next ›
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function StatusIcon({ trade }) {
@@ -178,18 +256,42 @@ function SectionLabel({ children }) {
 }
 
 export default function LiveTradesPanel({ trades, activeCount, activePair, onRequestClose }) {
-  const active = trades.filter((t) => t.status !== 'sold');
-  const closed = trades.filter((t) => t.status === 'sold');
+  const activeAll = useMemo(
+    () => sortLatestFirst(trades.filter((t) => t.status !== 'sold')),
+    [trades],
+  );
+  const closedAll = useMemo(
+    () => sortLatestFirst(trades.filter((t) => t.status === 'sold')),
+    [trades],
+  );
+
+  const [livePage, setLivePage] = useState(1);
+  const [exitPage, setExitPage] = useState(1);
+
+  const livePages = totalPages(activeAll.length);
+  const exitPages = totalPages(closedAll.length);
+
+  useEffect(() => {
+    if (livePage > livePages) setLivePage(livePages);
+  }, [livePage, livePages]);
+
+  useEffect(() => {
+    if (exitPage > exitPages) setExitPage(exitPages);
+  }, [exitPage, exitPages]);
+
+  const active = pageSlice(activeAll, livePage);
+  const closed = pageSlice(closedAll, exitPage);
 
   return (
     <div className="bg-lightCard dark:bg-darkCard rounded-xl shadow border border-gray-200 dark:border-gray-800 overflow-hidden flex-1 flex flex-col min-h-0">
       <div className="flex justify-between items-center px-3 py-2 border-b border-gray-200 dark:border-gray-800 shrink-0">
         <h2 className="font-bold text-xs uppercase tracking-wide">
           Live Trades <span className="text-blue-500">({activeCount} Active)</span>
-          {closed.length > 0 ? (
-            <span className="text-gray-500 font-semibold normal-case ml-2">· {closed.length} exited</span>
+          {closedAll.length > 0 ? (
+            <span className="text-gray-500 font-semibold normal-case ml-2">· {closedAll.length} exited</span>
           ) : null}
         </h2>
+        <span className="text-[10px] text-gray-400">10 / page</span>
       </div>
 
       {/* Desktop Table */}
@@ -216,11 +318,11 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                 </tr>
               ) : (
                 <>
-                  {active.length > 0 ? <SectionLabel>Open</SectionLabel> : null}
+                  {activeAll.length > 0 ? <SectionLabel>Open</SectionLabel> : null}
                   {active.map((trade) => (
                     <TradeRowDesktop key={trade.id} trade={trade} onRequestClose={onRequestClose} />
                   ))}
-                  {closed.length > 0 ? <SectionLabel>Exited (booked)</SectionLabel> : null}
+                  {closedAll.length > 0 ? <SectionLabel>Exited (booked)</SectionLabel> : null}
                   {closed.map((trade) => (
                     <TradeRowDesktop key={`sold-${trade.id}`} trade={trade} onRequestClose={onRequestClose} />
                   ))}
@@ -229,27 +331,53 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
             </tbody>
           </table>
         </div>
+        <PaginationBar
+          page={livePage}
+          total={livePages}
+          onChange={setLivePage}
+          label={`Open · page ${livePage}/${livePages}`}
+        />
+        <PaginationBar
+          page={exitPage}
+          total={exitPages}
+          onChange={setExitPage}
+          label={`Exited · page ${exitPage}/${exitPages}`}
+        />
       </div>
 
       {/* Mobile List */}
-      <div className="lg:hidden flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800">
-        {trades.length === 0 ? (
-          <div className="text-center py-6 text-gray-500 text-sm">No active positions. All trades closed.</div>
-        ) : (
-          <>
-            {active.map((trade) => (
-              <TradeRowMobile key={trade.id} trade={trade} />
-            ))}
-            {closed.length > 0 ? (
-              <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 bg-gray-50 dark:bg-gray-900/40 font-semibold">
-                Exited (booked)
-              </div>
-            ) : null}
-            {closed.map((trade) => (
-              <TradeRowMobile key={`sold-${trade.id}`} trade={trade} />
-            ))}
-          </>
-        )}
+      <div className="lg:hidden flex-1 min-h-0 flex flex-col overflow-hidden">
+        <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800">
+          {trades.length === 0 ? (
+            <div className="text-center py-6 text-gray-500 text-sm">No active positions. All trades closed.</div>
+          ) : (
+            <>
+              {active.map((trade) => (
+                <TradeRowMobile key={trade.id} trade={trade} />
+              ))}
+              {closedAll.length > 0 ? (
+                <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 bg-gray-50 dark:bg-gray-900/40 font-semibold">
+                  Exited (booked)
+                </div>
+              ) : null}
+              {closed.map((trade) => (
+                <TradeRowMobile key={`sold-${trade.id}`} trade={trade} />
+              ))}
+            </>
+          )}
+        </div>
+        <PaginationBar
+          page={livePage}
+          total={livePages}
+          onChange={setLivePage}
+          label={`Open · page ${livePage}/${livePages}`}
+        />
+        <PaginationBar
+          page={exitPage}
+          total={exitPages}
+          onChange={setExitPage}
+          label={`Exited · page ${exitPage}/${exitPages}`}
+        />
       </div>
     </div>
   );

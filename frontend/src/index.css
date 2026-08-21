@@ -29,6 +29,29 @@ body.dark {
   opacity: 1;
 }
 
+/* Session Engine FAB — white neon star rides the pill border */
+.session-engine-fab {
+  pointer-events: none;
+}
+.session-engine-fab__shell {
+  pointer-events: none;
+}
+.session-engine-fab__btn {
+  pointer-events: auto;
+  box-shadow:
+    0 0 12px rgba(255, 255, 255, 0.28),
+    0 4px 18px rgba(0, 0, 0, 0.4);
+}
+.session-engine-fab__ring {
+  position: absolute;
+  inset: -7px;
+  width: calc(100% + 14px);
+  height: calc(100% + 14px);
+  overflow: visible;
+  pointer-events: none;
+  z-index: 2;
+}
+
 /* Card hover glow */
 .trade-card {
   transition: all 0.2s ease;
