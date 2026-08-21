@@ -322,27 +322,39 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                   {active.map((trade) => (
                     <TradeRowDesktop key={trade.id} trade={trade} onRequestClose={onRequestClose} />
                   ))}
+                  {activeAll.length > 0 ? (
+                    <tr>
+                      <td colSpan={7} className="p-0 align-top">
+                        <PaginationBar
+                          page={livePage}
+                          total={livePages}
+                          onChange={setLivePage}
+                          label={`Open · page ${livePage}/${livePages}`}
+                        />
+                      </td>
+                    </tr>
+                  ) : null}
                   {closedAll.length > 0 ? <SectionLabel>Exited (booked)</SectionLabel> : null}
                   {closed.map((trade) => (
                     <TradeRowDesktop key={`sold-${trade.id}`} trade={trade} onRequestClose={onRequestClose} />
                   ))}
+                  {closedAll.length > 0 ? (
+                    <tr>
+                      <td colSpan={7} className="p-0 align-top">
+                        <PaginationBar
+                          page={exitPage}
+                          total={exitPages}
+                          onChange={setExitPage}
+                          label={`Exited · page ${exitPage}/${exitPages}`}
+                        />
+                      </td>
+                    </tr>
+                  ) : null}
                 </>
               )}
             </tbody>
           </table>
         </div>
-        <PaginationBar
-          page={livePage}
-          total={livePages}
-          onChange={setLivePage}
-          label={`Open · page ${livePage}/${livePages}`}
-        />
-        <PaginationBar
-          page={exitPage}
-          total={exitPages}
-          onChange={setExitPage}
-          label={`Exited · page ${exitPage}/${exitPages}`}
-        />
       </div>
 
       {/* Mobile List */}
@@ -352,9 +364,22 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
             <div className="text-center py-6 text-gray-500 text-sm">No active positions. All trades closed.</div>
           ) : (
             <>
+              {activeAll.length > 0 ? (
+                <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 bg-gray-50 dark:bg-gray-900/40 font-semibold">
+                  Open
+                </div>
+              ) : null}
               {active.map((trade) => (
                 <TradeRowMobile key={trade.id} trade={trade} />
               ))}
+              {activeAll.length > 0 ? (
+                <PaginationBar
+                  page={livePage}
+                  total={livePages}
+                  onChange={setLivePage}
+                  label={`Open · page ${livePage}/${livePages}`}
+                />
+              ) : null}
               {closedAll.length > 0 ? (
                 <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 bg-gray-50 dark:bg-gray-900/40 font-semibold">
                   Exited (booked)
@@ -363,21 +388,17 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
               {closed.map((trade) => (
                 <TradeRowMobile key={`sold-${trade.id}`} trade={trade} />
               ))}
+              {closedAll.length > 0 ? (
+                <PaginationBar
+                  page={exitPage}
+                  total={exitPages}
+                  onChange={setExitPage}
+                  label={`Exited · page ${exitPage}/${exitPages}`}
+                />
+              ) : null}
             </>
           )}
         </div>
-        <PaginationBar
-          page={livePage}
-          total={livePages}
-          onChange={setLivePage}
-          label={`Open · page ${livePage}/${livePages}`}
-        />
-        <PaginationBar
-          page={exitPage}
-          total={exitPages}
-          onChange={setExitPage}
-          label={`Exited · page ${exitPage}/${exitPages}`}
-        />
       </div>
     </div>
   );

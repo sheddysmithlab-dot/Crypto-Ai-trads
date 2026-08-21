@@ -10,7 +10,7 @@ function AppGate() {
 
   if (status === 'loading') {
     return (
-      <div className="min-h-screen bg-[#0b0e11] flex items-center justify-center text-gray-500 text-sm">
+      <div className="h-full min-h-screen bg-[#0b0e11] flex items-center justify-center text-gray-500 text-sm">
         Verifying session...
       </div>
     );

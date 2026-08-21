@@ -26,7 +26,7 @@ export default function ControlBar({
   const locked = botIsActive || botLoading;
 
   return (
-    <div className="relative bg-lightCard dark:bg-darkCard border-t border-gray-300 dark:border-gray-800 px-2 sm:px-3 py-1.5 shrink-0">
+    <div className="relative shrink-0 z-50 bg-lightCard dark:bg-darkCard border-t border-gray-300 dark:border-gray-800 px-2 sm:px-3 py-1.5 shadow-[0_-4px_16px_rgba(0,0,0,0.25)]">
       {/* Main actions — compact height */}
       <div className="w-full max-w-4xl mx-auto flex items-stretch gap-1.5 sm:gap-2">
         <button

@@ -56,7 +56,7 @@ export default function Header({
   const tfMoveTitle = formatTfMoveLabel(chartTimeframe, tfMoveLabel);
 
   return (
-    <header className="bg-lightCard dark:bg-darkCard shadow-md px-3 py-2 flex justify-between items-center sticky top-0 z-50 border-b border-gray-200 dark:border-gray-800 gap-2">
+    <header className="bg-lightCard dark:bg-darkCard shadow-md px-3 py-2 flex justify-between items-center sticky top-0 z-50 shrink-0 border-b border-gray-200 dark:border-gray-800 gap-2">
       <div className="flex items-center gap-2 shrink-0">
         <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-black text-white text-xs">
           Ai

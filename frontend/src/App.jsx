@@ -305,11 +305,48 @@ export default function App() {
     setPendingConfig(null);
   }
 
-  async function handleSessionStart() {
-    pushActionLog('Session Momentum Engine START…');
-    const result = await startSessionEngine();
-    pushActionLog(result?.ok ? 'Session Momentum Engine ON (Main AI Engine OFF).' : 'Session engine start failed.');
-    return result;
+  async function handleSessionStart(setup = {}) {
+    const {
+      timeframe: tf,
+      stopLossPct = 5,
+      dailyProfitPct = 0,
+      trades = Math.max(1, Math.floor(stopLossPct * 2 + 0.5)),
+    } = setup || {};
+    pushActionLog(
+      `Session Momentum setup: chart=${tf || timeframe}, risk=${stopLossPct}%, max_trades=${trades}…`,
+    );
+    try {
+      const configRes = await authFetch('/agent/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stop_loss_pct: stopLossPct,
+          daily_profit_pct: dailyProfitPct,
+          max_concurrent_trades: trades,
+        }),
+      });
+      const configData = await configRes.json().catch(() => ({}));
+      if (!configRes.ok || configData.status === 'error') {
+        pushActionLog(`Session config rejected: ${configData.message || 'error'}`);
+        window.alert(configData.message || 'Could not apply risk settings. Session not started.');
+        return { ok: false, message: configData.message };
+      }
+      if (tf) {
+        switchTimeframe(String(tf).toUpperCase());
+      }
+      pushActionLog('Session Momentum Engine START…');
+      const result = await startSessionEngine();
+      pushActionLog(
+        result?.ok
+          ? `Session Momentum Engine ON · ${tf || timeframe} · risk ${stopLossPct}% (Main AI OFF).`
+          : 'Session engine start failed.',
+      );
+      return result;
+    } catch (err) {
+      console.error('Session Momentum start failed:', err);
+      pushActionLog('Session engine start failed (network).');
+      return { ok: false, message: err?.message };
+    }
   }
 
   async function handleSessionStop() {
@@ -490,7 +527,7 @@ export default function App() {
   const sessionOpenPositions = Number(portfolio.sessionOpenPositions) || 0;
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="h-screen max-h-screen overflow-hidden flex flex-col bg-lightBg dark:bg-darkBg">
       <Header
         totalCapital={totalEquity}
         tradeValue={tradeValue}
@@ -525,7 +562,7 @@ export default function App() {
         username={username}
       />
 
-      <main className="flex-grow flex flex-col min-h-0 p-2 lg:p-4 gap-3">
+      <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden flex flex-col p-2 lg:p-4 gap-3">
         <ChartPanel
           pairSelector={pairSelector}
           chartContainerRef={chartContainerRef}
@@ -613,6 +650,7 @@ export default function App() {
         loading={sessionLoading}
         status={sessionStatus}
         mainEngineActive={effectiveBotActive}
+        chartTimeframe={timeframe}
         onRefresh={refreshSessionEngine}
         onStart={handleSessionStart}
         onStop={handleSessionStop}
