@@ -29,6 +29,12 @@ from bybit_public import (
     sanitize_price as _sanitize_market_price,
 )
 from session_schedule import schedule_store
+from engine_runtime import (
+    save_runtime,
+    restore_runtime,
+    AI_FAIL_FREEZE_STREAK,
+    FEED_STALE_SECONDS,
+)
 import trade_db
 from api_secrets import (
     get_taapi_exchange,
@@ -373,14 +379,17 @@ async def consult_ai_provider(context):
             )
         if resp.status_code != 200:
             print(f"[AI AGENT] Provider '{provider}' returned HTTP {resp.status_code} - failing open (proceeding with trade).")
+            agent.note_ai_result(False)
             return None
         data = resp.json()
         reply = data["choices"][0]["message"]["content"].strip().upper()
         decision = reply.startswith("YES")
         print(f"[AI AGENT] Provider '{provider}' confirmation reply: '{reply}' -> {'PROCEED' if decision else 'REJECTED'}")
+        agent.note_ai_result(True)
         return decision
     except Exception as exc:
         print(f"[AI AGENT] Provider '{provider}' request failed ({exc}) - failing open (proceeding with trade).")
+        agent.note_ai_result(False)
         return None
 
 # ==========================================
@@ -707,6 +716,12 @@ class AITradingAgent:
         # reset to 0 on next START (not calendar-day / all-time).
         self.session_stats_frozen = False
         self.session_hold_mode = False  # STOP→Hold: no new entries; open trades still auto-exit
+        # Connectivity freeze: engine stays ON, but new fires pause until feed/AI recover.
+        self.connectivity_frozen = False
+        self.freeze_reason: str | None = None
+        self._ai_fail_streak = 0
+        self._last_feed_ts = time.time()
+        self._last_runtime_save = 0.0
         self.session_stats_snapshot: dict = {
             "trade_notional": 0.0,
             "daily_profit": 0.0,
@@ -1353,11 +1368,9 @@ class AITradingAgent:
         mark_px = self.mark_price_for(trade_pair) or self.current_price
 
         if source == "manual":
-            # Manual trading is the opposite of automation - only allowed while the bot
-            # is NOT running (START AI AUTOMATION has not been clicked / was stopped).
-            if self.is_active:
-                self.last_open_skip_reason = "Manual entry blocked while AI engine is running"
-                return None
+            # Manual BUY/SELL always allowed on the chart pair (even while AI/session runs).
+            # Manual positions stay protected from AI auto-close.
+            pass
         else:
             if not self.is_active:
                 self.last_open_skip_reason = "AI engine is not active"
@@ -1524,6 +1537,7 @@ class AITradingAgent:
         }
         self.trades.append(trade)
         self.set_pair_mark(trade_pair, filled_price)
+        self.persist_runtime()
         if bybit_api.mode != "LIVE_TRADING":
             self.current_capital = round(self.current_capital - capital_reserved, 2)
             print(
@@ -2205,6 +2219,9 @@ class AITradingAgent:
         self.end_ai_season(clear_live_table=True, reason="emergency_exit")
         self.peak_net_pct = 0.0
         self.is_lock_active = False
+        self.connectivity_frozen = False
+        self.freeze_reason = None
+        self.persist_runtime(force=True)
 
     def manual_stop(self, reason="Manual Kill Switch Activated from Frontend"):
         """Emergency STOP — sell all open positions and halt AI."""
@@ -2218,6 +2235,9 @@ class AITradingAgent:
         self.is_lock_active = False
         system_log.push("ai", "AI automation STOPPED — emergency exit, all positions closed.", {"reason": reason})
         notifications.push("EMERGENCY EXIT: All positions closed and AI automation stopped.", "error")
+        self.connectivity_frozen = False
+        self.freeze_reason = None
+        self.persist_runtime(force=True)
 
     def hold_stop(self, reason: str = "AI Engine STOP — hold open trades"):
         """STOP with Hold: no new fires; open trades keep path-SL / TP auto-exit; portfolio keeps updating."""
@@ -2237,6 +2257,7 @@ class AITradingAgent:
             f"AI Engine stopped (Hold). {open_n} open trade(s) will auto-exit on TP/SL — no new entries. ({reason})",
             "warning",
         )
+        self.persist_runtime(force=True)
 
     def schedule_soft_stop(self, reason: str):
         """Session schedule off-window: stop new entries, keep open trades + season PnL."""
@@ -2256,6 +2277,7 @@ class AITradingAgent:
             f"Session schedule OFF-window — automation paused ({len(self.trades)} open position(s) still managed).",
             "warning",
         )
+        self.persist_runtime(force=True)
 
     def schedule_auto_start(self, reason: str):
         """Session schedule in-window: same wake-up as /start-bot (no browser needed)."""
@@ -2278,6 +2300,7 @@ class AITradingAgent:
             {"open_positions": open_count},
         )
         notifications.push(f"Session schedule ON — AI automation started ({reason}).", "success")
+        self.persist_runtime()
 
     def resume_trading_after_emergency(self):
         """ Legacy continue endpoint — portfolio stop-loss removed; clears halt flags only. """
@@ -2285,6 +2308,93 @@ class AITradingAgent:
         self.is_active = True
         print("[AI AGENT] Trading resumed (portfolio stop-loss disabled).")
         notifications.push("Trading resumed.", "warning")
+        self.persist_runtime()
+
+    def persist_runtime(self, force: bool = False) -> None:
+        """Checkpoint engine state so restart/outage does not wipe open book."""
+        now = time.time()
+        if not force and (now - float(self._last_runtime_save or 0)) < 2.0:
+            return
+        self._last_runtime_save = now
+        save_runtime(self)
+
+    def note_market_feed(self) -> None:
+        """Call on every live price tick — clears feed-stale freeze when healthy."""
+        self._last_feed_ts = time.time()
+        if self.connectivity_frozen and self.freeze_reason == "market_feed_stale":
+            self.unfreeze_connectivity("Market feed restored")
+
+    def note_ai_result(self, ok: bool) -> None:
+        """Track AI provider health. Repeated failures freeze new fires; success unfreezes."""
+        if ok:
+            self._ai_fail_streak = 0
+            if self.connectivity_frozen and self.freeze_reason == "ai_provider_down":
+                self.unfreeze_connectivity("AI provider restored")
+            return
+        self._ai_fail_streak = int(self._ai_fail_streak or 0) + 1
+        if self.is_active and self._ai_fail_streak >= AI_FAIL_FREEZE_STREAK:
+            self.freeze_connectivity("ai_provider_down")
+
+    def refresh_feed_health(self) -> None:
+        """Freeze new entries if market ticks go stale (backend/network outage)."""
+        if not self.is_active:
+            return
+        age = time.time() - float(self._last_feed_ts or 0)
+        if age >= FEED_STALE_SECONDS:
+            self.freeze_connectivity("market_feed_stale")
+
+    def freeze_connectivity(self, reason: str) -> None:
+        if self.connectivity_frozen and self.freeze_reason == reason:
+            return
+        was = self.connectivity_frozen
+        self.connectivity_frozen = True
+        self.freeze_reason = reason
+        self.persist_runtime(force=True)
+        label = {
+            "ai_provider_down": "AI provider unreachable",
+            "market_feed_stale": "Market feed / backend connectivity stale",
+        }.get(reason, reason)
+        if not was:
+            print(f"[ENGINE FREEZE] {label} — new fires paused; open trades still managed.")
+            system_log.push(
+                "ai",
+                f"Engine FROZEN — {label}. Open trades keep updating; new entries paused until reconnect.",
+                {"reason": reason, "open_positions": len(self.trades)},
+            )
+            notifications.push(
+                f"Engine frozen ({label}). Open positions stay live; new trades pause until connectivity returns.",
+                "warning",
+            )
+
+    def unfreeze_connectivity(self, detail: str = "Connectivity restored") -> None:
+        if not self.connectivity_frozen:
+            return
+        prev = self.freeze_reason
+        self.connectivity_frozen = False
+        self.freeze_reason = None
+        self._ai_fail_streak = 0
+        self.persist_runtime(force=True)
+        print(f"[ENGINE UNFREEZE] {detail} (was {prev})")
+        system_log.push(
+            "ai",
+            f"Engine UNFROZEN — {detail}. Resuming from same open book.",
+            {"was_reason": prev, "open_positions": len(self.trades)},
+        )
+        notifications.push(
+            f"Engine unfrozen — {detail}. Continuing from existing open trades.",
+            "success",
+        )
+
+    def entries_allowed(self) -> bool:
+        """False while frozen / hold / emergency — open trades still update via process_tick."""
+        if self.emergency_triggered:
+            return False
+        if self.connectivity_frozen:
+            return False
+        if self.session_hold_mode and not self.is_active:
+            return False
+        return bool(self.is_active)
+
 
 agent = AITradingAgent()
 
@@ -3140,15 +3250,25 @@ async def auto_buy_loop():
                 timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
                 poll = 0.5  # same fast scan cadence as 1m on every TF
                 if agent.is_active and not agent.emergency_triggered:
+                    agent.refresh_feed_health()
                     pairs = list(agent.get_scan_pairs())
                     # Pending fires first so multi-pair/AI lag cannot expire the window.
                     pending_first = [p for p in pairs if p in PENDING_ENTRY_SIGNALS]
                     rest = [p for p in pairs if p not in PENDING_ENTRY_SIGNALS]
                     for pair in pending_first + rest:
                         try:
+                            # Frozen: still allow pending fires already queued? User said freeze
+                            # new trades — skip both detect+queue and new fires when frozen.
+                            if agent.connectivity_frozen and pair not in PENDING_ENTRY_SIGNALS:
+                                continue
+                            if agent.connectivity_frozen and pair in PENDING_ENTRY_SIGNALS:
+                                # Drop pending so we don't fire during outage; re-detect after unfreeze
+                                PENDING_ENTRY_SIGNALS.pop(pair, None)
+                                continue
                             await scan_and_maybe_fire_pair(client, pair, timeframe_key)
                         except Exception as exc:
                             print(f"[SCAN] error {pair}: {exc}")
+                    agent.persist_runtime()
                 await asyncio.sleep(poll)
             except Exception as exc:
                 print(f"[AUTO BUY LOOP] error: {exc}")
@@ -3228,6 +3348,7 @@ async def bybit_price_feed():
 
             if any_ok:
                 _last_real_feed_update = time.time()
+                agent.note_market_feed()
 
             await asyncio.sleep(_AUTO_BUY_TICKER_POLL)
 
@@ -3311,6 +3432,21 @@ async def start_background_tasks():
         system_log.push("ai", f"MySQL: {db_status.get('message')}", db_status)
     except Exception as exc:
         print(f"[MYSQL] startup note: {exc}")
+    try:
+        restored = restore_runtime(agent)
+        if restored.get("restored"):
+            system_log.push(
+                "ai",
+                "Engine runtime restored after restart — continuing until user stops.",
+                restored,
+            )
+            notifications.push(
+                f"Engine restored: {'ON' if restored.get('is_active') else 'OFF'} · "
+                f"{restored.get('trades', 0)} open trade(s).",
+                "info",
+            )
+    except Exception as exc:
+        print(f"[ENGINE RUNTIME] startup restore note: {exc}")
     asyncio.create_task(market_simulator())
     asyncio.create_task(bybit_price_feed())
     asyncio.create_task(bybit_balance_refresher())
@@ -3319,6 +3455,18 @@ async def start_background_tasks():
     asyncio.create_task(auto_exit_watchdog())
     asyncio.create_task(chart_24h_refresh_loop(BYBIT_SYMBOL_MAP))
     asyncio.create_task(session_schedule_loop())
+    asyncio.create_task(engine_runtime_checkpoint_loop())
+
+
+async def engine_runtime_checkpoint_loop():
+    """Periodic checkpoint so a crash mid-session still restores open book."""
+    while True:
+        try:
+            if agent.is_active or agent.trades or agent.session_hold_mode:
+                agent.persist_runtime()
+        except Exception as exc:
+            print(f"[ENGINE RUNTIME] checkpoint note: {exc}")
+        await asyncio.sleep(15)
 
 
 async def session_schedule_loop():
@@ -3367,6 +3515,11 @@ async def bot_start():
     agent.daily_target_reached = False
     agent.begin_ai_season()
     agent.is_active = True
+    agent.connectivity_frozen = False
+    agent.freeze_reason = None
+    agent._ai_fail_streak = 0
+    agent._last_feed_ts = time.time()
+    agent.persist_runtime(force=True)
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     profile = entry_pattern_profile(tf_key)
     print(f"[AI ENGINE] START — {agent.active_pair} ({tf_key}) brain.py")
@@ -3416,6 +3569,7 @@ async def bot_stop(payload: BotStopPayload | None = None):
     if mode == "emergency":
         print("[AI ENGINE] STOP — emergency exit (close all).")
         agent.manual_stop("AI Engine STOP — Emergency Exit from Frontend")
+        agent.persist_runtime(force=True)
         return {
             "status": "success",
             "is_active": False,
@@ -3428,6 +3582,9 @@ async def bot_stop(payload: BotStopPayload | None = None):
         print("[AI ENGINE] STOP — no open trades; halting scanner.")
         agent.is_active = False
         agent.session_hold_mode = False
+        agent.connectivity_frozen = False
+        agent.freeze_reason = None
+        agent.persist_runtime(force=True)
         if agent.ai_season_start_capital is not None or agent.ai_season_id is not None:
             agent.end_ai_season(clear_live_table=True, reason="stop_empty")
         return {
@@ -3513,6 +3670,8 @@ async def get_trading_mode():
 # ==========================================
 class OpenTradePayload(BaseModel):
     side: str = "LONG"
+    pair: str | None = None
+
 
 class SetPairPayload(BaseModel):
     pair: str
@@ -3527,27 +3686,51 @@ class ManualSellPayload(BaseModel):
 
 @app.post("/open-trade")
 async def open_trade(payload: OpenTradePayload):
-    """Manual BUY/SELL buttons: open LONG or SHORT (1% margin / 100x) on the active
-    pair while AI automation is OFF. Each click adds one manual position."""
+    """Manual BUY/SELL: open LONG or SHORT on the chart-selected pair (1% margin / 100x).
+
+    Works whether Main AI / Session Momentum is ON or OFF. Manual positions are protected.
+    """
     side = payload.side.upper() if payload.side.upper() in ("LONG", "SHORT") else "LONG"
     if agent.emergency_triggered:
         return {"status": "error", "message": "Cannot open a position - emergency halt is active."}
-    if agent.is_active:
-        return {"status": "error", "message": "Stop AI automation before manual BUY/SELL."}
     if len(agent.trades) >= agent.max_concurrent_trades:
         return {"status": "error", "message": f"Max concurrent trades ({agent.max_concurrent_trades}) reached."}
 
+    pair = (payload.pair or agent.active_pair or "").strip()
+    if not pair:
+        return {"status": "error", "message": "No chart pair selected."}
+
+    # Prefer live mark for the requested chart coin
+    live_price = await fetch_bybit_linear_price(pair)
+    if live_price is not None and live_price > 0:
+        agent.set_pair_mark(pair, float(live_price))
+        if pair != agent.active_pair:
+            agent.set_active_pair(pair, float(live_price))
+        else:
+            agent.current_price = float(live_price)
+    elif pair != agent.active_pair:
+        # Still focus the pair even if ticker briefly fails — open_trade uses mark/fallback
+        seed = agent.mark_price_for(pair) or agent.current_price or 0.0
+        if seed and seed > 0:
+            agent.set_active_pair(pair, float(seed))
+
     label = "BUY (LONG)" if side == "LONG" else "SELL (SHORT)"
-    trade = agent.open_trade(side, reason=f"Manual {label} button", source="manual")
+    trade = agent.open_trade(
+        side,
+        reason=f"Manual {label} · {pair}",
+        source="manual",
+        pair=pair,
+    )
     if trade is None:
+        reason = agent.last_open_skip_reason or "Could not open a manual position."
         if agent._live_insufficient_balance():
             return {"status": "error", "message": "Insufficient balance on your Bybit account."}
-        return {"status": "error", "message": "Could not open a manual position."}
+        return {"status": "error", "message": reason}
     return {
         "status": "success",
-        "message": f"Manual {side} filled on {agent.active_pair}.",
+        "message": f"Manual {side} filled on {pair}.",
         "trade": trade,
-        "pair": agent.active_pair,
+        "pair": pair,
     }
 
 @app.post("/manual-sell")
@@ -4262,6 +4445,8 @@ async def portfolio_feed(websocket: WebSocket):
                 "ai_season_active": season_active,
                 "session_stats_frozen": bool(agent.session_stats_frozen),
                 "session_hold_mode": bool(agent.session_hold_mode),
+                "connectivity_frozen": bool(agent.connectivity_frozen),
+                "freeze_reason": agent.freeze_reason,
                 "portfolio_drop_pct": round(portfolio_drop, 2),
                 "is_active": agent.is_active,
                 "timeframe_seconds": agent.timeframe_seconds,

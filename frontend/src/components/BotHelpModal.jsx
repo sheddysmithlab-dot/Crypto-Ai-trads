@@ -27,7 +27,7 @@ const SECTIONS = [
   {
     title: 'Controls',
     items: [
-      'Manual BUY/SELL when AI is OFF; trash icon force-closes one position.',
+      'Manual BUY/SELL open LONG/SHORT on the main chart coin (works even while AI/session runs).',
       'STOP popup: Hold (keep TP/SL) or Emergency (close all). PAPER / Testnet supported.',
       'Session Momentum Engine: timed IST windows (mutually exclusive with main AI).',
     ],

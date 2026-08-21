@@ -6,6 +6,8 @@ export default function ControlBar({
   botLoading,
   sessionEngineEnabled = false,
   sessionLoading = false,
+  connectivityFrozen = false,
+  freezeReason = null,
   uptime,
   lastUpdated,
   onClick,
@@ -27,7 +29,8 @@ export default function ControlBar({
   const sideBase =
     'shrink-0 w-12 sm:w-16 rounded-lg text-[9px] sm:text-[10px] font-black uppercase tracking-wide text-white transition-all duration-200 active:scale-95 flex flex-col items-center justify-center gap-0 py-1.5';
   const sideOff = 'bg-gray-300 dark:bg-gray-700 text-gray-500 cursor-not-allowed opacity-60';
-  const locked = botIsActive || busy;
+  // Manual BUY/SELL stay usable on the main chart coin (even while AI/session runs).
+  const locked = busy;
 
   return (
     <div className="relative shrink-0 z-50 bg-lightCard dark:bg-darkCard border-t border-gray-300 dark:border-gray-800 px-2 sm:px-3 py-1.5 shadow-[0_-4px_16px_rgba(0,0,0,0.25)]">
@@ -38,7 +41,7 @@ export default function ControlBar({
           className={`${sideBase} ${locked ? sideOff : 'bg-emerald-500 hover:bg-emerald-400'}`}
           onClick={onManualBuy}
           disabled={locked}
-          title="Manual BUY (LONG)"
+          title="Manual BUY (LONG) on main chart pair"
         >
           <i className="fas fa-arrow-up text-[10px]" />
           BUY
@@ -84,7 +87,7 @@ export default function ControlBar({
           className={`${sideBase} ${locked ? sideOff : 'bg-orange-500 hover:bg-orange-400'}`}
           onClick={onManualSell}
           disabled={locked}
-          title="Manual SELL (SHORT)"
+          title="Manual SELL (SHORT) on main chart pair"
         >
           <i className="fas fa-arrow-down text-[10px]" />
           SELL
@@ -104,16 +107,31 @@ export default function ControlBar({
             <span className="text-gray-800 dark:text-gray-200 font-bold tabular-nums">{uptime.formatted}</span>
             <span
               className={`shrink-0 ${
-                sessionEngineEnabled || botIsActive ? 'text-green-500' : 'text-gray-500'
+                connectivityFrozen
+                  ? 'text-amber-500'
+                  : sessionEngineEnabled || botIsActive
+                    ? 'text-green-500'
+                    : 'text-gray-500'
               }`}
+              title={
+                connectivityFrozen
+                  ? freezeReason === 'ai_provider_down'
+                    ? 'AI provider down — new entries paused; open trades still managed'
+                    : freezeReason === 'market_feed_stale'
+                      ? 'Market feed stale — new entries paused; open trades still managed'
+                      : 'Connectivity frozen — waiting to resume'
+                  : undefined
+              }
             >
-              {sessionEngineEnabled
-                ? botIsActive
-                  ? '(Session · Trading)'
-                  : '(Session · Waiting)'
-                : botIsActive
-                  ? '(Running)'
-                  : '(Stopped)'}
+              {connectivityFrozen
+                ? '(Frozen · waiting)'
+                : sessionEngineEnabled
+                  ? botIsActive
+                    ? '(Session · Trading)'
+                    : '(Session · Waiting)'
+                  : botIsActive
+                    ? '(Running)'
+                    : '(Stopped)'}
             </span>
           </span>
         </div>

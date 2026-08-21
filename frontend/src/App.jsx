@@ -471,48 +471,56 @@ export default function App() {
   }
 
   async function handleManualBuy() {
-    pushActionLog('Manual BUY (LONG) clicked. Sending open-trade request.');
-    debugLog('Manual BUY (LONG) clicked. Sending POST /open-trade to Backend...');
+    const pair = pairSelector.activePairLabel;
+    pushActionLog(`Manual BUY (LONG) on ${pair}…`);
+    debugLog(`Manual BUY (LONG) → POST /open-trade pair=${pair}`);
     try {
       const res = await authFetch('/open-trade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ side: 'LONG' }),
+        body: JSON.stringify({ side: 'LONG', pair }),
       });
-      const data = await res.json();
-      if (data.status === 'error') {
-        console.error('Manual LONG failed:', data.message);
-        if (data.message?.toLowerCase().includes('insufficient')) {
-          window.alert(data.message);
-        }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.status === 'error') {
+        const msg = data.message || 'Manual LONG failed.';
+        console.error('Manual LONG failed:', msg);
+        pushActionLog(`Manual LONG failed: ${msg}`);
+        window.alert(msg);
       } else {
+        pushActionLog(data.message || `Manual LONG filled on ${pair}.`);
         debugLog(data.message || 'Manual LONG executed.');
       }
     } catch (err) {
       console.error('Manual LONG failed:', err);
+      pushActionLog('Manual LONG failed (network).');
+      window.alert(err?.message || 'Manual LONG failed (network).');
     }
   }
 
   async function handleManualSell() {
-    pushActionLog('Manual SELL (SHORT) clicked. Sending open-trade request.');
-    debugLog('Manual SELL (SHORT) clicked. Sending POST /open-trade to Backend...');
+    const pair = pairSelector.activePairLabel;
+    pushActionLog(`Manual SELL (SHORT) on ${pair}…`);
+    debugLog(`Manual SELL (SHORT) → POST /open-trade pair=${pair}`);
     try {
       const res = await authFetch('/open-trade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ side: 'SHORT' }),
+        body: JSON.stringify({ side: 'SHORT', pair }),
       });
-      const data = await res.json();
-      if (data.status === 'error') {
-        console.error('Manual SHORT failed:', data.message);
-        if (data.message?.toLowerCase().includes('insufficient')) {
-          window.alert(data.message);
-        }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.status === 'error') {
+        const msg = data.message || 'Manual SHORT failed.';
+        console.error('Manual SHORT failed:', msg);
+        pushActionLog(`Manual SHORT failed: ${msg}`);
+        window.alert(msg);
       } else {
+        pushActionLog(data.message || `Manual SHORT filled on ${pair}.`);
         debugLog(data.message || 'Manual SHORT executed.');
       }
     } catch (err) {
       console.error('Manual SHORT failed:', err);
+      pushActionLog('Manual SHORT failed (network).');
+      window.alert(err?.message || 'Manual SHORT failed (network).');
     }
   }
 
@@ -599,7 +607,7 @@ export default function App() {
         username={username}
       />
 
-      <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden flex flex-col p-2 lg:p-4 gap-3">
+      <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden flex flex-col p-2 lg:p-4 gap-3 pb-4">
         <ChartPanel
           pairSelector={pairSelector}
           chartContainerRef={chartContainerRef}
@@ -663,6 +671,8 @@ export default function App() {
         botLoading={botLoading}
         sessionEngineEnabled={sessionEngineEnabled}
         sessionLoading={sessionLoading}
+        connectivityFrozen={Boolean(portfolio.connectivityFrozen)}
+        freezeReason={portfolio.freezeReason}
         uptime={uptime}
         lastUpdated={readouts.lastUpdated}
         onClick={handleControlClick}

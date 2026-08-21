@@ -200,18 +200,30 @@ async def _call_ai_api(messages: List[dict], settings) -> Optional[str]:
             )
         if resp.status_code != 200:
             print(f"[AI-BRAIN] Provider '{provider}' HTTP {resp.status_code} — brain.py fallback.")
+            _notify_ai_health(False)
             return None
         raw = resp.json()["choices"][0]["message"]["content"].strip().upper()
         # Extract the decision word robustly
         for word in ("BUY", "SELL", "HOLD"):
             if word in raw:
                 print(f"[AI-BRAIN] '{provider}' → {word}  (raw: {raw!r})")
+                _notify_ai_health(True)
                 return word
         print(f"[AI-BRAIN] '{provider}' unexpected reply {raw!r} — brain.py fallback.")
+        _notify_ai_health(False)
         return None
     except Exception as exc:
         print(f"[AI-BRAIN] API error ({exc}) — brain.py fallback.")
+        _notify_ai_health(False)
         return None
+
+
+def _notify_ai_health(ok: bool) -> None:
+    try:
+        from main import agent as _agent
+        _agent.note_ai_result(ok)
+    except Exception:
+        pass
 
 
 # ─── flatten brain result → backend dict ─────────────────────────────────────
