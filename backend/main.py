@@ -2605,6 +2605,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return False
 
     interval_ms = _timeframe_interval_ms(timeframe_key)
+    # Multi-pair scan + AI consult can take longer than one candle. Keep the
+    # queued signal alive for the fire candle plus at least 45s of grace.
+    fire_grace_ms = max(interval_ms, 45_000)
 
     async def _skip_pending(pending: dict, reason: str, *, fire_candle_ms: int | None = None) -> bool:
         detect = pending.get("detect") or {}
@@ -2767,8 +2770,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     if pending and pending.get("timeframe_key") == timeframe_key:
         fire_candle_ms = int(pending["fire_candle_time"])
         now_ms = int(time.time() * 1000)
-        # Expire if we missed the fire window by more than one full candle.
-        if now_ms > fire_candle_ms + interval_ms:
+        deadline_ms = fire_candle_ms + interval_ms + fire_grace_ms
+        # Expire only after fire candle + grace (scan/AI lag must not kill the entry).
+        if now_ms > deadline_ms:
             await _skip_pending(pending, "Next-candle fire window expired", fire_candle_ms=fire_candle_ms)
         elif now_ms >= fire_candle_ms:
             _push_pattern_neon(
@@ -2899,36 +2903,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     if existing and int(existing.get("signal_candle_time") or 0) == close_time:
         return False
 
-    # AI consult for observability (does not block queue / fire).
-    ai_decision = None
-    try:
-        ai_decision = await consult_ai_provider(
-            {
-                "pair": pair,
-                "timeframe": timeframe_key,
-                "action": detect.get("action"),
-                "reason": detect.get("reason"),
-                "confidence": detect.get("confidence"),
-                "current_price": history[-1].get("close"),
-                "candle_volume": history[-1].get("volume"),
-                "prev_candle_volume": history[-2].get("volume") if len(history) >= 2 else None,
-                "candle_height": history[-1].get("high", 0) - history[-1].get("low", 0),
-                "prev_candle_height": (
-                    history[-2].get("high", 0) - history[-2].get("low", 0)
-                    if len(history) >= 2
-                    else None
-                ),
-            }
-        )
-    except Exception as exc:
-        print(f"[AI AGENT] consult_ai_provider error on {pair}: {exc}")
-
-    ai_note = "YES" if ai_decision is True else "NO" if ai_decision is False else "SKIP"
+    # Queue FIRST so multi-pair / AI lag does not burn the fire window.
     detect = dict(detect)
-    detect["ai_confirmation"] = ai_note
-    if ai_note != "SKIP":
-        detect["reason"] = f"{detect.get('reason', '')} | AI={ai_note}"
-
     PENDING_ENTRY_SIGNALS[pair] = {
         "detect": detect,
         "side": side,
@@ -2970,6 +2946,56 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         f"[BRAIN] DETECTED {side} {pair} pattern={detect.get('pattern')} "
         f"on closed@{close_time} → queue fire@{fire_candle_ms}"
     )
+
+    # AI consult for observability (does not block queue / fire).
+    ai_decision = None
+    try:
+        ai_decision = await consult_ai_provider(
+            {
+                "pair": pair,
+                "timeframe": timeframe_key,
+                "action": detect.get("action"),
+                "reason": detect.get("reason"),
+                "confidence": detect.get("confidence"),
+                "current_price": history[-1].get("close"),
+                "candle_volume": history[-1].get("volume"),
+                "prev_candle_volume": history[-2].get("volume") if len(history) >= 2 else None,
+                "candle_height": history[-1].get("high", 0) - history[-1].get("low", 0),
+                "prev_candle_height": (
+                    history[-2].get("high", 0) - history[-2].get("low", 0)
+                    if len(history) >= 2
+                    else None
+                ),
+            }
+        )
+    except Exception as exc:
+        print(f"[AI AGENT] consult_ai_provider error on {pair}: {exc}")
+
+    ai_note = "YES" if ai_decision is True else "NO" if ai_decision is False else "SKIP"
+    detect["ai_confirmation"] = ai_note
+    if ai_note != "SKIP":
+        detect["reason"] = f"{detect.get('reason', '')} | AI={ai_note}"
+    if pair in PENDING_ENTRY_SIGNALS:
+        PENDING_ENTRY_SIGNALS[pair]["detect"] = detect
+
+    # If next candle already opened while we scanned/AI'd, fire now.
+    now_ms = int(time.time() * 1000)
+    pending = PENDING_ENTRY_SIGNALS.get(pair)
+    if pending and now_ms >= fire_candle_ms:
+        deadline_ms = fire_candle_ms + interval_ms + fire_grace_ms
+        if now_ms > deadline_ms:
+            await _skip_pending(pending, "Next-candle fire window expired", fire_candle_ms=fire_candle_ms)
+            return False
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=fire_candle_ms,
+            stage="confirming",
+            side=pending.get("side"),
+            action=(pending.get("detect") or {}).get("action"),
+            pattern=(pending.get("detect") or {}).get("pattern"),
+            reason="Next candle already open → firing",
+        )
+        return await _execute_queued_fire(pending)
     return False
 
 
@@ -2983,7 +3009,11 @@ async def auto_buy_loop():
                 timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
                 poll = 0.5 if timeframe_key in ("1m", "30s") else 1.0
                 if agent.is_active and not agent.emergency_triggered:
-                    for pair in agent.get_scan_pairs():
+                    pairs = list(agent.get_scan_pairs())
+                    # Pending fires first so multi-pair/AI lag cannot expire the window.
+                    pending_first = [p for p in pairs if p in PENDING_ENTRY_SIGNALS]
+                    rest = [p for p in pairs if p not in PENDING_ENTRY_SIGNALS]
+                    for pair in pending_first + rest:
                         try:
                             await scan_and_maybe_fire_pair(client, pair, timeframe_key)
                         except Exception as exc:
