@@ -32,7 +32,6 @@ from session_schedule import schedule_store
 from engine_runtime import (
     save_runtime,
     restore_runtime,
-    AI_FAIL_FREEZE_STREAK,
     FEED_STALE_SECONDS,
 )
 import trade_db
@@ -366,7 +365,7 @@ async def consult_ai_provider(context):
     messages.append({"role": "user", "content": prompt})
 
     try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
+        async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.post(
                 f"{base_url}/chat/completions",
                 headers=headers,
@@ -720,6 +719,7 @@ class AITradingAgent:
         self.connectivity_frozen = False
         self.freeze_reason: str | None = None
         self._ai_fail_streak = 0
+        self._ai_skip_until = 0.0
         self._last_feed_ts = time.time()
         self._last_runtime_save = 0.0
         self.session_stats_snapshot: dict = {
@@ -2325,19 +2325,33 @@ class AITradingAgent:
             self.unfreeze_connectivity("Market feed restored")
 
     def note_ai_result(self, ok: bool) -> None:
-        """Track AI provider health. Repeated failures freeze new fires; success unfreezes."""
+        """AI health only — never freeze entries. Brain/OF keep firing when AI is down.
+
+        Legacy `ai_provider_down` freezes (from older builds) are cleared on any result.
+        """
+        if self.connectivity_frozen and self.freeze_reason == "ai_provider_down":
+            self.unfreeze_connectivity("AI outage no longer blocks entries (brain/OF continue)")
         if ok:
             self._ai_fail_streak = 0
-            if self.connectivity_frozen and self.freeze_reason == "ai_provider_down":
-                self.unfreeze_connectivity("AI provider restored")
+            self._ai_skip_until = 0.0
             return
         self._ai_fail_streak = int(self._ai_fail_streak or 0) + 1
-        if self.is_active and self._ai_fail_streak >= AI_FAIL_FREEZE_STREAK:
-            self.freeze_connectivity("ai_provider_down")
+        # Brief cool-down so flaky AI does not stall the multi-pair scan loop.
+        if self._ai_fail_streak >= 2:
+            self._ai_skip_until = time.time() + 90.0
+
+    def ai_consult_allowed(self) -> bool:
+        """False during AI cool-down after consecutive provider failures."""
+        until = float(getattr(self, "_ai_skip_until", 0) or 0)
+        return time.time() >= until
 
     def refresh_feed_health(self) -> None:
-        """Freeze new entries if market ticks go stale (backend/network outage)."""
+        """Freeze new entries only if market ticks go stale (true feed outage)."""
         if not self.is_active:
+            return
+        # Clear obsolete AI freezes left from older runtime files / builds.
+        if self.connectivity_frozen and self.freeze_reason == "ai_provider_down":
+            self.unfreeze_connectivity("Cleared legacy AI freeze — entries resume")
             return
         age = time.time() - float(self._last_feed_ts or 0)
         if age >= FEED_STALE_SECONDS:
@@ -3188,38 +3202,46 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         f"on closed@{close_time} → queue fire@{fire_candle_ms}"
     )
 
-    # AI consult for observability (does not block queue / fire).
-    ai_decision = None
-    try:
-        ai_decision = await consult_ai_provider(
-            {
-                "pair": pair,
-                "timeframe": timeframe_key,
-                "action": detect.get("action"),
-                "reason": detect.get("reason"),
-                "confidence": detect.get("confidence"),
-                "current_price": history[-1].get("close"),
-                "candle_volume": history[-1].get("volume"),
-                "prev_candle_volume": history[-2].get("volume") if len(history) >= 2 else None,
-                "candle_height": history[-1].get("high", 0) - history[-1].get("low", 0),
-                "prev_candle_height": (
-                    history[-2].get("high", 0) - history[-2].get("low", 0)
-                    if len(history) >= 2
-                    else None
-                ),
-            }
-        )
-    except Exception as exc:
-        print(f"[AI AGENT] consult_ai_provider error on {pair}: {exc}")
+    # AI consult in background — never block queue/fire (timeouts were stalling 16-pair scans).
+    if agent.ai_consult_allowed():
+        ctx = {
+            "pair": pair,
+            "timeframe": timeframe_key,
+            "action": detect.get("action"),
+            "reason": detect.get("reason"),
+            "confidence": detect.get("confidence"),
+            "current_price": history[-1].get("close"),
+            "candle_volume": history[-1].get("volume"),
+            "prev_candle_volume": history[-2].get("volume") if len(history) >= 2 else None,
+            "candle_height": history[-1].get("high", 0) - history[-1].get("low", 0),
+            "prev_candle_height": (
+                history[-2].get("high", 0) - history[-2].get("low", 0)
+                if len(history) >= 2
+                else None
+            ),
+        }
 
-    ai_note = "YES" if ai_decision is True else "NO" if ai_decision is False else "SKIP"
-    detect["ai_confirmation"] = ai_note
-    if ai_note != "SKIP":
-        detect["reason"] = f"{detect.get('reason', '')} | AI={ai_note}"
-    if pair in PENDING_ENTRY_SIGNALS:
-        PENDING_ENTRY_SIGNALS[pair]["detect"] = detect
+        async def _bg_ai_note(_pair: str = pair, _ctx: dict = ctx) -> None:
+            try:
+                ai_decision = await consult_ai_provider(_ctx)
+                ai_note = "YES" if ai_decision is True else "NO" if ai_decision is False else "SKIP"
+                pending_now = PENDING_ENTRY_SIGNALS.get(_pair)
+                if pending_now and isinstance(pending_now.get("detect"), dict):
+                    pending_now["detect"]["ai_confirmation"] = ai_note
+                    if ai_note != "SKIP":
+                        base = pending_now["detect"].get("reason") or ""
+                        if f"AI={ai_note}" not in base:
+                            pending_now["detect"]["reason"] = f"{base} | AI={ai_note}".strip(" |")
+            except Exception as exc:
+                print(f"[AI AGENT] bg consult error on {_pair}: {exc}")
 
-    # If next candle already opened while we scanned/AI'd, fire now.
+        asyncio.create_task(_bg_ai_note())
+    else:
+        detect["ai_confirmation"] = "SKIP"
+        if pair in PENDING_ENTRY_SIGNALS:
+            PENDING_ENTRY_SIGNALS[pair]["detect"] = detect
+
+    # If next candle already opened while we scanned, fire now.
     now_ms = int(time.time() * 1000)
     pending = PENDING_ENTRY_SIGNALS.get(pair)
     if pending and now_ms >= fire_candle_ms:
@@ -3251,20 +3273,13 @@ async def auto_buy_loop():
                 poll = 0.5  # same fast scan cadence as 1m on every TF
                 if agent.is_active and not agent.emergency_triggered:
                     agent.refresh_feed_health()
+                    # Feed-stale freeze: pause NEW detects only; keep managing open + pending fires.
+                    frozen = bool(agent.connectivity_frozen)
                     pairs = list(agent.get_scan_pairs())
-                    # Pending fires first so multi-pair/AI lag cannot expire the window.
                     pending_first = [p for p in pairs if p in PENDING_ENTRY_SIGNALS]
-                    rest = [p for p in pairs if p not in PENDING_ENTRY_SIGNALS]
+                    rest = [] if frozen else [p for p in pairs if p not in PENDING_ENTRY_SIGNALS]
                     for pair in pending_first + rest:
                         try:
-                            # Frozen: still allow pending fires already queued? User said freeze
-                            # new trades — skip both detect+queue and new fires when frozen.
-                            if agent.connectivity_frozen and pair not in PENDING_ENTRY_SIGNALS:
-                                continue
-                            if agent.connectivity_frozen and pair in PENDING_ENTRY_SIGNALS:
-                                # Drop pending so we don't fire during outage; re-detect after unfreeze
-                                PENDING_ENTRY_SIGNALS.pop(pair, None)
-                                continue
                             await scan_and_maybe_fire_pair(client, pair, timeframe_key)
                         except Exception as exc:
                             print(f"[SCAN] error {pair}: {exc}")
