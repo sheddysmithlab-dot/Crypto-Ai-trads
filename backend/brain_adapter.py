@@ -76,28 +76,53 @@ def _run_brain(candles: List[dict], tf: str,
 
 # ─── AI confirm-only (YES/NO) — does not invent BUY/SELL ─────────────────────
 _CONFIRM_SYSTEM = (
-    "You confirm trading setups only. Reply with exactly one word: YES or NO. "
-    "No other text."
+    "You are the confirmation layer for a crypto trading agent. "
+    "LONG/SHORT is already decided by brain patterns + order-flow traps — never invent BUY/SELL. "
+    "Judge the brief using agent candle-read policies: market structure alignment, pattern quality, "
+    "trap validity, order-flow confidence vs TF floor, and R:R. "
+    "Reply with exactly one word: YES or NO. No other text."
 )
 
 
-def _confirm_prompt(
-    *,
-    pair: str,
-    timeframe: str,
-    side: str,
-    pattern: str,
-    trap_score,
-) -> str:
-    score_txt = "—" if trap_score is None else f"{trap_score}"
-    return (
-        f"Confirm this {side} {pattern or 'setup'} / trap score {score_txt}? "
-        f"Pair {pair} {timeframe}. Reply YES or NO only."
-    )
+def _matching_side_score(of_trap: Optional[dict], action: str) -> float:
+    of_trap = of_trap or {}
+    if action == "BUY":
+        return float(of_trap.get("long_score") or 0)
+    if action == "SELL":
+        return float(of_trap.get("short_score") or 0)
+    return max(float(of_trap.get("long_score") or 0), float(of_trap.get("short_score") or 0))
+
+
+def _setup_meets_ai_confirm_threshold(
+    action: str,
+    of_trap: Optional[dict],
+    timeframe_key: str,
+    think: dict,
+) -> bool:
+    """AI is called only when agent confidence / OF score clears the TF floor."""
+    if action not in ("BUY", "SELL"):
+        return False
+    tf = _norm_tf(timeframe_key)
+    thr = thr_score_for_tf(tf)
+    of_score = _matching_side_score(of_trap, action)
+    if of_score >= thr:
+        return True
+    # 1m: OF floor is mandatory — never call AI below it
+    if tf == "1m":
+        return False
+    sig = think.get("signal")
+    tf_cfg = _b.TIMEFRAMES.get(tf, _b.TIMEFRAMES["1h"])
+    if sig is not None:
+        try:
+            if float(getattr(sig, "score", 0) or 0) >= float(tf_cfg.min_score):
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
 
 
 def _setup_label_and_score(think: dict, of_trap: Optional[dict], action: str) -> tuple:
-    """Pattern name + trap score for the short confirm prompt."""
+    """Pattern name + trap/OF score for logs and prompts."""
     of_trap = of_trap or {}
     sig = think.get("signal")
     trap = think.get("trap")
@@ -106,12 +131,7 @@ def _setup_label_and_score(think: dict, of_trap: Optional[dict], action: str) ->
     score = None
     if of_trap and of_signal in ("LONG", "SHORT"):
         pattern = of_trap.get("pattern") or "orderflow_trap"
-        if action == "BUY":
-            score = of_trap.get("long_score")
-        elif action == "SELL":
-            score = of_trap.get("short_score")
-        else:
-            score = of_trap.get("long_score") or of_trap.get("short_score")
+        score = _matching_side_score(of_trap, action)
     elif trap is not None:
         pattern = getattr(trap, "trap_type", None) or "structure_trap"
         score = getattr(trap, "score", None)
@@ -119,6 +139,80 @@ def _setup_label_and_score(think: dict, of_trap: Optional[dict], action: str) ->
         pattern = (sig.patterns[0] if sig.patterns else None) or sig.strategy
         score = getattr(sig, "score", None) or getattr(sig, "confidence", None)
     return (str(pattern or "setup"), score)
+
+
+def _build_confirm_user_prompt(
+    *,
+    pair: str,
+    timeframe: str,
+    action: str,
+    think: dict,
+    of_trap: Optional[dict],
+) -> str:
+    """Compact policy + setup facts; answer must still be YES/NO only."""
+    side = "LONG" if action == "BUY" else "SHORT"
+    tf = _norm_tf(timeframe)
+    thr = thr_score_for_tf(tf)
+    tf_cfg = _b.TIMEFRAMES.get(tf, _b.TIMEFRAMES["1h"])
+    pattern, trap_score = _setup_label_and_score(think, of_trap, action)
+    ms = think.get("structure")
+    sig = think.get("signal")
+    trap = think.get("trap")
+    stance = think.get("stance")
+    of_trap = of_trap or {}
+
+    lines = [
+        f"Confirm this {side} {pattern} / trap score {trap_score if trap_score is not None else '—'}?",
+        f"Pair={pair} TF={timeframe} ({tf_cfg.label}). Reply YES or NO only.",
+        "",
+        "POLICY:",
+        f"- Unified candle rulebook (same as 1m): min confluence {tf_cfg.min_score}, min R:R {tf_cfg.min_rr}.",
+        f"- OF confidence floor this TF: {thr:.0f}% (1m=75 strict).",
+        f"- Direction already set by brain+OF as {side}; you only confirm or reject.",
+        f"- Note: {tf_cfg.note}",
+        "",
+        "SETUP FACTS:",
+    ]
+    if ms is not None:
+        lines.append(
+            f"- Structure: {getattr(ms, 'trend', '?')} strength={getattr(ms, 'trend_strength', '?')}"
+        )
+    if sig is not None:
+        pats = ", ".join(sig.patterns[:4]) if getattr(sig, "patterns", None) else sig.strategy
+        lines.append(
+            f"- Pattern: {pats} score={getattr(sig, 'score', '?')} "
+            f"conf={getattr(sig, 'confidence', '?')} R:R={getattr(sig, 'rr', '?')}"
+        )
+        if getattr(sig, "entry", None) is not None:
+            lines.append(
+                f"- Levels: entry={sig.entry} stop={getattr(sig, 'stop', '?')} "
+                f"target={getattr(sig, 'target', '?')}"
+            )
+    if trap is not None:
+        lines.append(
+            f"- Structure trap: {getattr(trap, 'trap_type', '?')} "
+            f"smart={getattr(trap, 'smart_action', '?')} side={getattr(trap, 'side', '?')}"
+        )
+    if of_trap:
+        lines.append(
+            f"- Order-flow: {of_trap.get('final_signal') or of_trap.get('line')} "
+            f"pattern={of_trap.get('pattern')} bias_5m={of_trap.get('bias_5m')} "
+            f"LONG={of_trap.get('long_score')} SHORT={of_trap.get('short_score')} "
+            f"side_score={_matching_side_score(of_trap, action):.1f} (need ≥{thr:.0f})"
+        )
+        if of_trap.get("primary_reason"):
+            lines.append(f"- OF reason: {str(of_trap.get('primary_reason'))[:180]}")
+    if stance is not None:
+        lines.append(
+            f"- Smart stance: {getattr(stance, 'action', '?')} "
+            f"source={getattr(stance, 'source', '?')}"
+        )
+    brain_v = think.get("verdict")
+    if brain_v:
+        lines.append(f"- Brain verdict: {brain_v}")
+    lines.append("")
+    lines.append("Output exactly: YES or NO")
+    return "\n".join(lines)[:3500]
 
 
 async def _confirm_setup_with_ai(
@@ -130,7 +224,7 @@ async def _confirm_setup_with_ai(
     think: dict,
     of_trap: Optional[dict],
 ) -> Optional[bool]:
-    """Ask AI to confirm an existing BUY/SELL setup.
+    """Ask AI to confirm an existing BUY/SELL setup (policy-aware brief).
 
     Returns:
       True  — YES
@@ -150,18 +244,16 @@ async def _confirm_setup_with_ai(
     except Exception:
         pass
 
-    side = "LONG" if action == "BUY" else "SHORT"
-    pattern, trap_score = _setup_label_and_score(think, of_trap, action)
     messages = [
         {"role": "system", "content": _CONFIRM_SYSTEM},
         {
             "role": "user",
-            "content": _confirm_prompt(
+            "content": _build_confirm_user_prompt(
                 pair=pair,
                 timeframe=timeframe,
-                side=side,
-                pattern=pattern,
-                trap_score=trap_score,
+                action=action,
+                think=think,
+                of_trap=of_trap,
             ),
         },
     ]
@@ -187,7 +279,7 @@ async def _confirm_setup_with_ai(
         headers["Authorization"] = f"Bearer {api_key}"
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.post(
                 f"{base_url}/chat/completions",
                 headers=headers,
@@ -504,38 +596,48 @@ async def evaluate_live_entry_async(
 
     ai_confirmation = "SKIP"
     if setup_action in ("BUY", "SELL") and settings is not None:
-        confirmed = await _confirm_setup_with_ai(
-            settings,
-            pair=pair,
-            timeframe=timeframe_key,
-            action=setup_action,
-            think=think,
-            of_trap=of_trap,
-        )
-        if confirmed is False:
-            side = "LONG" if setup_action == "BUY" else "SHORT"
-            pattern, score = _setup_label_and_score(think, of_trap, setup_action)
-            rejected = _flatten(
-                think,
-                ai_action="HOLD",
+        # AI only on candles that already clear agent confidence / OF TF floor.
+        if not _setup_meets_ai_confirm_threshold(setup_action, of_trap, timeframe_key, think):
+            thr = thr_score_for_tf(tf)
+            side_sc = _matching_side_score(of_trap, setup_action)
+            print(
+                f"[AI-CONFIRM] Skip call {pair} {timeframe_key}: "
+                f"score {side_sc:.1f} < floor {thr:.0f} — no AI, HOLD"
+            )
+            setup_action = "HOLD"
+        else:
+            confirmed = await _confirm_setup_with_ai(
+                settings,
                 pair=pair,
-                timeframe_key=timeframe_key,
-                risk_pct_pct=risk_pct_pct,
-                equity=float(account_balance),
+                timeframe=timeframe_key,
+                action=setup_action,
+                think=think,
                 of_trap=of_trap,
             )
-            rejected["action"] = "NO_TRADE"
-            rejected["ai_confirmation"] = "NO"
-            rejected["ai_driven"] = False
-            rejected["reason"] = (
-                f"AI rejected confirm ({side} {pattern} / trap score {score}) | "
-                f"{rejected.get('reason') or ''}"
-            ).strip(" |")
-            return rejected
-        if confirmed is True:
-            ai_confirmation = "YES"
-        else:
-            ai_confirmation = "SKIP"  # unreachable → fail-open
+            if confirmed is False:
+                side = "LONG" if setup_action == "BUY" else "SHORT"
+                pattern, score = _setup_label_and_score(think, of_trap, setup_action)
+                rejected = _flatten(
+                    think,
+                    ai_action="HOLD",
+                    pair=pair,
+                    timeframe_key=timeframe_key,
+                    risk_pct_pct=risk_pct_pct,
+                    equity=float(account_balance),
+                    of_trap=of_trap,
+                )
+                rejected["action"] = "NO_TRADE"
+                rejected["ai_confirmation"] = "NO"
+                rejected["ai_driven"] = False
+                rejected["reason"] = (
+                    f"AI rejected confirm ({side} {pattern} / trap score {score}) | "
+                    f"{rejected.get('reason') or ''}"
+                ).strip(" |")
+                return rejected
+            if confirmed is True:
+                ai_confirmation = "YES"
+            else:
+                ai_confirmation = "SKIP"  # unreachable → fail-open
 
     out = _flatten(
         think,
@@ -658,8 +760,9 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
         "engine": ENGINE_NAME,
         "description": (
             "Unified 1m rulebook on every chart TF (1m→1D): brain.py patterns/structure/traps + ML; "
-            "order-flow trap engine sets BUY/SELL; AI API only confirms YES/NO (NO=skip, "
-            "unreachable=fail-open); next-candle fire; path SL/TP 0.5/0.7; "
+            "order-flow trap engine sets BUY/SELL only when OF/confidence clears TF floor; "
+            "AI gets a compact policy+setup brief and answers YES/NO only "
+            "(NO=skip, unreachable=fail-open); next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
             f"Order-flow conf floor: {thr_score_for_tf(tf)}% "
