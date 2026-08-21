@@ -371,21 +371,50 @@ def _run_orderflow_trap(
         return None
 
 
+def _gate_1m_of_score(action: str, of_trap: Optional[dict], timeframe_key: str) -> str:
+    """1m only: BUY/SELL only when matching OF side score ≥ 75. Blocks brain/AI bypass."""
+    if _norm_tf(timeframe_key) != "1m":
+        return action
+    if action not in ("BUY", "SELL"):
+        return action
+    thr = thr_score_for_tf("1m")
+    if not of_trap:
+        print(f"[AI-BRAIN] 1m gate: no OF result — HOLD (need score ≥ {thr:.0f})")
+        return "HOLD"
+    long_s = float(of_trap.get("long_score") or 0)
+    short_s = float(of_trap.get("short_score") or 0)
+    if action == "BUY":
+        if long_s < thr:
+            print(f"[AI-BRAIN] 1m gate: BUY blocked LONG={long_s:.0f} < {thr:.0f}")
+            return "HOLD"
+        return "BUY"
+    if short_s < thr:
+        print(f"[AI-BRAIN] 1m gate: SELL blocked SHORT={short_s:.0f} < {thr:.0f}")
+        return "HOLD"
+    return "SELL"
+
+
 def _fallback_action_from_brain_and_of(
     think: dict, of_trap: Optional[dict], timeframe_key: str = "1m"
 ) -> str:
     """When AI unavailable: prefer strong order-flow trap, else brain verdict."""
     thr = thr_score_for_tf(_norm_tf(timeframe_key))
+    tf = _norm_tf(timeframe_key)
     if of_trap:
         sig = of_trap.get("final_signal")
-        score = max(float(of_trap.get("long_score") or 0), float(of_trap.get("short_score") or 0))
-        if sig == "LONG" and score >= thr:
+        long_s = float(of_trap.get("long_score") or 0)
+        short_s = float(of_trap.get("short_score") or 0)
+        if sig == "LONG" and long_s >= thr:
             return "BUY"
-        if sig == "SHORT" and score >= thr:
+        if sig == "SHORT" and short_s >= thr:
             return "SELL"
+        if tf == "1m":
+            # 1m: never fall through to brain pattern if OF score is below floor
+            return "HOLD"
         if sig == "NO_TRADE":
-            # still allow brain BUY/SELL if structure trap is fresh
             pass
+    if tf == "1m":
+        return "HOLD"
     brain_verdict = think.get("verdict", "HOLD")
     return brain_verdict if brain_verdict in ("BUY", "SELL") else "HOLD"
 
@@ -465,6 +494,8 @@ async def evaluate_live_entry_async(
         ai_action = _fallback_action_from_brain_and_of(think, of_trap, timeframe_key)
         print(f"[AI-BRAIN] Using fallback verdict: {ai_action} (OF={of_trap.get('final_signal') if of_trap else None})")
 
+    ai_action = _gate_1m_of_score(ai_action or "HOLD", of_trap, timeframe_key)
+
     return _flatten(
         think,
         ai_action=ai_action,
@@ -528,6 +559,7 @@ def evaluate_live_entry(
         candles_5m=candles_5m or (candles if tf == "5m" else None),
     )
     ai_action = _fallback_action_from_brain_and_of(think, of_trap, timeframe_key)
+    ai_action = _gate_1m_of_score(ai_action or "HOLD", of_trap, timeframe_key)
     return _flatten(
         think,
         ai_action=ai_action,
@@ -577,7 +609,8 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
             "order-flow trap engine; AI API final BUY/SELL/HOLD; next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
-            f"Order-flow conf floor: {thr_score_for_tf(tf)}% (1m=75, else 65). "
+            f"Order-flow conf floor: {thr_score_for_tf(tf)}% "
+            f"(1m=75 strict, no pattern bypass; else 65). "
             f"{tf_cfg.note}"
         ),
         "timeframes": list(_b.TIMEFRAMES.keys()),

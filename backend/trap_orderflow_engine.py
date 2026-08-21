@@ -594,21 +594,21 @@ def evaluate_trap_orderflow(
         else:
             short_score += 8
 
-    # NO TRADE only for three conditions
+    # NO TRADE gates
     thr = thr_score_for_tf(exec_tf)
+    strict_1m = (exec_tf or "").strip().lower() == "1m"
     bal_pressure = abs(m1["buyer_ratio"] - 0.50) < THR_BALANCED
     bal_volume = abs(m1["buy_ratio"] - 0.50) < THR_BALANCED
     max_score = max(long_score, short_score)
     low_conf = max_score < thr
 
-    # Execution gates for 1M
+    # Named-pattern ok flags (5m+ may bypass low conf; 1m never does)
     long_ok_pattern = setup_1 and setup_1["side"] == "LONG" and setup_1["name"] in (
         "SELL_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP",
     )
     short_ok_pattern = setup_1 and setup_1["side"] == "SHORT" and setup_1["name"] in (
         "BUY_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP",
     )
-    # 5M can override weaker 1M
     if setup_5 and setup_5["priority"] <= 2:
         if setup_5["side"] == "LONG":
             long_ok_pattern = True
@@ -620,13 +620,40 @@ def evaluate_trap_orderflow(
         reason = "Buyer/Seller pressure and Buy/Sell volume both balanced"
         pattern = "BALANCED"
         conf = 0.0
+    elif strict_1m and low_conf:
+        # 1m only: score ≥ thr required — pattern / 5m / RAW bypass off
+        signal = "NO_TRADE"
+        reason = f"1m strict: score {max_score:.0f} < {thr:.0f} (pattern bypass off)"
+        pattern = setup_1["name"] if setup_1 else (setup_5["name"] if setup_5 else "NONE")
+        conf = max_score / 100.0
     elif low_conf and not (long_ok_pattern or short_ok_pattern):
         signal = "NO_TRADE"
         reason = f"Low confidence (max score {max_score:.0f} < {thr:.0f})"
         pattern = setup_1["name"] if setup_1 else (setup_5["name"] if setup_5 else "NONE")
         conf = max_score / 100.0
+    elif strict_1m:
+        # 1m: only emit side when that side's score clears thr (no RAW force)
+        if long_score >= thr and long_score >= short_score:
+            signal = "LONG"
+            pattern = (setup_1 or setup_5 or {}).get("name", "IMBALANCE")
+            reason = (setup_1 or setup_5 or {}).get(
+                "reason", f"1m LONG score {long_score:.0f} ≥ {thr:.0f}"
+            )
+            conf = min(1.0, long_score / 100.0)
+        elif short_score >= thr and short_score > long_score:
+            signal = "SHORT"
+            pattern = (setup_1 or setup_5 or {}).get("name", "IMBALANCE")
+            reason = (setup_1 or setup_5 or {}).get(
+                "reason", f"1m SHORT score {short_score:.0f} ≥ {thr:.0f}"
+            )
+            conf = min(1.0, short_score / 100.0)
+        else:
+            signal = "NO_TRADE"
+            reason = f"1m strict: neither side ≥ {thr:.0f} (L={long_score:.0f} S={short_score:.0f})"
+            pattern = setup_1["name"] if setup_1 else (setup_5["name"] if setup_5 else "NONE")
+            conf = max_score / 100.0
     else:
-        # Must pick LONG or SHORT when NO TRADE gates not met
+        # Higher TFs: keep prior pattern / force behavior
         prefer_long = long_score >= short_score
         if prefer_long and (long_ok_pattern or long_score >= thr or setup_5):
             signal = "LONG"
@@ -691,10 +718,12 @@ def merge_with_structure_trap(
 
     # If OF is NO_TRADE only due to low conf but structure agrees with a side, lift it
     thr = thr_score_for_tf(of_result.timeframe)
+    strict_1m = (of_result.timeframe or "").strip().lower() == "1m"
+    lift_floor = thr if strict_1m else (thr - 5)
     signal = of_result.final_signal
     reason = of_result.primary_reason
     pattern = of_result.pattern
-    if of_result.final_signal == "NO_TRADE" and max(long_s, short_s) >= thr - 5:
+    if of_result.final_signal == "NO_TRADE" and max(long_s, short_s) >= lift_floor:
         signal = "LONG" if long_s >= short_s else "SHORT"
         pattern = f"STRUCTURE_{structure_trap_type or 'TRAP'}+OF"
         reason = f"Structure trap {structure_trap_type} aligned with order-flow scores"
