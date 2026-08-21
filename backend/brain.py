@@ -1691,21 +1691,33 @@ class TimeframeConfig:
 
 
 TIMEFRAMES = {
-    "1m": TimeframeConfig("1m", "1-Minute", min_score=6.0, min_rr=2.0,
-                          require_higher_tf=True, noise_guard=True,
-                          note="Highest noise. Require strong confluence + top-down alignment."),
-    "5m": TimeframeConfig("5m", "5-Minute", min_score=5.0, min_rr=2.0,
-                          require_higher_tf=True, noise_guard=True,
-                          note="High noise. Trade only with the higher-timeframe trend."),
-    "15m": TimeframeConfig("15m", "15-Minute", min_score=4.0, min_rr=2.0,
-                           require_higher_tf=True, noise_guard=True,
-                           note="Moderate noise. Favor setups aligned with 1H structure."),
-    "1h": TimeframeConfig("1h", "1-Hour", min_score=3.0, min_rr=2.0,
-                          require_higher_tf=False, noise_guard=False,
-                          note="Primary price-action timeframe (per the Bible)."),
-    "1d": TimeframeConfig("1d", "1-Day", min_score=3.0, min_rr=2.0,
-                          require_higher_tf=False, noise_guard=False,
-                          note="Cleanest signals; highest reliability. Use weekly top-down."),
+    # Unified rulebook: every chart TF (5m → 1d) uses the same trading thresholds as 1m.
+    # Labels stay TF-specific; confluence / R:R / HTF / noise guards do not loosen on higher TFs.
+    "1m": TimeframeConfig(
+        "1m", "1-Minute", min_score=6.0, min_rr=2.0,
+        require_higher_tf=True, noise_guard=True,
+        note="Reference scalp rulebook. Strong confluence + HTF alignment required.",
+    ),
+    "5m": TimeframeConfig(
+        "5m", "5-Minute", min_score=6.0, min_rr=2.0,
+        require_higher_tf=True, noise_guard=True,
+        note="Same trading rules as 1m (confluence + HTF + noise guard).",
+    ),
+    "15m": TimeframeConfig(
+        "15m", "15-Minute", min_score=6.0, min_rr=2.0,
+        require_higher_tf=True, noise_guard=True,
+        note="Same trading rules as 1m (confluence + HTF + noise guard).",
+    ),
+    "1h": TimeframeConfig(
+        "1h", "1-Hour", min_score=6.0, min_rr=2.0,
+        require_higher_tf=True, noise_guard=True,
+        note="Same trading rules as 1m (confluence + HTF + noise guard).",
+    ),
+    "1d": TimeframeConfig(
+        "1d", "1-Day", min_score=6.0, min_rr=2.0,
+        require_higher_tf=False, noise_guard=True,
+        note="Same 1m confluence/R:R/noise rules; HTF optional (no weekly series wired).",
+    ),
 }
 
 

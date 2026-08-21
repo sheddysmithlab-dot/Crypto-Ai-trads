@@ -69,9 +69,9 @@ export default function ChartPanel({
             <div
               className="flex items-center gap-1.5 px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-[10px] font-bold uppercase tracking-wide text-cyan-300"
               title={
-                timeframe === '1M' || timeframe === '5M'
-                  ? '1m/5m brain — 5M direction, 1M timing, multi-confirm'
-                  : 'Bible engine — traps + 10 patterns (15m+)'
+                timeframe === '1M' || timeframe === '5M' || timeframe === '15M' || timeframe === '1H' || timeframe === '1D'
+                  ? 'Unified 1m rulebook on all TFs — brain + order-flow + path 0.5/0.7 + flip-exit'
+                  : 'Unified candle brain engine'
               }
             >
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />

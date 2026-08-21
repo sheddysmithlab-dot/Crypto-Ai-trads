@@ -2139,7 +2139,26 @@ class AITradingAgent:
             and t.get("pair") == pair
             and t.get("signal_candle_time") is not None
         ]
+        for row in self.trade_history:
+            if (
+                row.get("source") == "auto"
+                and row.get("pair") == pair
+                and row.get("signal_candle_time") is not None
+            ):
+                times.append(int(row["signal_candle_time"]))
         return max(times) if times else None
+
+    def one_m_earliest_next_fire_ms(self, pair: str, interval_ms: int) -> int | None:
+        """1m-only: after a fire on candle N, next fire earliest at candle N+3.
+
+        Example: trade on candle 1 → no fire on 2 or 3; detect may land on 3 → fire on 4.
+        """
+        last = LAST_AUTO_FIRE_CANDLE_MS.get(pair)
+        hist = self.last_auto_entry_candle_time(pair)
+        candidates = [int(x) for x in (last, hist) if x is not None]
+        if not candidates:
+            return None
+        return max(candidates) + (ONE_M_MIN_BARS_BETWEEN_FIRES * int(interval_ms))
 
     def execute_sell(self, reason):
         """Strategy wiped — trailing profit-book batch sell disabled."""
@@ -2397,6 +2416,9 @@ LAST_CANDLE_TIMESTAMPS = {}
 
 # Detect on last closed candle → queue → fire at the NEXT candle's open (not on detect bar).
 PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
+# 1m only: last auto fire candle open-time per pair (blocks fires on next 2 candles).
+LAST_AUTO_FIRE_CANDLE_MS: dict[str, int] = {}
+ONE_M_MIN_BARS_BETWEEN_FIRES = 3  # fire on N → next fire earliest N+3 (detect on N+2 OK)
 PATTERN_NEON_STAGES: list[dict] = []
 THREE_CANDLE_ENTRY = False
 
@@ -2471,6 +2493,7 @@ def _push_pattern_neon(
 
 def _clear_entry_pipeline() -> None:
     PENDING_ENTRY_SIGNALS.clear()
+    LAST_AUTO_FIRE_CANDLE_MS.clear()
 
 
 def get_pattern_neon_snapshot(pair: str | None = None) -> list[dict]:
@@ -2718,6 +2741,18 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         fire_candle_ms = int(pending["fire_candle_time"])
         candle_close = float(pending.get("detect_close") or detect.get("entry") or 0)
 
+        # 1m only: no fire on candle 2/3 after a fire on candle 1 (next earliest = candle 4).
+        tf_l = (timeframe_key or "").strip().lower()
+        if tf_l == "1m":
+            earliest = agent.one_m_earliest_next_fire_ms(pair, interval_ms)
+            if earliest is not None and fire_candle_ms < earliest:
+                return await _skip_pending(
+                    pending,
+                    f"1m spacing: next fire after candle gap "
+                    f"(earliest fire@{earliest}, attempted@{fire_candle_ms})",
+                    fire_candle_ms=fire_candle_ms,
+                )
+
         # Flip-exit training: SHORT fire → close open LONGs on this pair (and vice versa)
         # before capacity checks / new entry, so we do not ride the reverse into loss.
         agent.close_opposite_positions_for_flip(
@@ -2798,6 +2833,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             )
 
         PENDING_ENTRY_SIGNALS.pop(pair, None)
+        if (timeframe_key or "").strip().lower() == "1m":
+            LAST_AUTO_FIRE_CANDLE_MS[pair] = int(fire_candle_ms)
         _push_pattern_neon(
             pair=pair,
             candle_time_ms=fire_candle_ms,
@@ -2875,9 +2912,16 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return False
     LAST_CANDLE_TIMESTAMPS[pair] = close_time
 
-    _HTF_MAP = {"1m": "5m", "5m": "15m", "15m": "1h", "1h": "1D", "30s": "5m"}
-    tf_l = timeframe_key.lower()
-    htf_key = _HTF_MAP.get(tf_l)
+    _HTF_MAP = {
+        "1m": "5m",
+        "30s": "5m",
+        "5m": "15m",
+        "15m": "1h",
+        "1h": "1D",
+    }
+    tf_l = (timeframe_key or "1m").strip().lower()
+    # 1D has no weekly HTF wired — skip (brain 1d config allows missing HTF).
+    htf_key = None if tf_l == "1d" else _HTF_MAP.get(tf_l)
     htf_candles = None
     if htf_key:
         try:
@@ -2951,6 +2995,18 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
     side = "LONG" if detect["action"] == "BUY" else "SHORT"
     fire_candle_ms = close_time + interval_ms
+
+    # 1m only: after fire on candle 1, skip queue if fire would land on candle 2 or 3.
+    # Detect on candle 3 → fire candle 4 is allowed when pattern confirms.
+    tf_l = (timeframe_key or "").strip().lower()
+    if tf_l == "1m":
+        earliest = agent.one_m_earliest_next_fire_ms(pair, interval_ms)
+        if earliest is not None and fire_candle_ms < earliest:
+            print(
+                f"[BRAIN] 1m spacing skip {pair}: detect@{close_time} would fire@{fire_candle_ms} "
+                f"< earliest@{earliest} (need {ONE_M_MIN_BARS_BETWEEN_FIRES} bars after last fire)"
+            )
+            return False
 
     # Soft capacity checks at queue time (re-checked at fire).
     if len(agent.trades) >= agent.max_concurrent_trades:
@@ -3082,7 +3138,7 @@ async def auto_buy_loop():
         while True:
             try:
                 timeframe_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
-                poll = 0.5 if timeframe_key in ("1m", "30s") else 1.0
+                poll = 0.5  # same fast scan cadence as 1m on every TF
                 if agent.is_active and not agent.emergency_triggered:
                     pairs = list(agent.get_scan_pairs())
                     # Pending fires first so multi-pair/AI lag cannot expire the window.

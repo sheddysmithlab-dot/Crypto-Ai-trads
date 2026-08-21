@@ -64,7 +64,7 @@ def _run_brain(candles: List[dict], tf: str,
     if htf_candles and len(htf_candles) >= 10:
         htf_brain = _to_candles(htf_candles)
         if htf_brain:
-            htf_tf = {"1m": "5m", "5m": "1h", "15m": "1h", "1h": "1d"}.get(tf, tf)
+            htf_tf = {"1m": "5m", "5m": "15m", "15m": "1h", "1h": "1d"}.get(tf, tf)
             if htf_tf != tf:
                 data[htf_tf] = htf_brain
 
@@ -93,7 +93,8 @@ Rules:
 - SELL if the combined evidence strongly favours a SHORT trade.
 - HOLD if the evidence is mixed, unclear, or insufficient.
 - Prefer confirmed order-flow traps (absorption / fake breakout / sell-trap→long / buy-trap→short)
-  when they align with 5M bias and scores are strong.
+  when they align with higher-TF bias and scores are strong. Rules are identical on every chart
+  timeframe from 1m through 1D (unified 1m rulebook).
 - Never assume high buyer qty alone means LONG — evaluate effort versus result.
 - Output only the word. No explanation, no punctuation, no extra lines.
 """
@@ -326,6 +327,12 @@ def _resolve_1m_5m(
     candles_1m: Optional[List[dict]],
     candles_5m: Optional[List[dict]],
 ) -> tuple:
+    """Build LTF/HTF pair for order-flow the same way as the 1m system.
+
+    1m chart  → exec=1m series, bias=5m (htf)
+    5m+ chart → exec=chart series, bias=mapped HTF (or 5m feed when provided)
+    Never loosen rules on higher TFs — only the candle series changes.
+    """
     tf = _norm_tf(timeframe_key)
     c1 = candles_1m
     c5 = candles_5m
@@ -333,12 +340,12 @@ def _resolve_1m_5m(
         c1 = c1 or candles
         c5 = c5 or htf_candles
     elif tf == "5m":
-        c5 = c5 or candles
-        c1 = c1 or None  # may be filled by caller
+        c1 = c1 or candles  # 5m bars as execution series (same role as 1m on 1m chart)
+        c5 = c5 or htf_candles or candles
     else:
-        # higher TF scan: use series as 5m-context proxy; execution = same series
-        c5 = c5 or candles
+        # 15m / 1h / 1d: chart series = execution; HTF series = bias context
         c1 = c1 or candles
+        c5 = c5 or htf_candles or candles
     return c1, c5
 
 
@@ -563,10 +570,10 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
         "name": ENTRY_PATTERN_NAME,
         "engine": ENGINE_NAME,
         "description": (
-            "AI-Driven Brain: brain.py analyses patterns, structure, classic traps + ML; "
-            "order-flow TRAP DETECTION ENGINE scores 1M/5M buy/sell traps, absorption, "
-            "exhaustion, fake breakouts; AI API makes final BUY/SELL/HOLD. "
-            f"Timeframe: {tf_cfg.label}. Min confluence score: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
+            "Unified 1m rulebook on every chart TF (1m→1D): brain.py patterns/structure/traps + ML; "
+            "order-flow trap engine; AI API final BUY/SELL/HOLD; next-candle fire; path SL/TP 0.5/0.7; "
+            "flip-exit on opposite signal. "
+            f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
             f"{tf_cfg.note}"
         ),
         "timeframes": list(_b.TIMEFRAMES.keys()),
@@ -590,13 +597,15 @@ def brain_chat_summary(result: Dict[str, Any]) -> str:
 
 def strategy_system_blurb() -> str:
     return (
-        "AI-DRIVEN CANDLESTICK BRAIN + ORDER-FLOW TRAP ENGINE:\n"
-        "1) brain.py: patterns, market structure, classic trap & reverse (10th-man), ML bias.\n"
-        "2) Order-flow TRAP DETECTION ENGINE on 1M/5M: buy/sell trap, absorption, exhaustion,\n"
+        "AI-DRIVEN CANDLESTICK BRAIN + ORDER-FLOW TRAP ENGINE (unified 1m rulebook):\n"
+        "Same entry/exit training on every chart TF from 1m through 1D.\n"
+        "1) brain.py: patterns, market structure, classic trap & reverse (10th-man), ML bias "
+        "(min confluence score 6, min R:R 2, HTF alignment + noise guard — identical on all TFs).\n"
+        "2) Order-flow TRAP DETECTION ENGINE: buy/sell trap, absorption, exhaustion,\n"
         "   fake breakout, reversal trap (effort vs result; volume & buyer/seller pressure).\n"
-        "3) Combined analysis sent to AI API (GLM/OpenAI) → BUY / SELL / HOLD.\n"
-        "4) If AI offline: strong OF trap (score≥65) or brain.py verdict as fallback.\n"
-        "5) Brain-driven SL/TP; fixed ±% safety net on exits."
+        "3) Combined analysis → AI API (GLM/OpenAI) → BUY / SELL / HOLD.\n"
+        "4) Next-candle fire + path SL/TP 0.5%/0.7% + opposite-side flip-exit.\n"
+        "5) If AI offline: strong OF trap (score≥65) or brain.py verdict as fallback.\n"
     )
 
 
