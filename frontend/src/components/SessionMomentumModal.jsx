@@ -313,6 +313,13 @@ export default function SessionMomentumModal({
               pause when the window ends.
             </p>
 
+            <div className="rounded-xl border border-cyan-700/40 bg-cyan-900/20 px-4 py-3 text-cyan-100 text-xs">
+              <strong className="block text-cyan-300 mb-1">Same trading policies as Main AI Engine</strong>
+              Brain patterns, order-flow traps, 1m confidence floor, SL/TP path, fees, risk meter, and
+              chart timeframe rules stay identical. The only difference is the clock — trades arm only
+              inside the IST session windows below.
+            </div>
+
             <div className="rounded-xl border border-amber-700/40 bg-amber-900/20 px-4 py-3 text-amber-200 text-xs">
               <strong className="block text-amber-300 mb-1">Important — mutual exclusivity</strong>
               Starting the Session Momentum Engine turns the <strong>Main AI Engine OFF</strong>. Only

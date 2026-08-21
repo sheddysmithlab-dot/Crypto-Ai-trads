@@ -27,6 +27,7 @@ import SettingsModal from './components/SettingsModal';
 import AgentInstructionsModal from './components/AgentInstructionsModal';
 import StartConfirmModal from './components/StartConfirmModal';
 import StopEngineModal from './components/StopEngineModal';
+import SessionStopConfirmModal from './components/SessionStopConfirmModal';
 import TradeExitConfirmModal from './components/TradeExitConfirmModal';
 import SystemLogModal from './components/SystemLogModal';
 import AgentChatStrip from './components/AgentChatStrip';
@@ -73,6 +74,7 @@ export default function App() {
   const [alertOpen, setAlertOpen] = useState(false);
   const [paperModalOpen, setPaperModalOpen] = useState(false);
   const [sessionModalOpen, setSessionModalOpen] = useState(false);
+  const [sessionStopConfirmOpen, setSessionStopConfirmOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const [startConfirmOpen, setStartConfirmOpen] = useState(false);
@@ -215,7 +217,13 @@ export default function App() {
 
   // START → Instructions popup → Safety check → /agent/config + /bot/start
   // STOP  → Hold vs Emergency popup (or direct stop if no open trades)
+  // Session Momentum ON → main button stops session (with confirm popup)
   async function handleControlClick() {
+    if (sessionEngineEnabled) {
+      pushActionLog('Session Momentum Engine STOP requested — confirm…');
+      setSessionStopConfirmOpen(true);
+      return;
+    }
     if (effectiveBotActive) {
       if (activeCount > 0) {
         pushActionLog('AI Engine STOP — choose Hold or Emergency…');
@@ -231,6 +239,13 @@ export default function App() {
     pushActionLog('AI Engine START requested. Opening instructions popup.');
     debugLog('Opening AI Engine Instructions modal…');
     setAgentModalOpen(true);
+  }
+
+  async function handleSessionStopConfirm() {
+    setSessionStopConfirmOpen(false);
+    pushActionLog('Session Momentum Engine STOP…');
+    const result = await stopSessionEngine();
+    pushActionLog(result?.ok ? 'Session Momentum Engine OFF.' : 'Session engine stop failed.');
   }
 
   async function handleStopHold() {
@@ -625,6 +640,7 @@ export default function App() {
         botIsActive={effectiveBotActive}
         botLoading={botLoading}
         sessionEngineEnabled={sessionEngineEnabled}
+        sessionLoading={sessionLoading}
         uptime={uptime}
         lastUpdated={readouts.lastUpdated}
         onClick={handleControlClick}
@@ -683,6 +699,14 @@ export default function App() {
         onHold={handleStopHold}
         onEmergency={handleStopEmergency}
         onCancel={() => setStopConfirmOpen(false)}
+      />
+
+      <SessionStopConfirmModal
+        open={sessionStopConfirmOpen}
+        loading={sessionLoading}
+        inWindow={Boolean(sessionStatus?.in_window)}
+        onConfirm={handleSessionStopConfirm}
+        onCancel={() => setSessionStopConfirmOpen(false)}
       />
 
       <TradeExitConfirmModal
