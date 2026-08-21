@@ -220,8 +220,14 @@ export default function App() {
   // Session Momentum ON → main button stops session (with confirm popup)
   async function handleControlClick() {
     if (sessionEngineEnabled) {
-      pushActionLog('Session Momentum Engine STOP requested — confirm…');
-      setSessionStopConfirmOpen(true);
+      if (activeCount > 0) {
+        pushActionLog('Session Momentum Engine STOP — choose Hold or Emergency…');
+        setSessionStopConfirmOpen(true);
+        return;
+      }
+      pushActionLog('Session Momentum Engine STOP…');
+      const result = await stopSessionEngine();
+      pushActionLog(result?.ok ? 'Session Momentum Engine OFF.' : 'Session engine stop failed.');
       return;
     }
     if (effectiveBotActive) {
@@ -241,11 +247,27 @@ export default function App() {
     setAgentModalOpen(true);
   }
 
-  async function handleSessionStopConfirm() {
+  async function handleSessionStopHold() {
     setSessionStopConfirmOpen(false);
-    pushActionLog('Session Momentum Engine STOP…');
+    pushActionLog(`Session Momentum STOP (Hold) — ${activeCount} trade(s) stay managed…`);
     const result = await stopSessionEngine();
-    pushActionLog(result?.ok ? 'Session Momentum Engine OFF.' : 'Session engine stop failed.');
+    pushActionLog(
+      result?.ok
+        ? 'Session Momentum Engine OFF (Hold). Open trades keep TP/SL; portfolio still updates.'
+        : 'Session engine hold-stop failed.',
+    );
+  }
+
+  async function handleSessionStopEmergency() {
+    setSessionStopConfirmOpen(false);
+    pushActionLog('Session Momentum STOP (Emergency) — closing all…');
+    const sess = await stopSessionEngine();
+    const ok = await stopBotEngine('emergency');
+    pushActionLog(
+      sess?.ok && ok
+        ? 'Session Momentum Engine OFF. All positions closed.'
+        : 'Session emergency stop failed.',
+    );
   }
 
   async function handleStopHold() {
@@ -703,9 +725,10 @@ export default function App() {
 
       <SessionStopConfirmModal
         open={sessionStopConfirmOpen}
-        loading={sessionLoading}
-        inWindow={Boolean(sessionStatus?.in_window)}
-        onConfirm={handleSessionStopConfirm}
+        openCount={activeCount}
+        loading={sessionLoading || botLoading}
+        onHold={handleSessionStopHold}
+        onEmergency={handleSessionStopEmergency}
         onCancel={() => setSessionStopConfirmOpen(false)}
       />
 
