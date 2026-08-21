@@ -107,7 +107,7 @@ export default function PortfolioModal({
           </StatCell>
           <StatCell
             label="Session Bybit Broker Fee"
-            tip="Broker fees for this session. Shown separately from gross profit."
+            tip="Open trades: entry (buy) fee only. Closed trades: entry + exit (sell) fees added."
           >
             <span className="text-amber-400">{feeStr}</span>
           </StatCell>

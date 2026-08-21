@@ -1044,8 +1044,10 @@ class AITradingAgent:
     def get_session_gross_and_fees_usd(self) -> dict:
         """Gross trade P&L + Bybit broker fees for the CURRENT AI season only.
 
-        Open + closed rows are filtered by `season_id` so Daily / Season / Fee
-        portfolio stats never mix calendar-day or prior-session trades.
+        Fee rules (buy/sell):
+          - Open trade  → only entry (buy/open) fee has been paid → count entry only
+          - Closed trade → entry + exit (sell/close) both paid → count both
+        Never include a projected exit fee on still-open positions.
         """
         open_gross = 0.0
         open_fees = 0.0
@@ -1055,13 +1057,13 @@ class AITradingAgent:
             if sid is not None and t.get("season_id") != sid:
                 continue
             m_open = self._trade_metrics(t, for_close=False)
-            m_close = self._trade_metrics(t, for_close=True)
             open_gross += float(m_open["gross_usd"])
             entry_fee = float(t.get("entry_fee_usd") or 0)
             if entry_fee <= 0:
                 # Recover missing fee fields on older in-memory trades
                 entry_fee = round(float(t.get("position_size") or 0) * fee_rate, 4)
-            open_fees += entry_fee + float(m_close["exit_fee_usd"])
+            # Open = buy/open only — do not invent a sell fee yet.
+            open_fees += entry_fee
 
         closed_gross = 0.0
         closed_fees = 0.0
@@ -1072,6 +1074,9 @@ class AITradingAgent:
                 continue
             entry_f = float(row.get("entry_fee_usd") or 0)
             exit_f = float(row.get("exit_fee_usd") or 0)
+            if entry_f <= 0 and float(row.get("position_size") or 0) > 0:
+                entry_f = round(float(row.get("position_size") or 0) * fee_rate, 4)
+            # Closed = buy + sell both happened → add both fees.
             closed_fees += entry_f + exit_f
             stored_gross = row.get("gross_pnl_usd")
             if stored_gross is not None:
