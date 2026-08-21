@@ -686,7 +686,7 @@ class AITradingAgent:
         self.emergency_awaiting_decision = False
 
         # Pre-start strategy config (AI Agent Instructions modal before START).
-        self.starting_capital = 1000.0
+        self.starting_capital = 100_000.0
         self.current_capital = self.starting_capital
         # Total capital risk % from modal -> max_concurrent_trades via round(risk_pct * 2).
         # Also: when session portfolio drop hits this %, auto Hold-stop (no new entries).

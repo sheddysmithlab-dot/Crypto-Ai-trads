@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import InfoTip from './InfoTip';
 
+const DEFAULT_PAPER_CAPITAL = 100000;
+
 const PRESETS = [
-  { amount: 1000, label: '$1K' },
-  { amount: 5000, label: '$5K' },
   { amount: 10000, label: '$10K' },
   { amount: 50000, label: '$50K' },
+  { amount: 100000, label: '$100K' },
+  { amount: 250000, label: '$250K' },
 ];
 
 function fmtCurrency(num) {
@@ -26,7 +28,7 @@ export default function PaperTradingModal({
   onRefreshStatus,
   onSetCapital,
 }) {
-  const [amount, setAmount] = useState('1000');
+  const [amount, setAmount] = useState(String(DEFAULT_PAPER_CAPITAL));
   const [status, setStatus] = useState({ tone: 'yellow', message: 'Loading…' });
   const [saving, setSaving] = useState(false);
 
@@ -44,7 +46,7 @@ export default function PaperTradingModal({
       }
       const cap = Number(data.capital);
       const shown = Number.isFinite(cap) ? cap : 0;
-      setAmount(shown >= 100 ? String(Math.round(shown)) : '1000');
+      setAmount(shown >= 100 ? String(Math.round(shown)) : String(DEFAULT_PAPER_CAPITAL));
       setStatus({
         tone: 'yellow',
         message: `Currently simulating with ${fmtCurrency(shown)}.`,
@@ -149,7 +151,7 @@ export default function PaperTradingModal({
                 type="number"
                 min="100"
                 step="100"
-                placeholder="e.g. 10000"
+                placeholder="e.g. 100000"
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 className="w-full bg-[#161A1E] border border-gray-700 rounded-lg pl-7 pr-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-yellow-500"
