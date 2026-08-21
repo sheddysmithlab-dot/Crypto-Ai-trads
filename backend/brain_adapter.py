@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import httpx
 
 import brain as _b
-from trap_orderflow_engine import evaluate_trap_orderflow, merge_with_structure_trap
+from trap_orderflow_engine import evaluate_trap_orderflow, merge_with_structure_trap, thr_score_for_tf
 
 ENGINE_NAME = "ai_driven_brain_v2"
 ENTRY_PATTERN_NAME = "AI_BRAIN_V2"
@@ -371,14 +371,17 @@ def _run_orderflow_trap(
         return None
 
 
-def _fallback_action_from_brain_and_of(think: dict, of_trap: Optional[dict]) -> str:
+def _fallback_action_from_brain_and_of(
+    think: dict, of_trap: Optional[dict], timeframe_key: str = "1m"
+) -> str:
     """When AI unavailable: prefer strong order-flow trap, else brain verdict."""
+    thr = thr_score_for_tf(_norm_tf(timeframe_key))
     if of_trap:
         sig = of_trap.get("final_signal")
         score = max(float(of_trap.get("long_score") or 0), float(of_trap.get("short_score") or 0))
-        if sig == "LONG" and score >= 65:
+        if sig == "LONG" and score >= thr:
             return "BUY"
-        if sig == "SHORT" and score >= 65:
+        if sig == "SHORT" and score >= thr:
             return "SELL"
         if sig == "NO_TRADE":
             # still allow brain BUY/SELL if structure trap is fresh
@@ -459,7 +462,7 @@ async def evaluate_live_entry_async(
 
     # Fallback: strong order-flow trap, else brain.py verdict
     if ai_action is None:
-        ai_action = _fallback_action_from_brain_and_of(think, of_trap)
+        ai_action = _fallback_action_from_brain_and_of(think, of_trap, timeframe_key)
         print(f"[AI-BRAIN] Using fallback verdict: {ai_action} (OF={of_trap.get('final_signal') if of_trap else None})")
 
     return _flatten(
@@ -524,7 +527,7 @@ def evaluate_live_entry(
         candles_1m=candles_1m,
         candles_5m=candles_5m or (candles if tf == "5m" else None),
     )
-    ai_action = _fallback_action_from_brain_and_of(think, of_trap)
+    ai_action = _fallback_action_from_brain_and_of(think, of_trap, timeframe_key)
     return _flatten(
         think,
         ai_action=ai_action,
@@ -574,6 +577,7 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
             "order-flow trap engine; AI API final BUY/SELL/HOLD; next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
+            f"Order-flow conf floor: {thr_score_for_tf(tf)}% (1m=75, else 65). "
             f"{tf_cfg.note}"
         ),
         "timeframes": list(_b.TIMEFRAMES.keys()),
