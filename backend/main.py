@@ -301,13 +301,11 @@ AI_PROVIDER_DEFAULTS = {
 }
 
 async def consult_ai_provider(context):
-    """ Asks the configured AI provider (OpenAI-compatible chat completions) whether to
-    proceed with a RULE-3-triggered trade. Returns:
-      True  - AI confirms, proceed with the trade
-      False - AI rejects, skip this entry
-      None  - no AI configured, or the provider is unreachable/errored - callers must
-              fail OPEN (proceed as if no AI were configured) so a flaky third-party
-              API can never be the reason the bot misses a real-time signal. """
+    """ Asks the configured AI provider to confirm an existing BUY/SELL setup.
+    Returns:
+      True  - AI says YES
+      False - AI says NO
+      None  - no AI configured / unreachable — fail OPEN (do not block the trade). """
     provider = settings_store.ai_provider
     if provider == "none" or not settings_store.ai_api_key:
         return None
@@ -328,51 +326,38 @@ async def consult_ai_provider(context):
     pair = str(context.get("pair") or "unknown")
     timeframe = str(context.get("timeframe") or "unknown")
     action = str(context.get("action") or "BUY").upper()
-    reason = str(context.get("reason") or "no-reason")
-    confidence = context.get("confidence")
-    current_price = context.get("current_price")
-    candle_volume = context.get("candle_volume")
-    prev_candle_volume = context.get("prev_candle_volume")
-    candle_height = context.get("candle_height")
-    prev_candle_height = context.get("prev_candle_height")
+    side = "LONG" if action == "BUY" else "SHORT" if action == "SELL" else action
+    pattern = str(context.get("pattern") or context.get("reason") or "setup")
+    # Keep prompt short — first token-ish of pattern/reason
+    if len(pattern) > 48:
+        pattern = pattern[:48].rstrip()
+    trap_score = context.get("trap_score")
+    if trap_score is None:
+        trap_score = context.get("confidence")
+    score_txt = "—" if trap_score is None else str(trap_score)
 
     prompt = (
-        "You are a risk-confirmation layer for an algorithmic crypto trading bot. "
-        f"A strategy signal fired on {pair} ({timeframe}). Proposed action: {action}. "
-        f"Reason: {reason}. Confidence: {confidence}. Current price: {current_price}. "
-        f"Candle volume: {candle_volume}, previous candle volume: {prev_candle_volume}, "
-        f"candle height: {candle_height}, previous candle height: {prev_candle_height}. "
-        f"Reply with ONLY the single word YES to confirm this {action} signal, or NO to reject it."
+        f"Confirm this {side} {pattern} / trap score {score_txt}? "
+        f"Pair {pair} {timeframe}. Reply YES or NO only."
     )
 
-    messages = []
-    system_role = load_system_role_text()
-    if system_role:
-        messages.append({"role": "system", "content": system_role[:20000]})
-    try:
-        ml_hit = fetch_ml("cost aware", max_chars=1200)
-        if ml_hit.get("ok"):
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        f"[ML cost-aware · {ml_hit.get('title')}]\n{ml_hit.get('text')}"
-                    )[:2500],
-                }
-            )
-    except Exception:
-        pass
-    messages.append({"role": "user", "content": prompt})
+    messages = [
+        {
+            "role": "system",
+            "content": "You confirm trading setups only. Reply with exactly one word: YES or NO.",
+        },
+        {"role": "user", "content": prompt},
+    ]
 
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(
                 f"{base_url}/chat/completions",
                 headers=headers,
                 json={
                     "model": model,
                     "messages": messages,
-                    "max_tokens": 5,
+                    "max_tokens": 4,
                     "temperature": 0,
                 },
             )
@@ -382,10 +367,16 @@ async def consult_ai_provider(context):
             return None
         data = resp.json()
         reply = data["choices"][0]["message"]["content"].strip().upper()
-        decision = reply.startswith("YES")
-        print(f"[AI AGENT] Provider '{provider}' confirmation reply: '{reply}' -> {'PROCEED' if decision else 'REJECTED'}")
         agent.note_ai_result(True)
-        return decision
+        token = reply.replace(".", " ").replace(",", " ").split()[0] if reply else ""
+        if token.startswith("NO"):
+            print(f"[AI AGENT] Provider '{provider}' confirmation reply: '{reply}' -> REJECTED")
+            return False
+        if token.startswith("YES"):
+            print(f"[AI AGENT] Provider '{provider}' confirmation reply: '{reply}' -> PROCEED")
+            return True
+        print(f"[AI AGENT] Provider '{provider}' unclear reply '{reply}' - failing open.")
+        return None
     except Exception as exc:
         print(f"[AI AGENT] Provider '{provider}' request failed ({exc}) - failing open (proceeding with trade).")
         agent.note_ai_result(False)
@@ -3199,47 +3190,11 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     )
     print(
         f"[BRAIN] DETECTED {side} {pair} pattern={detect.get('pattern')} "
-        f"on closed@{close_time} → queue fire@{fire_candle_ms}"
+        f"on closed@{close_time} → queue fire@{fire_candle_ms} "
+        f"(AI={detect.get('ai_confirmation', 'SKIP')})"
     )
 
-    # AI consult in background — never block queue/fire (timeouts were stalling 16-pair scans).
-    if agent.ai_consult_allowed():
-        ctx = {
-            "pair": pair,
-            "timeframe": timeframe_key,
-            "action": detect.get("action"),
-            "reason": detect.get("reason"),
-            "confidence": detect.get("confidence"),
-            "current_price": history[-1].get("close"),
-            "candle_volume": history[-1].get("volume"),
-            "prev_candle_volume": history[-2].get("volume") if len(history) >= 2 else None,
-            "candle_height": history[-1].get("high", 0) - history[-1].get("low", 0),
-            "prev_candle_height": (
-                history[-2].get("high", 0) - history[-2].get("low", 0)
-                if len(history) >= 2
-                else None
-            ),
-        }
-
-        async def _bg_ai_note(_pair: str = pair, _ctx: dict = ctx) -> None:
-            try:
-                ai_decision = await consult_ai_provider(_ctx)
-                ai_note = "YES" if ai_decision is True else "NO" if ai_decision is False else "SKIP"
-                pending_now = PENDING_ENTRY_SIGNALS.get(_pair)
-                if pending_now and isinstance(pending_now.get("detect"), dict):
-                    pending_now["detect"]["ai_confirmation"] = ai_note
-                    if ai_note != "SKIP":
-                        base = pending_now["detect"].get("reason") or ""
-                        if f"AI={ai_note}" not in base:
-                            pending_now["detect"]["reason"] = f"{base} | AI={ai_note}".strip(" |")
-            except Exception as exc:
-                print(f"[AI AGENT] bg consult error on {_pair}: {exc}")
-
-        asyncio.create_task(_bg_ai_note())
-    else:
-        detect["ai_confirmation"] = "SKIP"
-        if pair in PENDING_ENTRY_SIGNALS:
-            PENDING_ENTRY_SIGNALS[pair]["detect"] = detect
+    # AI confirm already applied in evaluate_live_entry_async (NO → never reaches here).
 
     # If next candle already opened while we scanned, fire now.
     now_ms = int(time.time() * 1000)

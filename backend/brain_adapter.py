@@ -74,109 +74,109 @@ def _run_brain(candles: List[dict], tf: str,
     return {"think": res, "reasoning": reasoning}
 
 
-# ─── AI system prompt builder ─────────────────────────────────────────────────
-_SYSTEM_PROMPT = """\
-You are an expert algorithmic cryptocurrency trader.
-You will receive a full technical analysis of a crypto chart from the Candlestick Brain engine.
-The analysis includes market structure, candlestick patterns, classic structure traps
-(bull/bear trap, spring, upthrust), PLUS the Order-Flow TRAP DETECTION ENGINE
-(buy/sell trap, absorption, exhaustion, fake breakout, reversal trap on 1M/5M with
-volume pressure and buyer/seller imbalance — effort vs result).
+# ─── AI confirm-only (YES/NO) — does not invent BUY/SELL ─────────────────────
+_CONFIRM_SYSTEM = (
+    "You confirm trading setups only. Reply with exactly one word: YES or NO. "
+    "No other text."
+)
 
-Your job: read the analysis carefully, then output EXACTLY ONE of these three words on its own line:
-  BUY
-  SELL
-  HOLD
 
-Rules:
-- BUY if the combined evidence strongly favours a LONG trade.
-- SELL if the combined evidence strongly favours a SHORT trade.
-- HOLD if the evidence is mixed, unclear, or insufficient.
-- Prefer confirmed order-flow traps (absorption / fake breakout / sell-trap→long / buy-trap→short)
-  when they align with higher-TF bias and scores are strong. Rules are identical on every chart
-  timeframe from 1m through 1D (unified 1m rulebook).
-- Never assume high buyer qty alone means LONG — evaluate effort versus result.
-- Output only the word. No explanation, no punctuation, no extra lines.
-"""
-
-def _build_ai_messages(pair: str, timeframe: str, reasoning: str, think: dict,
-                       of_trap: Optional[dict] = None) -> List[dict]:
-    ms = think.get("structure")
-    sig = think.get("signal")
-    trap = think.get("trap")
-    stance = think.get("stance")
-    ml = think.get("ml") or {}
-    plan = think.get("plan")
-    verdict = think.get("verdict", "HOLD")
-
-    # Compact fact summary (in case reasoning is very long)
-    facts = [
-        f"Pair: {pair}  |  Timeframe: {timeframe}",
-        f"Market structure: {ms.trend if ms else 'unknown'}  (strength: {ms.trend_strength if ms else '-'})",
-    ]
-    if sig:
-        facts.append(f"Pattern signal: {sig.side} via {sig.strategy}  |  patterns: {', '.join(sig.patterns)}")
-        facts.append(f"Entry {sig.entry:.4g}  stop {sig.stop:.4g}  target {sig.target:.4g}  R:R 1:{sig.rr:.2f}  score {sig.score:.1f}/12")
-        facts.append(f"Confluence: {', '.join(sig.confluence or [])}")
-    if trap:
-        facts.append(f"Structure trap: {trap.trap_type}  Smart-money action: {trap.smart_action}  ({trap.side})")
-    if of_trap:
-        facts.append(
-            "Order-flow trap: "
-            f"{of_trap.get('line') or of_trap.get('final_signal')} "
-            f"| pattern={of_trap.get('pattern')} 5M_bias={of_trap.get('bias_5m')} "
-            f"LONG={of_trap.get('long_score')} SHORT={of_trap.get('short_score')} "
-            f"reason={of_trap.get('primary_reason')}"
-        )
-        facts.append(
-            f"Pressures: buy={of_trap.get('buy_pressure')} sell={of_trap.get('sell_pressure')} "
-            f"| vol ratios buy={of_trap.get('buy_volume_ratio')} sell={of_trap.get('sell_volume_ratio')}"
-        )
-    if stance:
-        facts.append(f"Smart stance: {stance.action}  source={stance.source}  {stance.narrative}")
-    if ml.get("metrics"):
-        facts.append(f"ML bias: {ml.get('prediction', {}).get('label')}  P(up)={ml.get('prediction', {}).get('probability_up')}")
-    if plan:
-        facts.append(f"Risk plan: risk {plan.risk_pct:.1f}%  units {plan.units:.4f}  reward/risk R:{plan.rr:.2f}")
-    facts.append(f"Brain own verdict: {verdict}")
-
-    user_content = (
-        "=== FULL CHAIN-OF-THOUGHT ANALYSIS ===\n"
-        + reasoning
-        + "\n\n=== KEY FACTS SUMMARY ===\n"
-        + "\n".join(facts)
-        + "\n\n=== YOUR DECISION ===\n"
-        "Based on the above, output exactly one word: BUY, SELL, or HOLD."
+def _confirm_prompt(
+    *,
+    pair: str,
+    timeframe: str,
+    side: str,
+    pattern: str,
+    trap_score,
+) -> str:
+    score_txt = "—" if trap_score is None else f"{trap_score}"
+    return (
+        f"Confirm this {side} {pattern or 'setup'} / trap score {score_txt}? "
+        f"Pair {pair} {timeframe}. Reply YES or NO only."
     )
 
-    return [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": user_content[:18000]},  # token guard
-    ]
+
+def _setup_label_and_score(think: dict, of_trap: Optional[dict], action: str) -> tuple:
+    """Pattern name + trap score for the short confirm prompt."""
+    of_trap = of_trap or {}
+    sig = think.get("signal")
+    trap = think.get("trap")
+    of_signal = of_trap.get("final_signal")
+    pattern = None
+    score = None
+    if of_trap and of_signal in ("LONG", "SHORT"):
+        pattern = of_trap.get("pattern") or "orderflow_trap"
+        if action == "BUY":
+            score = of_trap.get("long_score")
+        elif action == "SELL":
+            score = of_trap.get("short_score")
+        else:
+            score = of_trap.get("long_score") or of_trap.get("short_score")
+    elif trap is not None:
+        pattern = getattr(trap, "trap_type", None) or "structure_trap"
+        score = getattr(trap, "score", None)
+    elif sig is not None:
+        pattern = (sig.patterns[0] if sig.patterns else None) or sig.strategy
+        score = getattr(sig, "score", None) or getattr(sig, "confidence", None)
+    return (str(pattern or "setup"), score)
 
 
-# ─── AI API call ──────────────────────────────────────────────────────────────
-async def _call_ai_api(messages: List[dict], settings) -> Optional[str]:
-    """
-    Call the configured AI provider.  Returns 'BUY', 'SELL', 'HOLD', or None.
-    None means AI unavailable — callers should use brain.py fallback.
+async def _confirm_setup_with_ai(
+    settings,
+    *,
+    pair: str,
+    timeframe: str,
+    action: str,
+    think: dict,
+    of_trap: Optional[dict],
+) -> Optional[bool]:
+    """Ask AI to confirm an existing BUY/SELL setup.
+
+    Returns:
+      True  — YES
+      False — NO (skip trade)
+      None  — unreachable / not configured / cool-down (fail-open → fire)
     """
     provider = getattr(settings, "ai_provider", "none")
     api_key = getattr(settings, "ai_api_key", "") or ""
     if provider == "none" or not api_key:
         return None
 
+    try:
+        from main import agent as _agent
+        if not _agent.ai_consult_allowed():
+            print("[AI-CONFIRM] Cool-down active — fail-open (no AI block).")
+            return None
+    except Exception:
+        pass
+
+    side = "LONG" if action == "BUY" else "SHORT"
+    pattern, trap_score = _setup_label_and_score(think, of_trap, action)
+    messages = [
+        {"role": "system", "content": _CONFIRM_SYSTEM},
+        {
+            "role": "user",
+            "content": _confirm_prompt(
+                pair=pair,
+                timeframe=timeframe,
+                side=side,
+                pattern=pattern,
+                trap_score=trap_score,
+            ),
+        },
+    ]
+
     _DEFAULTS = {
-        "z-ai":      {"base_url": "https://api.z.ai/api/paas/v4",    "model": "glm-4.5-flash", "auth": "bearer"},
-        "openai":    {"base_url": "https://api.openai.com/v1",        "model": "gpt-4o-mini",   "auth": "bearer"},
+        "z-ai": {"base_url": "https://api.z.ai/api/paas/v4", "model": "glm-4.5-flash", "auth": "bearer"},
+        "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini", "auth": "bearer"},
         "zhipu-glm": {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4.5-flash", "auth": "bearer"},
-        "azure-openai": {"base_url": None, "model": "gpt-4o-mini",   "auth": "api-key"},
-        "custom":    {"base_url": None,   "model": "glm-4.5-flash",  "auth": "bearer"},
+        "azure-openai": {"base_url": None, "model": "gpt-4o-mini", "auth": "api-key"},
+        "custom": {"base_url": None, "model": "glm-4.5-flash", "auth": "bearer"},
     }
     cfg = _DEFAULTS.get(provider, _DEFAULTS["custom"])
     base_url = (getattr(settings, "ai_base_url", None) or cfg["base_url"] or "").rstrip("/")
     if not base_url:
-        print(f"[AI-BRAIN] No base_url for provider '{provider}' — using brain.py fallback.")
+        print(f"[AI-CONFIRM] No base_url for '{provider}' — fail-open.")
         return None
     model = getattr(settings, "ai_model", None) or cfg["model"]
 
@@ -187,33 +187,34 @@ async def _call_ai_api(messages: List[dict], settings) -> Optional[str]:
         headers["Authorization"] = f"Bearer {api_key}"
 
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(
                 f"{base_url}/chat/completions",
                 headers=headers,
                 json={
                     "model": model,
                     "messages": messages,
-                    "max_tokens": 8,
+                    "max_tokens": 4,
                     "temperature": 0,
                 },
             )
         if resp.status_code != 200:
-            print(f"[AI-BRAIN] Provider '{provider}' HTTP {resp.status_code} — brain.py fallback.")
+            print(f"[AI-CONFIRM] '{provider}' HTTP {resp.status_code} — fail-open.")
             _notify_ai_health(False)
             return None
         raw = resp.json()["choices"][0]["message"]["content"].strip().upper()
-        # Extract the decision word robustly
-        for word in ("BUY", "SELL", "HOLD"):
-            if word in raw:
-                print(f"[AI-BRAIN] '{provider}' → {word}  (raw: {raw!r})")
-                _notify_ai_health(True)
-                return word
-        print(f"[AI-BRAIN] '{provider}' unexpected reply {raw!r} — brain.py fallback.")
-        _notify_ai_health(False)
+        _notify_ai_health(True)
+        token = raw.replace(".", " ").replace(",", " ").split()[0] if raw else ""
+        if token.startswith("NO"):
+            print(f"[AI-CONFIRM] '{provider}' → NO  (raw: {raw!r}) — skip trade.")
+            return False
+        if token.startswith("YES"):
+            print(f"[AI-CONFIRM] '{provider}' → YES  (raw: {raw!r})")
+            return True
+        print(f"[AI-CONFIRM] '{provider}' unclear {raw!r} — fail-open.")
         return None
     except Exception as exc:
-        print(f"[AI-BRAIN] API error ({exc}) — brain.py fallback.")
+        print(f"[AI-CONFIRM] API error ({exc}) — fail-open.")
         _notify_ai_health(False)
         return None
 
@@ -236,7 +237,7 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
     ms: Optional[_b.MarketStructure] = think.get("structure")
     ml = think.get("ml") or {}
 
-    # Entry / SL / TP — prefer whichever source drove the AI's decision
+    # Entry / SL / TP — prefer trap stance, else pattern signal (brain/OF setup)
     entry_src = None
     if stance and stance.source == "trap" and trap is not None:
         entry_src = trap
@@ -289,7 +290,7 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
         detail = stance.narrative
     if of_trap and of_trap.get("primary_reason"):
         detail = (detail + " | " if detail else "") + f"OF: {of_trap.get('primary_reason')}"
-    reason_parts = [f"AI decision: {ai_action}", detail]
+    reason_parts = [f"Brain/OF setup: {ai_action}", detail]
     if confluences:
         reason_parts.append("confluence: " + "; ".join(str(c) for c in confluences[:4] if c))
     reason = " | ".join(p for p in reason_parts if p)
@@ -303,7 +304,7 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
 
     return {
         "action": action,
-        "reason": reason or "AI: no qualifying setup",
+        "reason": reason or "No qualifying setup",
         "engine": ENGINE_NAME,
         "entry_pattern": ENTRY_PATTERN_NAME,
         "pattern": pattern_name,
@@ -327,7 +328,8 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
         "ml_bias": ml_label,
         "trap_type": trap.trap_type if trap else (of_trap.get("pattern") if of_trap else None),
         "orderflow_trap": of_trap,
-        "ai_driven": True,
+        "ai_driven": False,
+        "ai_confirmation": "SKIP",
         "brain_verdict": think.get("verdict"),
     }
 
@@ -447,9 +449,9 @@ async def evaluate_live_entry_async(
     risk_pct: float = 0.01,
     settings=None,           # settings_store from main.py
 ) -> Dict[str, Any]:
-    """Async entry point: brain.py analysis + order-flow trap → AI API decision.
+    """Async entry: brain + order-flow set BUY/SELL; AI only confirms YES/NO.
 
-    Used from async context (scan_and_maybe_fire_pair).
+    AI NO → NO_TRADE. AI YES or unreachable → fire (fail-open).
     """
     tf = _norm_tf(timeframe_key)
     risk_pct_pct = float(risk_pct) * 100.0
@@ -463,6 +465,7 @@ async def evaluate_live_entry_async(
             "timeframe_key": timeframe_key,
             "pair": pair,
             "ai_driven": False,
+            "ai_confirmation": "SKIP",
         }
 
     # Run brain.py in a thread (CPU-bound)
@@ -480,10 +483,10 @@ async def evaluate_live_entry_async(
             "timeframe_key": timeframe_key,
             "pair": pair,
             "ai_driven": False,
+            "ai_confirmation": "SKIP",
         }
 
     think = analysis["think"]
-    reasoning = analysis["reasoning"]
 
     of_trap = await asyncio.get_event_loop().run_in_executor(
         None,
@@ -495,28 +498,61 @@ async def evaluate_live_entry_async(
         ),
     )
 
-    # Ask AI API for final BUY/SELL/HOLD decision
-    ai_action: Optional[str] = None
-    if settings is not None:
-        messages = _build_ai_messages(pair, timeframe_key, reasoning, think, of_trap=of_trap)
-        ai_action = await _call_ai_api(messages, settings)
+    # Direction comes only from brain + order-flow (never invented by AI).
+    setup_action = _fallback_action_from_brain_and_of(think, of_trap, timeframe_key)
+    setup_action = _gate_1m_of_score(setup_action or "HOLD", of_trap, timeframe_key)
 
-    # Fallback: strong order-flow trap, else brain.py verdict
-    if ai_action is None:
-        ai_action = _fallback_action_from_brain_and_of(think, of_trap, timeframe_key)
-        print(f"[AI-BRAIN] Using fallback verdict: {ai_action} (OF={of_trap.get('final_signal') if of_trap else None})")
+    ai_confirmation = "SKIP"
+    if setup_action in ("BUY", "SELL") and settings is not None:
+        confirmed = await _confirm_setup_with_ai(
+            settings,
+            pair=pair,
+            timeframe=timeframe_key,
+            action=setup_action,
+            think=think,
+            of_trap=of_trap,
+        )
+        if confirmed is False:
+            side = "LONG" if setup_action == "BUY" else "SHORT"
+            pattern, score = _setup_label_and_score(think, of_trap, setup_action)
+            rejected = _flatten(
+                think,
+                ai_action="HOLD",
+                pair=pair,
+                timeframe_key=timeframe_key,
+                risk_pct_pct=risk_pct_pct,
+                equity=float(account_balance),
+                of_trap=of_trap,
+            )
+            rejected["action"] = "NO_TRADE"
+            rejected["ai_confirmation"] = "NO"
+            rejected["ai_driven"] = False
+            rejected["reason"] = (
+                f"AI rejected confirm ({side} {pattern} / trap score {score}) | "
+                f"{rejected.get('reason') or ''}"
+            ).strip(" |")
+            return rejected
+        if confirmed is True:
+            ai_confirmation = "YES"
+        else:
+            ai_confirmation = "SKIP"  # unreachable → fail-open
 
-    ai_action = _gate_1m_of_score(ai_action or "HOLD", of_trap, timeframe_key)
-
-    return _flatten(
+    out = _flatten(
         think,
-        ai_action=ai_action,
+        ai_action=setup_action,
         pair=pair,
         timeframe_key=timeframe_key,
         risk_pct_pct=risk_pct_pct,
         equity=float(account_balance),
         of_trap=of_trap,
     )
+    out["ai_confirmation"] = ai_confirmation
+    out["ai_driven"] = False
+    if ai_confirmation != "SKIP" and out.get("action") in ("BUY", "SELL"):
+        out["reason"] = f"{out.get('reason', '')} | AI={ai_confirmation}".strip(" |")
+    elif ai_confirmation == "SKIP" and out.get("action") in ("BUY", "SELL"):
+        out["reason"] = f"{out.get('reason', '')} | AI=SKIP (fail-open)".strip(" |")
+    return out
 
 
 def evaluate_live_entry(
@@ -572,7 +608,7 @@ def evaluate_live_entry(
     )
     ai_action = _fallback_action_from_brain_and_of(think, of_trap, timeframe_key)
     ai_action = _gate_1m_of_score(ai_action or "HOLD", of_trap, timeframe_key)
-    return _flatten(
+    out = _flatten(
         think,
         ai_action=ai_action,
         pair=pair,
@@ -581,6 +617,9 @@ def evaluate_live_entry(
         equity=float(account_balance),
         of_trap=of_trap,
     )
+    out["ai_driven"] = False
+    out["ai_confirmation"] = "SKIP"
+    return out
 
 
 def enrich_signal(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -588,7 +627,7 @@ def enrich_signal(result: Dict[str, Any]) -> Dict[str, Any]:
     out["brain"] = {
         "engine": ENGINE_NAME,
         "entry_pattern": ENTRY_PATTERN_NAME,
-        "pipeline": ["brain_analysis", "orderflow_trap", "ai_api_decision", "risk_plan"],
+        "pipeline": ["brain_analysis", "orderflow_trap", "ai_yes_no_confirm", "risk_plan"],
         "pattern_label": result.get("pattern"),
         "strategy": result.get("strategy"),
         "confidence": result.get("confidence"),
@@ -603,7 +642,8 @@ def enrich_signal(result: Dict[str, Any]) -> Dict[str, Any]:
         "trap_type": result.get("trap_type"),
         "orderflow_trap": result.get("orderflow_trap"),
         "brain_verdict": result.get("brain_verdict"),
-        "ai_driven": result.get("ai_driven", True),
+        "ai_driven": False,
+        "ai_confirmation": result.get("ai_confirmation", "SKIP"),
         "risk_plan": result.get("risk_plan"),
         "scalp": False,
     }
@@ -618,7 +658,8 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
         "engine": ENGINE_NAME,
         "description": (
             "Unified 1m rulebook on every chart TF (1m→1D): brain.py patterns/structure/traps + ML; "
-            "order-flow trap engine; AI API final BUY/SELL/HOLD; next-candle fire; path SL/TP 0.5/0.7; "
+            "order-flow trap engine sets BUY/SELL; AI API only confirms YES/NO (NO=skip, "
+            "unreachable=fail-open); next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
             f"Order-flow conf floor: {thr_score_for_tf(tf)}% "
