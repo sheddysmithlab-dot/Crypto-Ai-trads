@@ -175,7 +175,7 @@ export default function EngineBootOverlay({
             </div>
           </div>
           <div className="text-center text-gray-300 text-[11px] sm:text-xs max-w-sm leading-relaxed">
-            Brain + order-flow warming up. New trades unlock when this hits zero.
+            Engine scanning now. Pattern detect → next candle. New trades unlock at zero.
           </div>
         </div>
       )}

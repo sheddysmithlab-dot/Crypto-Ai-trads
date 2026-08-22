@@ -2327,12 +2327,12 @@ class AITradingAgent:
         self.persist_runtime()
 
     def begin_trading_warmup(self) -> None:
-        """Block new auto entries for ENGINE_WARMUP_SEC after engine arm."""
+        """Arm engine now; scan/detect immediately; block new fires for ENGINE_WARMUP_SEC."""
         self.trading_ready_at = time.time() + float(ENGINE_WARMUP_SEC)
         _clear_entry_pipeline()
         print(
-            f"[AI ENGINE] Warmup {ENGINE_WARMUP_SEC}s "
-            f"(intro {ENGINE_BOOT_INTRO_SEC}s + analysis {ENGINE_BOOT_ANALYSIS_SEC}s) — no new fires yet."
+            f"[AI ENGINE] Armed — scanning ON; new trades after {ENGINE_WARMUP_SEC}s "
+            f"(intro {ENGINE_BOOT_INTRO_SEC}s + analysis {ENGINE_BOOT_ANALYSIS_SEC}s)."
         )
 
     def trading_ready(self) -> bool:
@@ -3052,8 +3052,21 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         fire_candle_ms = int(pending["fire_candle_time"])
         now_ms = int(time.time() * 1000)
         deadline_ms = fire_candle_ms + interval_ms + fire_grace_ms
+        warmup_hold = not agent.trading_ready()
+        # During warmup: keep scanning/queue alive, but do not fire or expire yet.
+        if warmup_hold:
+            if now_ms >= fire_candle_ms:
+                _push_pattern_neon(
+                    pair=pair,
+                    candle_time_ms=fire_candle_ms,
+                    stage="confirming",
+                    side=pending.get("side"),
+                    action=(pending.get("detect") or {}).get("action"),
+                    pattern=(pending.get("detect") or {}).get("pattern"),
+                    reason=f"Warmup hold · trades unlock in {agent.warmup_remaining_sec():.0f}s",
+                )
         # Expire only after fire candle + grace (scan/AI lag must not kill the entry).
-        if now_ms > deadline_ms:
+        elif now_ms > deadline_ms:
             await _skip_pending(pending, "Next-candle fire window expired", fire_candle_ms=fire_candle_ms)
         elif now_ms >= fire_candle_ms:
             _push_pattern_neon(
@@ -3250,10 +3263,21 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
     # AI confirm already applied in evaluate_live_entry_async (NO → never reaches here).
 
-    # If next candle already opened while we scanned, fire now.
+    # If next candle already opened while we scanned, fire now (after warmup only).
     now_ms = int(time.time() * 1000)
     pending = PENDING_ENTRY_SIGNALS.get(pair)
     if pending and now_ms >= fire_candle_ms:
+        if not agent.trading_ready():
+            _push_pattern_neon(
+                pair=pair,
+                candle_time_ms=fire_candle_ms,
+                stage="confirming",
+                side=pending.get("side"),
+                action=(pending.get("detect") or {}).get("action"),
+                pattern=(pending.get("detect") or {}).get("pattern"),
+                reason=f"Warmup hold · trades unlock in {agent.warmup_remaining_sec():.0f}s",
+            )
+            return False
         deadline_ms = fire_candle_ms + interval_ms + fire_grace_ms
         if now_ms > deadline_ms:
             await _skip_pending(pending, "Next-candle fire window expired", fire_candle_ms=fire_candle_ms)
@@ -3282,10 +3306,7 @@ async def auto_buy_loop():
                 poll = 0.5  # same fast scan cadence as 1m on every TF
                 if agent.is_active and not agent.emergency_triggered:
                     agent.refresh_feed_health()
-                    if not agent.trading_ready():
-                        # Boot intro + analysis window — no detect/queue/fire yet.
-                        await asyncio.sleep(poll)
-                        continue
+                    # Warmup: scan + detect + queue immediately; fire gated inside scan_and_maybe_fire_pair.
                     # Feed-stale freeze: pause NEW detects only; keep managing open + pending fires.
                     frozen = bool(agent.connectivity_frozen)
                     pairs = list(agent.get_scan_pairs())
@@ -3555,22 +3576,22 @@ async def bot_start():
     system_log.push(
         "ai",
         f"AI Engine STARTED on {agent.active_pair} ({open_count} open preserved). "
-        f"Warmup {ENGINE_WARMUP_SEC}s before new trades.",
+        f"Scanning ON; new trades after {ENGINE_WARMUP_SEC}s (detect → next candle).",
         {"open_positions": open_count, "timeframe_seconds": agent.timeframe_seconds, "warmup_sec": ENGINE_WARMUP_SEC},
     )
     system_log.push_agent_chat(
-        f"AI Engine ON — warmup {ENGINE_WARMUP_SEC}s · {profile['name']} · {agent.active_pair} · {tf_key}",
+        f"AI Engine ON — scanning now · trades in {ENGINE_WARMUP_SEC}s · {profile['name']} · {agent.active_pair} · {tf_key}",
         status="active",
         details={"pair": agent.active_pair, "timeframe": tf_key, "entry_pattern": profile, "warmup_sec": ENGINE_WARMUP_SEC},
     )
     notifications.push(
-        f"AI Engine STARTED — {ENGINE_BOOT_INTRO_SEC}s intro + {ENGINE_BOOT_ANALYSIS_SEC}s analysis, then trading.",
+        f"AI Engine STARTED — scanning now; trades after {ENGINE_BOOT_INTRO_SEC}s intro + {ENGINE_BOOT_ANALYSIS_SEC}s.",
         "success",
     )
     return {
         "status": "success",
         "is_active": True,
-        "message": f"AI Engine started — warmup {ENGINE_WARMUP_SEC}s then {profile['name']} ({tf_key}).",
+        "message": f"AI Engine started — scanning ON; trades after {ENGINE_WARMUP_SEC}s ({profile['name']}, {tf_key}).",
         "open_positions": open_count,
         "warmup_sec": ENGINE_WARMUP_SEC,
         "boot_intro_sec": ENGINE_BOOT_INTRO_SEC,
