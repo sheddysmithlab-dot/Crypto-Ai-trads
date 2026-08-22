@@ -328,23 +328,36 @@ async def consult_ai_provider(context):
     action = str(context.get("action") or "BUY").upper()
     side = "LONG" if action == "BUY" else "SHORT" if action == "SELL" else action
     pattern = str(context.get("pattern") or context.get("reason") or "setup")
-    # Keep prompt short — first token-ish of pattern/reason
     if len(pattern) > 48:
         pattern = pattern[:48].rstrip()
     trap_score = context.get("trap_score")
     if trap_score is None:
         trap_score = context.get("confidence")
     score_txt = "—" if trap_score is None else str(trap_score)
+    tf_l = timeframe.strip().lower()
+    if tf_l in ("1m", "30s"):
+        thr = 80
+    elif tf_l == "5m":
+        thr = 70
+    else:
+        thr = 65
 
     prompt = (
-        f"Confirm this {side} {pattern} / trap score {score_txt}? "
-        f"Pair {pair} {timeframe}. Reply YES or NO only."
+        f"PATTERN DETECTED → confirm {side} {pattern} / trap score {score_txt}. "
+        f"Pair {pair} {timeframe}. "
+        f"Analyze LONG/SHORT, trap/inverse/fake-breakout per policy. "
+        f"Reply YES only if confidence ≥ {thr}% (1m=80, 5m=70, else=65); else NO. "
+        f"One word only: YES or NO."
     )
 
     messages = [
         {
             "role": "system",
-            "content": "You confirm trading setups only. Reply with exactly one word: YES or NO.",
+            "content": (
+                "You confirm trading setups only after policy analysis "
+                "(structure, long/short, trap/inverse). "
+                "Never invent BUY/SELL. Reply YES or NO only."
+            ),
         },
         {"role": "user", "content": prompt},
     ]

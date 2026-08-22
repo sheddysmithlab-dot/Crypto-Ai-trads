@@ -26,17 +26,20 @@ THR_Z_TVOL = 1.0
 THR_FAKE_WICK = 0.30
 THR_BREAK_ATR = 0.10
 THR_BALANCED = 0.05
-THR_SCORE = 65.0  # default floor (5m / 15m / 1h / 1d)
-THR_SCORE_1M = 75.0  # tighter pattern confidence floor — 1m only
+THR_SCORE = 65.0  # default floor (15m / 1h / 1d)
+THR_SCORE_5M = 70.0  # 5m confidence floor
+THR_SCORE_1M = 80.0  # 1m confidence floor — AI YES only at/above this
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
 
 
 def thr_score_for_tf(exec_tf: str | None) -> float:
-    """Pattern confidence floor (0–100). Only 1m uses the raised 75% gate."""
+    """Pattern / OF confidence floor (0–100) before AI confirm + fire."""
     tf = (exec_tf or "").strip().lower()
-    if tf == "1m":
+    if tf in ("1m", "30s"):
         return THR_SCORE_1M
+    if tf == "5m":
+        return THR_SCORE_5M
     return THR_SCORE
 
 

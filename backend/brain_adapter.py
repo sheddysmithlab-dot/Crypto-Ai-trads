@@ -77,9 +77,11 @@ def _run_brain(candles: List[dict], tf: str,
 # ─── AI confirm-only (YES/NO) — does not invent BUY/SELL ─────────────────────
 _CONFIRM_SYSTEM = (
     "You are the confirmation layer for a crypto trading agent. "
-    "LONG/SHORT is already decided by brain patterns + order-flow traps — never invent BUY/SELL. "
-    "Judge the brief using agent candle-read policies: market structure alignment, pattern quality, "
-    "trap validity, order-flow confidence vs TF floor, and R:R. "
+    "A pattern/trap was already detected; LONG/SHORT direction is fixed — never invent BUY/SELL. "
+    "Analyze under agent candle-read policy: market structure, LONG vs SHORT, "
+    "classic traps, inverse/fake-breakout/absorption/exhaustion, order-flow scores, confluence, R:R. "
+    "Only reply YES if judged confidence meets the TF floor in the brief "
+    "(1m≥80%, 5m≥70%, other≥65%). Otherwise reply NO. "
     "Reply with exactly one word: YES or NO. No other text."
 )
 
@@ -93,26 +95,31 @@ def _matching_side_score(of_trap: Optional[dict], action: str) -> float:
     return max(float(of_trap.get("long_score") or 0), float(of_trap.get("short_score") or 0))
 
 
+def _ai_yes_thr_for_tf(timeframe_key: str) -> float:
+    """AI may only YES at/above these confidence floors (1m=80, 5m=70, else=65)."""
+    return float(thr_score_for_tf(timeframe_key))
+
+
 def _setup_meets_ai_confirm_threshold(
     action: str,
     of_trap: Optional[dict],
     timeframe_key: str,
     think: dict,
 ) -> bool:
-    """AI is called only when agent confidence / OF score clears the TF floor."""
+    """AI is called only when OF/agent confidence clears the TF YES floor (80/70/65)."""
     if action not in ("BUY", "SELL"):
         return False
     tf = _norm_tf(timeframe_key)
-    thr = thr_score_for_tf(tf)
+    thr = _ai_yes_thr_for_tf(tf)
     of_score = _matching_side_score(of_trap, action)
     if of_score >= thr:
         return True
-    # 1m: OF floor is mandatory — never call AI below it
-    if tf == "1m":
+    # Strict score path on 1m/5m — never call AI below floor
+    if tf in ("1m", "30s", "5m"):
         return False
     sig = think.get("signal")
     tf_cfg = _b.TIMEFRAMES.get(tf, _b.TIMEFRAMES["1h"])
-    if sig is not None:
+    if sig is not None and (not of_trap or of_score <= 0):
         try:
             if float(getattr(sig, "score", 0) or 0) >= float(tf_cfg.min_score):
                 return True
@@ -149,10 +156,10 @@ def _build_confirm_user_prompt(
     think: dict,
     of_trap: Optional[dict],
 ) -> str:
-    """Compact policy + setup facts; answer must still be YES/NO only."""
+    """After pattern detect: policy analysis brief; answer YES/NO only at TF confidence floor."""
     side = "LONG" if action == "BUY" else "SHORT"
     tf = _norm_tf(timeframe)
-    thr = thr_score_for_tf(tf)
+    thr = _ai_yes_thr_for_tf(tf)
     tf_cfg = _b.TIMEFRAMES.get(tf, _b.TIMEFRAMES["1h"])
     pattern, trap_score = _setup_label_and_score(think, of_trap, action)
     ms = think.get("structure")
@@ -160,19 +167,31 @@ def _build_confirm_user_prompt(
     trap = think.get("trap")
     stance = think.get("stance")
     of_trap = of_trap or {}
+    side_score = _matching_side_score(of_trap, action)
 
     lines = [
-        f"Confirm this {side} {pattern} / trap score {trap_score if trap_score is not None else '—'}?",
-        f"Pair={pair} TF={timeframe} ({tf_cfg.label}). Reply YES or NO only.",
+        f"PATTERN DETECTED → confirm {side} {pattern}.",
+        f"Pair={pair} TF={timeframe} ({tf_cfg.label}).",
+        f"HARD RULE: reply YES only if confidence ≥ {thr:.0f}% on this TF "
+        f"(1m=80, 5m=70, else=65). Otherwise NO.",
         "",
-        "POLICY:",
-        f"- Unified candle rulebook (same as 1m): min confluence {tf_cfg.min_score}, min R:R {tf_cfg.min_rr}.",
-        f"- OF confidence floor this TF: {thr:.0f}% (1m=75 strict).",
-        f"- Direction already set by brain+OF as {side}; you only confirm or reject.",
+        "ANALYZE (policy):",
+        "- LONG vs SHORT quality vs market structure",
+        "- Trap / inverse / fake-breakout / absorption / exhaustion validity",
+        "- Order-flow side score vs TF floor",
+        "- Confluence + R:R vs rulebook",
+        "",
+        "POLICY FLOORS:",
+        f"- AI YES confidence floor this TF: {thr:.0f}%",
+        f"- Brain confluence min: {tf_cfg.min_score} · min R:R: {tf_cfg.min_rr}",
+        f"- Direction already set as {side}; you only YES/NO — do not invent BUY/SELL",
         f"- Note: {tf_cfg.note}",
         "",
         "SETUP FACTS:",
+        f"- Detected side: {side} · pattern={pattern} · side_score={side_score:.1f} (need ≥{thr:.0f})",
     ]
+    if trap_score is not None and trap_score != side_score:
+        lines.append(f"- Trap/pattern score field: {trap_score}")
     if ms is not None:
         lines.append(
             f"- Structure: {getattr(ms, 'trend', '?')} strength={getattr(ms, 'trend_strength', '?')}"
@@ -180,7 +199,7 @@ def _build_confirm_user_prompt(
     if sig is not None:
         pats = ", ".join(sig.patterns[:4]) if getattr(sig, "patterns", None) else sig.strategy
         lines.append(
-            f"- Pattern: {pats} score={getattr(sig, 'score', '?')} "
+            f"- Pattern signal: {pats} score={getattr(sig, 'score', '?')} "
             f"conf={getattr(sig, 'confidence', '?')} R:R={getattr(sig, 'rr', '?')}"
         )
         if getattr(sig, "entry", None) is not None:
@@ -191,17 +210,17 @@ def _build_confirm_user_prompt(
     if trap is not None:
         lines.append(
             f"- Structure trap: {getattr(trap, 'trap_type', '?')} "
-            f"smart={getattr(trap, 'smart_action', '?')} side={getattr(trap, 'side', '?')}"
+            f"smart={getattr(trap, 'smart_action', '?')} side={getattr(trap, 'side', '?')} "
+            f"(inverse/trap read if applicable)"
         )
     if of_trap:
         lines.append(
             f"- Order-flow: {of_trap.get('final_signal') or of_trap.get('line')} "
             f"pattern={of_trap.get('pattern')} bias_5m={of_trap.get('bias_5m')} "
-            f"LONG={of_trap.get('long_score')} SHORT={of_trap.get('short_score')} "
-            f"side_score={_matching_side_score(of_trap, action):.1f} (need ≥{thr:.0f})"
+            f"LONG={of_trap.get('long_score')} SHORT={of_trap.get('short_score')}"
         )
         if of_trap.get("primary_reason"):
-            lines.append(f"- OF reason: {str(of_trap.get('primary_reason'))[:180]}")
+            lines.append(f"- OF reason: {str(of_trap.get('primary_reason'))[:200]}")
     if stance is not None:
         lines.append(
             f"- Smart stance: {getattr(stance, 'action', '?')} "
@@ -211,8 +230,12 @@ def _build_confirm_user_prompt(
     if brain_v:
         lines.append(f"- Brain verdict: {brain_v}")
     lines.append("")
-    lines.append("Output exactly: YES or NO")
-    return "\n".join(lines)[:3500]
+    lines.append(
+        f"If side_score {side_score:.1f} < {thr:.0f} → you MUST answer NO. "
+        f"Output exactly: YES or NO"
+    )
+    return "\n".join(lines)[:4000]
+
 
 
 async def _confirm_setup_with_ai(
@@ -301,7 +324,15 @@ async def _confirm_setup_with_ai(
             print(f"[AI-CONFIRM] '{provider}' → NO  (raw: {raw!r}) — skip trade.")
             return False
         if token.startswith("YES"):
-            print(f"[AI-CONFIRM] '{provider}' → YES  (raw: {raw!r})")
+            thr = _ai_yes_thr_for_tf(timeframe)
+            side_score = _matching_side_score(of_trap, action)
+            if side_score < thr:
+                print(
+                    f"[AI-CONFIRM] '{provider}' YES ignored — "
+                    f"side_score {side_score:.1f} < floor {thr:.0f}"
+                )
+                return False
+            print(f"[AI-CONFIRM] '{provider}' → YES  (raw: {raw!r}, score={side_score:.1f}≥{thr:.0f})")
             return True
         print(f"[AI-CONFIRM] '{provider}' unclear {raw!r} — fail-open.")
         return None
@@ -478,7 +509,7 @@ def _run_orderflow_trap(
 
 
 def _gate_1m_of_score(action: str, of_trap: Optional[dict], timeframe_key: str) -> str:
-    """1m only: BUY/SELL only when matching OF side score ≥ 75. Blocks brain/AI bypass."""
+    """1m only: BUY/SELL only when matching OF side score ≥ 80. Blocks brain/AI bypass."""
     if _norm_tf(timeframe_key) != "1m":
         return action
     if action not in ("BUY", "SELL"):
@@ -766,7 +797,7 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
             f"Order-flow conf floor: {thr_score_for_tf(tf)}% "
-            f"(1m=75 strict, no pattern bypass; else 65). "
+            f"(1m=80, 5m=70, else=65; AI YES only at/above floor). "
             f"{tf_cfg.note}"
         ),
         "timeframes": list(_b.TIMEFRAMES.keys()),
