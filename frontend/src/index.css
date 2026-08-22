@@ -2,26 +2,6 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Engine boot intro media — subtle “play” motion */
-@keyframes engine-boot-kenburns {
-  0% {
-    transform: scale(1.02);
-    opacity: 0.72;
-  }
-  50% {
-    transform: scale(1.08);
-    opacity: 0.88;
-  }
-  100% {
-    transform: scale(1.02);
-    opacity: 0.72;
-  }
-}
-.engine-boot-media {
-  animation: engine-boot-kenburns 8s ease-in-out infinite;
-  transform-origin: center center;
-}
-
 ::-webkit-scrollbar {
   width: 6px;
 }

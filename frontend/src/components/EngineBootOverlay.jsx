@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import bootArt from '../assets/engine-boot.jpg';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import bootVideo from '../assets/animation.mp4';
 
 const INTRO_SEC = 10;
 const ANALYSIS_SEC = 30;
@@ -7,7 +7,7 @@ const TOTAL_SEC = INTRO_SEC + ANALYSIS_SEC;
 
 /**
  * Full-screen boot sequence after AI Engine START:
- * 0–10s  translucent engine diagram (animated)
+ * 0–10s  intro MP4 (autoplay, muted)
  * 10–40s neon round analysis countdown
  * Blocks all background interaction; Cancel stops engine immediately (no confirm).
  */
@@ -21,7 +21,8 @@ export default function EngineBootOverlay({
   cancelLoading = false,
 }) {
   const [tick, setTick] = useState(0);
-  const [imgOk, setImgOk] = useState(true);
+  const [videoOk, setVideoOk] = useState(true);
+  const videoRef = useRef(null);
 
   useEffect(() => {
     if (!active) return undefined;
@@ -51,6 +52,28 @@ export default function EngineBootOverlay({
   const show = active && remaining > 0.05;
   void tick;
 
+  // Start / restart intro video when intro phase is visible
+  useEffect(() => {
+    if (!show || !inIntro || !videoOk) return undefined;
+    const el = videoRef.current;
+    if (!el) return undefined;
+    el.muted = true;
+    el.currentTime = 0;
+    const play = el.play();
+    if (play && typeof play.catch === 'function') {
+      play.catch(() => {
+        // Autoplay blocked — still show first frame
+      });
+    }
+    return () => {
+      try {
+        el.pause();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [show, inIntro, videoOk]);
+
   const ring = useMemo(() => {
     const size = 220;
     const stroke = 10;
@@ -77,13 +100,18 @@ export default function EngineBootOverlay({
 
       {inIntro ? (
         <div className="relative z-[201] w-[min(96vw,980px)] max-h-[78vh] rounded-xl overflow-hidden border border-cyan-400/50 shadow-[0_0_48px_rgba(59,158,255,0.45)] bg-black">
-          {imgOk ? (
-            <img
-              src={bootArt}
-              alt="AI Engine initializing"
-              className="engine-boot-media w-full max-h-[78vh] object-contain opacity-80"
-              draggable={false}
-              onError={() => setImgOk(false)}
+          {videoOk ? (
+            <video
+              ref={videoRef}
+              src={bootVideo}
+              className="w-full max-h-[78vh] object-contain opacity-90"
+              autoPlay
+              muted
+              playsInline
+              loop
+              preload="auto"
+              controls={false}
+              onError={() => setVideoOk(false)}
             />
           ) : (
             <div className="flex items-center justify-center min-h-[280px] text-cyan-300 font-bold tracking-widest uppercase text-sm p-8">
