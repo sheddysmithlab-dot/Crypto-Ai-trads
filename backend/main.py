@@ -735,8 +735,9 @@ class AITradingAgent:
         self._ai_skip_until = 0.0
         self._last_feed_ts = time.time()
         self._last_runtime_save = 0.0
-        # After START: no new auto trades until trading_ready_at (boot intro + analysis).
+        # trading_ready_at: 0 = ready now. boot_ui_until drives overlay countdown only.
         self.trading_ready_at = 0.0
+        self.boot_ui_until = 0.0
         self.session_stats_snapshot: dict = {
             "trade_notional": 0.0,
             "daily_profit": 0.0,
@@ -2324,6 +2325,7 @@ class AITradingAgent:
         self._close_all_positions(reason)
         self.is_active = False
         self.trading_ready_at = 0.0
+        self.boot_ui_until = 0.0
         _clear_entry_pipeline()
         self.end_ai_season(clear_live_table=True, reason="manual_stop")
         self.peak_net_pct = 0.0
@@ -2340,6 +2342,7 @@ class AITradingAgent:
         self.is_active = False
         self.session_hold_mode = True
         self.trading_ready_at = 0.0
+        self.boot_ui_until = 0.0
         _clear_entry_pipeline()
         # Keep season_id + start capital so held closes still roll into portfolio counters.
         self.session_stats_frozen = False
@@ -2397,7 +2400,7 @@ class AITradingAgent:
             {"open_positions": open_count, "warmup_sec": ENGINE_WARMUP_SEC},
         )
         notifications.push(
-            f"Session schedule ON — AI warming up {ENGINE_WARMUP_SEC}s before trades ({reason}).",
+            f"Session schedule ON — trading READY now; boot UI {ENGINE_WARMUP_SEC}s ({reason}).",
             "success",
         )
         self.persist_runtime()
@@ -2409,20 +2412,21 @@ class AITradingAgent:
         self.begin_trading_warmup()
         print("[AI AGENT] Trading resumed (portfolio stop-loss disabled).")
         notifications.push(
-            f"Trading resumed — {ENGINE_WARMUP_SEC}s warmup before new entries.",
+            f"Trading resumed — live now (boot UI {ENGINE_WARMUP_SEC}s cosmetic).",
             "warning",
         )
         self.persist_runtime()
 
     def begin_trading_warmup(self) -> None:
-        """Arm engine now; scan/detect immediately; block new fires for ENGINE_WARMUP_SEC."""
-        self.trading_ready_at = time.time() + float(ENGINE_WARMUP_SEC)
+        """Arm on Continue: scan + trade immediately; boot intro/countdown is UI-only."""
+        self.trading_ready_at = 0.0
+        self.boot_ui_until = time.time() + float(ENGINE_WARMUP_SEC)
         # Seed cursor on next scan so already-closed history is not traded as fresh detects.
         _reset_scan_candle_baseline()
         print(
-            f"[AI ENGINE] Armed — scanning ON; new trades after {ENGINE_WARMUP_SEC}s "
-            f"(intro {ENGINE_BOOT_INTRO_SEC}s + analysis {ENGINE_BOOT_ANALYSIS_SEC}s). "
-            f"Detect on closed candle → fire at next candle END (close)."
+            f"[AI ENGINE] Armed — trading READY now (boot UI {ENGINE_WARMUP_SEC}s cosmetic). "
+            f"Detect on closed candle → fire at next candle open. "
+            f"First detect per pair is skipped."
         )
 
     def trading_ready(self) -> bool:
@@ -2434,6 +2438,10 @@ class AITradingAgent:
         return time.time() >= ready_at
 
     def warmup_remaining_sec(self) -> float:
+        """Boot overlay countdown only — does not block entries."""
+        until = float(getattr(self, "boot_ui_until", 0) or 0)
+        if until > 0:
+            return max(0.0, until - time.time())
         ready_at = float(getattr(self, "trading_ready_at", 0) or 0)
         if ready_at <= 0:
             return 0.0
@@ -2529,7 +2537,7 @@ class AITradingAgent:
         )
 
     def entries_allowed(self) -> bool:
-        """False while frozen / hold / emergency / warmup — open trades still update via process_tick."""
+        """False while frozen / hold / emergency — open trades still update via process_tick."""
         if self.emergency_triggered:
             return False
         if self.connectivity_frozen:
@@ -2674,12 +2682,14 @@ PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
 # 1m only: last auto fire candle open-time per pair (blocks fires on next 2 candles).
 LAST_AUTO_FIRE_CANDLE_MS: dict[str, int] = {}
 ONE_M_MIN_BARS_BETWEEN_FIRES = 3  # fire on N → next fire earliest N+3 (detect on N+2 OK)
-# Engine boot: intro media (10s) + analysis countdown (30s) before auto trades.
+# Engine boot UI: intro + analysis overlay (cosmetic; trading starts on Continue).
 ENGINE_BOOT_INTRO_SEC = 10
 ENGINE_BOOT_ANALYSIS_SEC = 10
 ENGINE_WARMUP_SEC = ENGINE_BOOT_INTRO_SEC + ENGINE_BOOT_ANALYSIS_SEC  # 20s
 PATTERN_NEON_STAGES: list[dict] = []
 THREE_CANDLE_ENTRY = False
+# After arm: skip the first BUY/SELL detect once per pair (all charts).
+FIRST_DETECT_SKIPPED: set[str] = set()
 # Patterns that must never open a trade (detect may log, entry is skipped).
 SKIP_TRADE_PATTERNS = frozenset(
     {
@@ -2783,9 +2793,11 @@ def _reset_scan_candle_baseline() -> None:
     """Clear candle cursors + queues on engine arm / TF change.
 
     First scan per pair only seeds LAST_CANDLE_TIMESTAMPS (no trade on already-closed
-    history). After that: detect on each NEW close → fire at next candle END (close).
+    history). First BUY/SELL detect per pair is also skipped. After that: detect on
+    each NEW close → fire at next candle open.
     """
     LAST_CANDLE_TIMESTAMPS.clear()
+    FIRST_DETECT_SKIPPED.clear()
     _clear_entry_pipeline()
 
 
@@ -2982,13 +2994,14 @@ async def fetch_closed_candle_history(
 
 
 async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
-    """Scan last CLOSED candle for pattern; fire at the NEXT candle's END (close).
+    """Scan last CLOSED candle for pattern; fire at the NEXT candle's open.
 
     Correct flow:
-      1) Fire any queued signal once now >= end of the candle after detect (after warmup).
+      1) Fire any queued signal once now >= fire_candle open.
       2) First observation after engine arm only seeds the cursor (no history dump).
-      3) On a newly closed candle N: detect → queue fire at end of candle N+1
-         (close_time + 2×interval), not at N+1 open.
+      3) First BUY/SELL detect per pair after arm is skipped (all charts).
+      4) On a newly closed candle: detect → queue fire at close_time + interval.
+         If that next candle already started (scan lag), fire now.
     """
     bybit_symbol = get_bybit_symbol(pair)
     if not bybit_symbol:
@@ -3124,10 +3137,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             entry_price=mark_px,
             bybit_symbol=bybit_symbol,
             pattern=detect.get("pattern"),
-            # Chart FIRED neon on the next candle bar (the one we waited to fully close).
-            signal_candle_time=int(
-                pending.get("entry_candle_time") or fire_candle_ms
-            ),
+            # Chart FIRED neon on the entry candle (next bar open after detect).
+            signal_candle_time=int(fire_candle_ms),
             taapi_action=detect["action"],
             sl_price=sl_price,
             tp_price=tp_price,
@@ -3145,10 +3156,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         PENDING_ENTRY_SIGNALS.pop(pair, None)
         if (timeframe_key or "").strip().lower() == "1m":
             LAST_AUTO_FIRE_CANDLE_MS[pair] = int(fire_candle_ms)
-        entry_bar_ms = int(pending.get("entry_candle_time") or fire_candle_ms)
         _push_pattern_neon(
             pair=pair,
-            candle_time_ms=entry_bar_ms,
+            candle_time_ms=fire_candle_ms,
             stage="fired",
             side=side,
             action=detect.get("action"),
@@ -3156,7 +3166,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             reason=detect.get("reason"),
         )
         system_log.push_agent_chat(
-            brain_chat_summary(detect) + f" → FIRED {side} on {pair} (next-candle END)",
+            brain_chat_summary(detect) + f" → FIRED {side} on {pair} (next-candle open)",
             status="match",
             details={
                 "pair": pair,
@@ -3188,7 +3198,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         )
         return True
 
-    # --- 1) Fire queued signal once the next candle has ENDED (closed) ---
+    # --- 1) Fire queued signal once the next candle has OPENed ---
     pending = PENDING_ENTRY_SIGNALS.get(pair)
     if pending and pending.get("timeframe_key") == timeframe_key:
         fire_candle_ms = int(pending["fire_candle_time"])
@@ -3198,10 +3208,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         # During warmup: keep scanning/queue alive, but do not fire or expire yet.
         if warmup_hold:
             if now_ms >= fire_candle_ms:
-                entry_bar = int(pending.get("entry_candle_time") or fire_candle_ms)
                 _push_pattern_neon(
                     pair=pair,
-                    candle_time_ms=entry_bar,
+                    candle_time_ms=fire_candle_ms,
                     stage="confirming",
                     side=pending.get("side"),
                     action=(pending.get("detect") or {}).get("action"),
@@ -3210,17 +3219,16 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 )
         # Expire only after fire candle + grace (scan/AI lag must not kill the entry).
         elif now_ms > deadline_ms:
-            await _skip_pending(pending, "Next-candle-end fire window expired", fire_candle_ms=fire_candle_ms)
+            await _skip_pending(pending, "Next-candle fire window expired", fire_candle_ms=fire_candle_ms)
         elif now_ms >= fire_candle_ms:
-            entry_bar = int(pending.get("entry_candle_time") or fire_candle_ms)
             _push_pattern_neon(
                 pair=pair,
-                candle_time_ms=entry_bar,
+                candle_time_ms=fire_candle_ms,
                 stage="confirming",
                 side=pending.get("side"),
                 action=(pending.get("detect") or {}).get("action"),
                 pattern=(pending.get("detect") or {}).get("pattern"),
-                reason="Waiting next-candle END → firing",
+                reason="Waiting next-candle open → firing",
             )
             if await _execute_queued_fire(pending):
                 return True
@@ -3351,15 +3359,39 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         print(f"[BRAIN] SKIP pattern={blocked} on {pair} — no trade")
         return False
 
+    # First valid BUY/SELL after arm: skip once per pair (all charts).
+    if pair not in FIRST_DETECT_SKIPPED:
+        FIRST_DETECT_SKIPPED.add(pair)
+        side = "LONG" if detect["action"] == "BUY" else "SHORT"
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=close_time,
+            stage="skipped",
+            side=side,
+            action=detect.get("action"),
+            pattern=detect.get("pattern"),
+            reason="First detect skipped (safety on all charts)",
+        )
+        system_log.push_agent_chat(
+            f"SKIPPED first {side} on {pair}: {detect.get('pattern')} (first trade skip)",
+            status="no_match",
+            details={
+                "pair": pair,
+                "side": side,
+                "pattern": detect.get("pattern"),
+                "reason": "first_detect_skip",
+            },
+        )
+        print(f"[BRAIN] SKIP first detect {side} {pair} pattern={detect.get('pattern')}")
+        return False
+
     candle_close = float(history[-1].get("close") or 0)
     if candle_close > 0:
         agent.set_pair_mark(pair, candle_close)
 
     side = "LONG" if detect["action"] == "BUY" else "SHORT"
-    # Pattern on closed bar N → wait through full candle N+1 → fire at N+1 END
-    # ( = open of N+2 = close_time + 2×interval ). Not at N+1 start.
-    next_candle_open_ms = close_time + interval_ms
-    fire_candle_ms = close_time + (2 * interval_ms)
+    # Pattern on closed bar N → fire at open of candle N+1 (close_time + interval).
+    fire_candle_ms = close_time + interval_ms
 
     # 1m only: after fire on candle 1, skip queue if fire would land on candle 2 or 3.
     # Detect on candle 3 → fire candle 4 is allowed when pattern confirms.
@@ -3405,8 +3437,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         "detect": detect,
         "side": side,
         "signal_candle_time": close_time,
-        "entry_candle_time": next_candle_open_ms,  # bar N+1 (wait for its close)
-        "fire_candle_time": fire_candle_ms,  # end of N+1
+        "fire_candle_time": fire_candle_ms,
         "timeframe_key": timeframe_key,
         "detect_close": candle_close,
         "queued_at": time.time(),
@@ -3422,40 +3453,39 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     )
     _push_pattern_neon(
         pair=pair,
-        candle_time_ms=next_candle_open_ms,
+        candle_time_ms=fire_candle_ms,
         stage="confirming",
         side=side,
         action=detect.get("action"),
         pattern=detect.get("pattern"),
-        reason="Fire at next candle END",
+        reason="Fire at next candle open",
     )
     system_log.push_agent_chat(
-        f"DETECTED {side} on {pair}: {detect.get('pattern')} — fire at next candle END",
+        f"DETECTED {side} on {pair}: {detect.get('pattern')} — fire at next candle open",
         status="match",
         details={
             "pair": pair,
             "detect_candle": close_time,
-            "entry_candle": next_candle_open_ms,
-            "fire_at": fire_candle_ms,
+            "fire_candle": fire_candle_ms,
             "pattern": detect.get("pattern"),
         },
     )
     print(
         f"[BRAIN] DETECTED {side} {pair} pattern={detect.get('pattern')} "
-        f"on closed@{close_time} → wait next candle END fire@{fire_candle_ms} "
+        f"on closed@{close_time} → queue fire@{fire_candle_ms} "
         f"(AI={detect.get('ai_confirmation', 'SKIP')})"
     )
 
     # AI confirm already applied in evaluate_live_entry_async (NO → never reaches here).
 
-    # If next candle already ended while we scanned, fire now (after warmup only).
+    # If next candle already opened while we scanned, fire now.
     now_ms = int(time.time() * 1000)
     pending = PENDING_ENTRY_SIGNALS.get(pair)
     if pending and now_ms >= fire_candle_ms:
         if not agent.trading_ready():
             _push_pattern_neon(
                 pair=pair,
-                candle_time_ms=next_candle_open_ms,
+                candle_time_ms=fire_candle_ms,
                 stage="confirming",
                 side=pending.get("side"),
                 action=(pending.get("detect") or {}).get("action"),
@@ -3465,16 +3495,16 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             return False
         deadline_ms = fire_candle_ms + interval_ms + fire_grace_ms
         if now_ms > deadline_ms:
-            await _skip_pending(pending, "Next-candle-end fire window expired", fire_candle_ms=fire_candle_ms)
+            await _skip_pending(pending, "Next-candle fire window expired", fire_candle_ms=fire_candle_ms)
             return False
         _push_pattern_neon(
             pair=pair,
-            candle_time_ms=next_candle_open_ms,
+            candle_time_ms=fire_candle_ms,
             stage="confirming",
             side=pending.get("side"),
             action=(pending.get("detect") or {}).get("action"),
             pattern=(pending.get("detect") or {}).get("pattern"),
-            reason="Next candle already ended → firing",
+            reason="Next candle already open → firing",
         )
         return await _execute_queued_fire(pending)
     return False
@@ -3768,27 +3798,29 @@ async def bot_start():
     system_log.push(
         "ai",
         f"AI Engine STARTED on {agent.active_pair} ({open_count} open preserved). "
-        f"Scanning ON; new trades after {ENGINE_WARMUP_SEC}s (detect → next candle END).",
+        f"Scanning ON; trading READY now (boot UI {ENGINE_WARMUP_SEC}s). "
+        f"Detect → next candle open; first detect per pair skipped.",
         {"open_positions": open_count, "timeframe_seconds": agent.timeframe_seconds, "warmup_sec": ENGINE_WARMUP_SEC},
     )
     system_log.push_agent_chat(
-        f"AI Engine ON — scanning now · trades in {ENGINE_WARMUP_SEC}s · {profile['name']} · {agent.active_pair} · {tf_key}",
+        f"AI Engine ON — trading live · boot UI {ENGINE_WARMUP_SEC}s · {profile['name']} · {agent.active_pair} · {tf_key}",
         status="active",
         details={"pair": agent.active_pair, "timeframe": tf_key, "entry_pattern": profile, "warmup_sec": ENGINE_WARMUP_SEC},
     )
     notifications.push(
-        f"AI Engine STARTED — scanning now; trades after {ENGINE_BOOT_INTRO_SEC}s intro + {ENGINE_BOOT_ANALYSIS_SEC}s.",
+        f"AI Engine STARTED — trading now; boot animation runs in UI only.",
         "success",
     )
     return {
         "status": "success",
         "is_active": True,
-        "message": f"AI Engine started — scanning ON; trades after {ENGINE_WARMUP_SEC}s ({profile['name']}, {tf_key}).",
+        "message": f"AI Engine started — trading READY ({profile['name']}, {tf_key}). Boot UI {ENGINE_WARMUP_SEC}s cosmetic.",
         "open_positions": open_count,
         "warmup_sec": ENGINE_WARMUP_SEC,
         "boot_intro_sec": ENGINE_BOOT_INTRO_SEC,
         "boot_analysis_sec": ENGINE_BOOT_ANALYSIS_SEC,
         "trading_ready_at": agent.trading_ready_at,
+        "boot_ui_until": getattr(agent, "boot_ui_until", 0),
         "entry_pattern": profile["name"],
         "session_schedule_enabled": False,
     }
