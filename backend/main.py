@@ -2680,8 +2680,32 @@ ENGINE_BOOT_ANALYSIS_SEC = 10
 ENGINE_WARMUP_SEC = ENGINE_BOOT_INTRO_SEC + ENGINE_BOOT_ANALYSIS_SEC  # 20s
 PATTERN_NEON_STAGES: list[dict] = []
 THREE_CANDLE_ENTRY = False
+# Patterns that must never open a trade (detect may log, entry is skipped).
+SKIP_TRADE_PATTERNS = frozenset(
+    {
+        "MA_COMPRESSION_CONSOLIDATION_ZONE",
+    }
+)
 
 _bybit_executor_agent = None
+
+
+def _pattern_is_trade_skipped(detect: dict | None) -> str | None:
+    """Return skip reason if detect pattern is on the blocklist; else None."""
+    d = detect or {}
+    raw = (
+        str(d.get("pattern") or "")
+        or str(d.get("pattern_label") or "")
+        or str(d.get("strategy") or "")
+        or str(d.get("trap_type") or "")
+        or str(d.get("reason") or "")
+    )
+    up = raw.upper().replace(" ", "_").replace("-", "_")
+    for blocked in SKIP_TRADE_PATTERNS:
+        key = blocked.upper().replace(" ", "_")
+        if key and key in up:
+            return blocked
+    return None
 
 
 def _timeframe_interval_ms(timeframe_key: str) -> int:
@@ -3015,6 +3039,14 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         fire_candle_ms = int(pending["fire_candle_time"])
         candle_close = float(pending.get("detect_close") or detect.get("entry") or 0)
 
+        blocked = _pattern_is_trade_skipped(detect)
+        if blocked:
+            return await _skip_pending(
+                pending,
+                f"Pattern blocked: {blocked}",
+                fire_candle_ms=fire_candle_ms,
+            )
+
         # 1m only: no fire on candle 2/3 after a fire on candle 1 (next earliest = candle 4).
         tf_l = (timeframe_key or "").strip().lower()
         if tf_l == "1m":
@@ -3291,6 +3323,32 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 "orderflow_trap": (detect.get("orderflow_trap") or {}).get("line"),
             },
         )
+        return False
+
+    blocked = _pattern_is_trade_skipped(detect)
+    if blocked:
+        side = "LONG" if detect["action"] == "BUY" else "SHORT"
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=close_time,
+            stage="skipped",
+            side=side,
+            action=detect.get("action"),
+            pattern=detect.get("pattern"),
+            reason=f"Pattern blocked: {blocked}",
+        )
+        system_log.push_agent_chat(
+            f"SKIPPED {side} on {pair}: {blocked} (no trade on this pattern)",
+            status="no_match",
+            details={
+                "pair": pair,
+                "side": side,
+                "pattern": detect.get("pattern"),
+                "blocked": blocked,
+                "reason": "pattern_blocklist",
+            },
+        )
+        print(f"[BRAIN] SKIP pattern={blocked} on {pair} — no trade")
         return False
 
     candle_close = float(history[-1].get("close") or 0)
