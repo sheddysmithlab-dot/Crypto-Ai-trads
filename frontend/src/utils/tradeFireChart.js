@@ -24,24 +24,24 @@ const NEON = {
     label: 'CONFIRMING',
   },
   fired_LONG: {
-    border: '#39ff14',
-    glow: 'rgba(57, 255, 20, 0.75)',
-    bg: 'rgba(57, 255, 20, 0.1)',
-    badge: '#7fff00',
+    border: '#3b9eff',
+    glow: 'rgba(59, 158, 255, 0.8)',
+    bg: 'rgba(59, 158, 255, 0.12)',
+    badge: '#7ec8ff',
     className: 'trade-fire-neon--long',
     tipClass: 'trade-fire-tooltip--long',
     glyph: '⚡',
-    label: 'FIRED',
+    label: 'FIRED LONG',
   },
   fired_SHORT: {
-    border: '#ff10f0',
-    glow: 'rgba(255, 16, 240, 0.75)',
-    bg: 'rgba(255, 16, 240, 0.1)',
-    badge: '#ff6bff',
+    border: '#ff8a1f',
+    glow: 'rgba(255, 138, 31, 0.8)',
+    bg: 'rgba(255, 138, 31, 0.12)',
+    badge: '#ffb86b',
     className: 'trade-fire-neon--short',
     tipClass: 'trade-fire-tooltip--short',
     glyph: '⚡',
-    label: 'FIRED',
+    label: 'FIRED SHORT',
   },
   skipped: {
     border: '#ff4d4d',
@@ -203,12 +203,20 @@ function appendTooltip(overlayEl, left, top, entry, neon) {
   patternEl.className = 'trade-fire-tooltip__pattern';
   patternEl.textContent = formatPatternLabel(entry.pattern);
 
+  tip.appendChild(stageEl);
+  // Explicit LONG/SHORT line on fired candles (color already encodes side).
+  if ((entry.stage === 'fired' || !entry.stage) && entry.side) {
+    const sideEl = document.createElement('div');
+    sideEl.className = 'trade-fire-tooltip__side';
+    sideEl.textContent =
+      entry.side === 'SHORT' || entry.side === 'SELL' ? 'SIDE: SHORT' : 'SIDE: LONG';
+    tip.appendChild(sideEl);
+  }
+  tip.appendChild(patternEl);
+
   const timeEl = document.createElement('div');
   timeEl.className = 'trade-fire-tooltip__time';
   timeEl.textContent = formatTradeFireTime(entry.opened_at || entry.signal_candle_time);
-
-  tip.appendChild(stageEl);
-  tip.appendChild(patternEl);
   tip.appendChild(timeEl);
   if (entry.reason && entry.stage === 'skipped') {
     const reasonEl = document.createElement('div');
@@ -221,7 +229,7 @@ function appendTooltip(overlayEl, left, top, entry, neon) {
 }
 
 /**
- * Neon glow frames: cyan detected → amber confirming → lime/magenta fired or red skipped.
+ * Neon glow frames: cyan detected → amber confirming → blue LONG / orange SHORT fired.
  */
 export function renderTradeFireOverlay({
   chart,

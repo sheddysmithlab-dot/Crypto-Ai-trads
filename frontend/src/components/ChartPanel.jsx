@@ -49,14 +49,19 @@ export default function ChartPanel({
                     : readouts.tradeFireTooltip.stage === 'skipped'
                       ? 'border-red-400/60 bg-red-500/10 text-red-100'
                       : readouts.tradeFireTooltip.side === 'SHORT'
-                        ? 'border-fuchsia-500/50 bg-fuchsia-500/10 text-fuchsia-200'
-                        : 'border-lime-500/50 bg-lime-500/10 text-lime-200'
+                        ? 'border-orange-400/60 bg-orange-500/10 text-orange-100'
+                        : 'border-sky-400/60 bg-sky-500/10 text-sky-100'
               }`}
               title={readouts.tradeFireTooltip.reason || 'Pattern pipeline on candle'}
             >
               <span className="flex items-center gap-1">
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
-                {readouts.tradeFireTooltip.stageLabel || 'PATTERN'} · {readouts.tradeFireTooltip.pattern}
+                {readouts.tradeFireTooltip.stageLabel || 'PATTERN'}
+                {readouts.tradeFireTooltip.side &&
+                !/LONG|SHORT/i.test(readouts.tradeFireTooltip.stageLabel || '')
+                  ? ` · ${readouts.tradeFireTooltip.side}`
+                  : ''}{' '}
+                · {readouts.tradeFireTooltip.pattern}
               </span>
               <span className="text-[9px] font-mono font-normal normal-case tracking-normal text-gray-400 truncate">
                 {formatTradeFireTime(
