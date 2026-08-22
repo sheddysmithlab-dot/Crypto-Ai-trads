@@ -635,8 +635,9 @@ INVERT_AUTO_TRADE_FIRE = False
 PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.50"))
 PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.20"))
 # Protective stop-loss (gross %, LONG/SHORT symmetric) — no widen for choppy:
-#   allow adverse to −0.50% → activate protect; track trough + recovery peak;
-#   EXIT when recovery_peak − current ≥ 0.20%; emergency floor −0.70%.
+#   −0.50% → LOCK (hold); track best_recovery (never moves backward);
+#   EXIT when recovery_drawdown = best_recovery − current ≥ 0.20%;
+#   emergency floor −0.70%.
 LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.50"))
 LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0.20"))
 LOSS_EMERGENCY_PCT = float(os.environ.get("LOSS_EMERGENCY_PCT", "0.70"))
@@ -1897,45 +1898,46 @@ class AITradingAgent:
     def _update_loss_protect_extremes(
         self, trade: dict, gross_pct: float, mark: float | None
     ) -> None:
-        """After −0.50% protect: track adverse trough + best recovery (gross + price)."""
+        """After −0.50% LOCK: track best recovery PnL (never move recovery backward).
+
+        best_recovery only improves (higher gross / less loss). New deeper troughs
+        do NOT reset the recovery anchor while the position stays open.
+        recovery_drawdown = best_recovery_pnl − current_pnl (evaluated in exit).
+        """
         side = trade.get("side")
+        # Optional: still record worst adverse for logs (does not reset recovery)
         adv = trade.get("loss_adverse_extreme_gross")
-        if adv is None:
+        if adv is None or gross_pct < float(adv) - 1e-9:
             trade["loss_adverse_extreme_gross"] = gross_pct
+            if mark is not None and mark > 0:
+                if side == "LONG":
+                    ext = trade.get("loss_adverse_extreme_price")
+                    if ext is None or mark < float(ext):
+                        trade["loss_adverse_extreme_price"] = float(mark)
+                elif side == "SHORT":
+                    ext = trade.get("loss_adverse_extreme_price")
+                    if ext is None or mark > float(ext):
+                        trade["loss_adverse_extreme_price"] = float(mark)
+
+        # Best recovery anchor — ratchet forward only, never reset
+        rec = trade.get("loss_recovery_peak_gross")
+        if rec is None:
             trade["loss_recovery_peak_gross"] = gross_pct
             if mark is not None and mark > 0:
-                trade["loss_adverse_extreme_price"] = float(mark)
                 trade["loss_recovery_peak_price"] = float(mark)
             return
 
-        # New worse trough → reset recovery to trough
-        if gross_pct < float(adv) - 1e-9:
-            trade["loss_adverse_extreme_gross"] = gross_pct
+        if gross_pct > float(rec) + 1e-9:
             trade["loss_recovery_peak_gross"] = gross_pct
             if mark is not None and mark > 0:
-                trade["loss_adverse_extreme_price"] = float(mark)
-                trade["loss_recovery_peak_price"] = float(mark)
-            return
-
-        # Improving / flat from trough → raise recovery peak
-        rec = float(trade.get("loss_recovery_peak_gross") if trade.get("loss_recovery_peak_gross") is not None else adv)
-        if gross_pct > rec + 1e-9:
-            trade["loss_recovery_peak_gross"] = gross_pct
-        if mark is not None and mark > 0:
-            ext_px = trade.get("loss_adverse_extreme_price")
-            rec_px = trade.get("loss_recovery_peak_price")
-            if side == "LONG":
-                if ext_px is None or mark < float(ext_px):
-                    trade["loss_adverse_extreme_price"] = float(mark)
-                    trade["loss_recovery_peak_price"] = float(mark)
-                elif rec_px is None or mark > float(rec_px):
-                    trade["loss_recovery_peak_price"] = float(mark)
-            elif side == "SHORT":
-                if ext_px is None or mark > float(ext_px):
-                    trade["loss_adverse_extreme_price"] = float(mark)
-                    trade["loss_recovery_peak_price"] = float(mark)
-                elif rec_px is None or mark < float(rec_px):
-                    trade["loss_recovery_peak_price"] = float(mark)
+                # Best recovery price: LONG = higher mark, SHORT = lower mark
+                rec_px = trade.get("loss_recovery_peak_price")
+                if side == "LONG":
+                    if rec_px is None or mark > float(rec_px):
+                        trade["loss_recovery_peak_price"] = float(mark)
+                elif side == "SHORT":
+                    if rec_px is None or mark < float(rec_px):
+                        trade["loss_recovery_peak_price"] = float(mark)
 
     def _mark_from_gross_pct(self, entry: float, side: str, gross_pct: float) -> float:
         """Price that realizes exactly gross_pct for side (paper SL/TP fill clamp)."""
@@ -1947,9 +1949,9 @@ class AITradingAgent:
         """Single path-exit engine: profit lock/trail + protective SL (no parallel engine).
 
         Profit: +0.50% lock → peak−0.20% trail; drop below lock → BE.
-        Loss: allow to −0.50% → protect; track trough + recovery; EXIT when
-              recovery_peak − current ≥ 0.20% (price extremes, not tick counts);
-              never widen for choppy; emergency floor −0.70%.
+        Loss: −0.50% → LOCK (hold, do not close); track best_recovery_pnl (never
+              moves backward); EXIT when recovery_drawdown =
+              best_recovery − current ≥ 0.20%; emergency −0.70%.
         LONG/SHORT symmetric on gross %.
         """
         trade.pop("_exit_fill_mark", None)
@@ -1979,7 +1981,7 @@ class AITradingAgent:
             elif target_gross < 0 and gross_pct < target_gross - 1e-9:
                 trade["_exit_fill_mark"] = self._mark_from_gross_pct(entry, side, target_gross)
 
-        # 1) Absolute emergency floor −0.70% (never remain open beyond)
+        # 1) Absolute emergency floor −0.70%
         if gross_pct <= -LOSS_EMERGENCY_PCT:
             _arm_paper_fill(-LOSS_EMERGENCY_PCT)
             return (
@@ -1987,7 +1989,7 @@ class AITradingAgent:
                 f"floor=−{LOSS_EMERGENCY_PCT:g}% mark={mark:.6f} entry={entry:.6f}"
             )
 
-        # 2) Profit lock / trail (takes priority when in profit lock)
+        # 2) Profit lock / trail
         if gross_pct >= PROFIT_LOCK_PCT:
             trade["profit_lock"] = True
 
@@ -2011,36 +2013,33 @@ class AITradingAgent:
                 )
             return None
 
-        # 3) Protective stop-loss path (no widen for choppy)
+        # 3) Loss LOCK at −0.50% — hold and track best recovery (never reset anchor)
         if gross_pct <= -LOSS_PROTECT_PCT:
             trade["loss_protect"] = True
 
         if trade.get("loss_protect"):
             self._update_loss_protect_extremes(trade, gross_pct, mark)
-            trough = float(trade.get("loss_adverse_extreme_gross") or gross_pct)
-            recovery = float(
+            best_recovery = float(
                 trade.get("loss_recovery_peak_gross")
                 if trade.get("loss_recovery_peak_gross") is not None
-                else trough
+                else gross_pct
             )
-            # Retrace from best recovery (combined 0.10s OK — measured on peak/trough)
-            retrace = recovery - gross_pct
-            if retrace >= LOSS_RECOVERY_RETRACE_PCT - 1e-9:
-                fill_at = recovery - LOSS_RECOVERY_RETRACE_PCT
+            # recovery_drawdown = best_recovery_pnl − current_pnl
+            recovery_drawdown = best_recovery - gross_pct
+            if recovery_drawdown >= LOSS_RECOVERY_RETRACE_PCT - 1e-9:
+                fill_at = best_recovery - LOSS_RECOVERY_RETRACE_PCT
                 _arm_paper_fill(fill_at)
                 return (
-                    f"LOSS_PROTECT_TRAIL | {side} trough={trough:.3f}% "
-                    f"recovery={recovery:.3f}% now={gross_pct:.3f}% "
-                    f"retrace={retrace:.3f}%≥{LOSS_RECOVERY_RETRACE_PCT:g}% "
-                    f"(protect@−{LOSS_PROTECT_PCT:g}%) "
-                    f"ext_px={trade.get('loss_adverse_extreme_price')} "
+                    f"LOSS_PROTECT_TRAIL | {side} LOCK@−{LOSS_PROTECT_PCT:g}% "
+                    f"best_recovery={best_recovery:.3f}% now={gross_pct:.3f}% "
+                    f"recovery_drawdown={recovery_drawdown:.3f}%≥{LOSS_RECOVERY_RETRACE_PCT:g}% "
+                    f"worst={trade.get('loss_adverse_extreme_gross')} "
                     f"rec_px={trade.get('loss_recovery_peak_price')} "
                     f"mark={mark:.6f} entry={entry:.6f}"
                 )
-            # Still protected, waiting for recovery-then-retrace or emergency
+            # HOLD while locked — recovery improving or drawdown < 0.20%
             return None
 
-        # Above −0.50% and no profit lock → hold
         return None
 
     def _close_single_trade(self, trade, metrics, reason) -> bool:
