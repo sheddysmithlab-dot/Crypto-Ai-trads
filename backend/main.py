@@ -11,6 +11,7 @@ import os
 import random
 import sys
 import time
+from dataclasses import dataclass
 import httpx
 from dotenv import load_dotenv
 
@@ -632,34 +633,129 @@ bybit_api = BybitAPIWrapper()
 # Manual-mode defaults (auto strategy wiped)
 MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "10"))
 MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "1"))
-AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path-based position management
+AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path-based exit engine (_evaluate_fixed_pct_exit)
 INVERT_AUTO_TRADE_FIRE = False
-# Position-management hierarchy (gross % from entry — LONG/SHORT symmetric):
-#   INITIAL SL −0.45% → PROFIT PROTECT @ +0.30% (stop → entry+fee/slip buffer)
-#   → WEAK MOMENTUM BOOK +0.40%…+0.50% → STRONG MOMENTUM HOLD → HARD TP +0.70%
-#   → OPPOSITE TRAP/ABSORPTION = EARLY EXIT
-# −0.70% is emergency hard floor only (never intentionally hold a normal loser past −0.45%).
-PATH_SL_INITIAL_PCT = 0.45
-PATH_SL_EMERGENCY_PCT = 0.70
-PATH_PROTECT_ACTIVATE_PCT = 0.30
-PATH_WEAK_BOOK_LO_PCT = 0.40
-PATH_WEAK_BOOK_HI_PCT = 0.50
-PATH_STRONG_HOLD_PCT = 0.50
-PATH_TP_HARD_PCT = 0.70
-# Fee/slippage buffer above entry once profit-protect is on (keeps net ≈ flat, not a real loss).
-# Round-trip taker ≈ 0.11% + small slip pad.
-EXIT_FEE_SLIP_BUFFER_PCT = float(os.environ.get("EXIT_FEE_SLIP_BUFFER_PCT", "0.15"))
-# Paper/backtest close adverse slippage (gross %), applied when settling for_close.
-EXIT_SLIPPAGE_PCT = float(os.environ.get("EXIT_SLIPPAGE_PCT", "0.02"))
-# Legacy aliases (UI / older call sites)
+
+
+@dataclass
+class PathExitConfig:
+    """Configurable path-based exit parameters (gross %). Calibration can update without rewriting logic.
+
+    Signed convention:
+      initial_sl_pct / emergency_floor_pct are negative (loss).
+      profit / TP values are positive.
+    """
+
+    initial_sl_pct: float = -0.45
+    profit_protection_pct: float = 0.30
+    early_profit_book_pct: float = 0.40
+    early_profit_book_hi_pct: float = 0.50  # zone end / strong-hold threshold
+    hard_tp_pct: float = 0.70
+    emergency_floor_pct: float = -0.70
+    fee_slip_buffer_pct: float = 0.15
+    exit_slippage_pct: float = 0.02
+    adverse_steps: int = 3
+    favorable_steps: int = 3
+
+    def validate(self) -> None:
+        errs: list[str] = []
+        if self.initial_sl_pct >= 0:
+            errs.append(f"initial_sl_pct must be < 0 (got {self.initial_sl_pct})")
+        if self.emergency_floor_pct >= 0:
+            errs.append(f"emergency_floor_pct must be < 0 (got {self.emergency_floor_pct})")
+        if self.emergency_floor_pct > self.initial_sl_pct:
+            errs.append(
+                f"emergency_floor_pct ({self.emergency_floor_pct}) must be <= "
+                f"initial_sl_pct ({self.initial_sl_pct}) (floor is the worse loss)"
+            )
+        if self.profit_protection_pct <= 0:
+            errs.append(f"profit_protection_pct must be > 0 (got {self.profit_protection_pct})")
+        if self.hard_tp_pct <= self.profit_protection_pct:
+            errs.append(
+                f"hard_tp_pct ({self.hard_tp_pct}) must be > "
+                f"profit_protection_pct ({self.profit_protection_pct})"
+            )
+        if not (self.profit_protection_pct < self.early_profit_book_pct < self.hard_tp_pct):
+            errs.append(
+                "need profit_protection_pct < early_profit_book_pct < hard_tp_pct "
+                f"(got {self.profit_protection_pct}, {self.early_profit_book_pct}, {self.hard_tp_pct})"
+            )
+        if not (self.early_profit_book_pct <= self.early_profit_book_hi_pct <= self.hard_tp_pct):
+            errs.append(
+                "need early_profit_book_pct <= early_profit_book_hi_pct <= hard_tp_pct "
+                f"(got {self.early_profit_book_pct}, {self.early_profit_book_hi_pct}, {self.hard_tp_pct})"
+            )
+        if self.fee_slip_buffer_pct < 0 or self.exit_slippage_pct < 0:
+            errs.append("fee_slip_buffer_pct / exit_slippage_pct must be >= 0")
+        if self.adverse_steps < 1 or self.favorable_steps < 1:
+            errs.append("adverse_steps / favorable_steps must be >= 1")
+        if errs:
+            raise ValueError("Invalid PathExitConfig: " + "; ".join(errs))
+
+    def as_log_dict(self) -> dict:
+        return {
+            "initial_sl_pct": self.initial_sl_pct,
+            "profit_protection_pct": self.profit_protection_pct,
+            "early_profit_book_pct": self.early_profit_book_pct,
+            "early_profit_book_hi_pct": self.early_profit_book_hi_pct,
+            "hard_tp_pct": self.hard_tp_pct,
+            "emergency_floor_pct": self.emergency_floor_pct,
+            "fee_slip_buffer_pct": self.fee_slip_buffer_pct,
+            "exit_slippage_pct": self.exit_slippage_pct,
+            "adverse_steps": self.adverse_steps,
+            "favorable_steps": self.favorable_steps,
+        }
+
+
+def _load_path_exit_config() -> PathExitConfig:
+    """Load path-exit knobs from env (starting calibration values)."""
+    cfg = PathExitConfig(
+        initial_sl_pct=float(os.environ.get("EXIT_INITIAL_SL_PCT", "-0.45")),
+        profit_protection_pct=float(os.environ.get("EXIT_PROFIT_PROTECTION_PCT", "0.30")),
+        early_profit_book_pct=float(os.environ.get("EXIT_EARLY_PROFIT_BOOK_PCT", "0.40")),
+        early_profit_book_hi_pct=float(os.environ.get("EXIT_EARLY_PROFIT_BOOK_HI_PCT", "0.50")),
+        hard_tp_pct=float(os.environ.get("EXIT_HARD_TP_PCT", "0.70")),
+        emergency_floor_pct=float(os.environ.get("EXIT_EMERGENCY_FLOOR_PCT", "-0.70")),
+        fee_slip_buffer_pct=float(os.environ.get("EXIT_FEE_SLIP_BUFFER_PCT", "0.15")),
+        exit_slippage_pct=float(os.environ.get("EXIT_SLIPPAGE_PCT", "0.02")),
+        adverse_steps=int(os.environ.get("EXIT_PATH_ADVERSE_STEPS", "3")),
+        favorable_steps=int(os.environ.get("EXIT_PATH_FAVORABLE_STEPS", "3")),
+    )
+    cfg.validate()
+    return cfg
+
+
+PATH_EXIT = _load_path_exit_config()
+print(f"[PATH-EXIT] config loaded: {PATH_EXIT.as_log_dict()}")
+
+# Legacy magnitude aliases (positive %) for older call sites / UI labels.
+PATH_SL_INITIAL_PCT = abs(PATH_EXIT.initial_sl_pct)
+PATH_SL_EMERGENCY_PCT = abs(PATH_EXIT.emergency_floor_pct)
+PATH_PROTECT_ACTIVATE_PCT = PATH_EXIT.profit_protection_pct
+PATH_WEAK_BOOK_LO_PCT = PATH_EXIT.early_profit_book_pct
+PATH_WEAK_BOOK_HI_PCT = PATH_EXIT.early_profit_book_hi_pct
+PATH_STRONG_HOLD_PCT = PATH_EXIT.early_profit_book_hi_pct
+PATH_TP_HARD_PCT = PATH_EXIT.hard_tp_pct
+EXIT_FEE_SLIP_BUFFER_PCT = PATH_EXIT.fee_slip_buffer_pct
+EXIT_SLIPPAGE_PCT = PATH_EXIT.exit_slippage_pct
 PATH_TP_TIGHT_PCT = PATH_WEAK_BOOK_HI_PCT
 PATH_TP_WIDE_PCT = PATH_TP_HARD_PCT
-FIXED_EXIT_PROFIT_PCT = PATH_WEAK_BOOK_HI_PCT
+FIXED_EXIT_PROFIT_PCT = PATH_TP_HARD_PCT
 PATH_SL_TIGHT_PCT = PATH_SL_INITIAL_PCT
 PATH_SL_WIDE_PCT = PATH_SL_EMERGENCY_PCT
-PATH_SL_ADVERSE_STEPS = 3  # unused by new mgmt (kept for runtime restore compat)
-PATH_TP_FAVORABLE_STEPS = 3
+PATH_SL_ADVERSE_STEPS = PATH_EXIT.adverse_steps
+PATH_TP_FAVORABLE_STEPS = PATH_EXIT.favorable_steps
 FIXED_EXIT_LOSS_PCT = PATH_SL_INITIAL_PCT
+
+# Structured exit reason codes (prefix of closed_reason strings).
+EXIT_CODE_INITIAL_SL = "INITIAL_SL"
+EXIT_CODE_PATH_CONTINUOUS_SL = "PATH_CONTINUOUS_SL"
+EXIT_CODE_PROFIT_PROTECTION = "PROFIT_PROTECTION"
+EXIT_CODE_EARLY_PROFIT_BOOK = "EARLY_PROFIT_BOOK"
+EXIT_CODE_HARD_TP = "HARD_TP"
+EXIT_CODE_EMERGENCY_FLOOR = "EMERGENCY_FLOOR"
+EXIT_CODE_OPPOSITE_TRAP = "OPPOSITE_TRAP_EXIT"
+
 BTC_REGIME_GATE = False
 _AUTO_BUY_TICKER_POLL = float(os.environ.get("MARKET_TICKER_POLL", "0.35"))
 _AUTO_BUY_BURST_POLL = float(os.environ.get("AUTO_BUY_BURST_POLL", "0.12"))
@@ -802,9 +898,12 @@ class AITradingAgent:
         return snap
 
     def profit_protect_floor_pct(self) -> float:
-        """Gross % above entry for BE-style protect stop (fees + slip buffer)."""
+        """Gross % above entry for BE-style protect stop (fees + slip buffer).
+
+        Uses live Bybit taker fee × 2 + configurable slip pad — not a hard-coded fee.
+        """
         rt_fee = float(bybit_api.get_taker_fee_pct() or 0.055) * 2.0
-        return max(float(EXIT_FEE_SLIP_BUFFER_PCT), rt_fee + float(EXIT_SLIPPAGE_PCT))
+        return max(float(PATH_EXIT.fee_slip_buffer_pct), rt_fee + float(PATH_EXIT.exit_slippage_pct))
 
     # Cap = every mapped Bybit pair (frontend TRADING_PAIRS / BYBIT_SYMBOL_MAP).
     MAX_WATCHLIST = 32
@@ -1087,6 +1186,7 @@ class AITradingAgent:
         exit_px = metrics.get("mark_price")
         if exit_px is None:
             exit_px = self.mark_price_for(trade.get("pair")) or trade.get("entry")
+        exit_code = str(reason or "").split("|", 1)[0].strip() or "UNKNOWN"
         for row in self.trade_history:
             if row["id"] == trade["id"]:
                 row["current"] = round(float(exit_px), price_decimals_for_mark(float(exit_px)))
@@ -1098,8 +1198,14 @@ class AITradingAgent:
                 row["exit_fee_usd"] = round(metrics["exit_fee_usd"], 4)
                 row["status"] = "sold"
                 row["closed_reason"] = reason
+                row["exit_code"] = exit_code
                 row["closed_at"] = time.time()
                 break
+        print(
+            f"[PATH-EXIT] closed #{trade.get('id')} {trade.get('side')} {trade.get('pair')} "
+            f"code={exit_code} net=${metrics['net_usd']:.2f} ({metrics['net_pct']:.3f}%) "
+            f"params={PATH_EXIT.as_log_dict()} reason={reason}"
+        )
         try:
             trade_db.finalize_trade(
                 trade,
@@ -1581,7 +1687,7 @@ class AITradingAgent:
             "timeframe_key": timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m"),
             "exit_mode": "path_sl" if source == "auto" else "manual",
             "entry_pattern": ENTRY_PATTERN_NAME,
-            # Position-mgmt state (auto) — never widen SL on losers; never average down.
+            # Path tracking (+++ / --- / choppy) — choppy never widens SL past initial_sl.
             "path_last_gross_pct": 0.0,
             "path_adverse_streak": 0,
             "path_favorable_streak": 0,
@@ -1592,6 +1698,7 @@ class AITradingAgent:
             "profit_protect": False,
             "path_sl_pct": PATH_SL_INITIAL_PCT,
             "path_tp_pct": PATH_TP_HARD_PCT,
+            "path_seeded": False,
         }
         self.trades.append(trade)
         self.set_pair_mark(trade_pair, filled_price)
@@ -1833,48 +1940,83 @@ class AITradingAgent:
         )
 
     def _update_path_sl_state(self, trade: dict, gross_pct: float) -> None:
-        """Sync UI SL/TP prices to active management levels (never widen loss SL)."""
-        trade["path_last_gross_pct"] = gross_pct
-        protect_floor = self.profit_protect_floor_pct()
+        """Preserve path tracking (+++ / --- / choppy) and sync UI SL/TP.
 
-        if gross_pct >= PATH_PROTECT_ACTIVATE_PCT:
+        Path purpose (updated):
+          - Continuous favorable (+++) may allow hold toward hard_tp when momentum strong.
+          - Losing / choppy paths must NOT widen SL from initial_sl toward emergency_floor.
+          - Profit protection moves stop to entry + fee/slip buffer (never a wider loss stop).
+        """
+        cfg = PATH_EXIT
+        last = float(trade.get("path_last_gross_pct") if trade.get("path_last_gross_pct") is not None else 0.0)
+        if trade.get("path_seeded") is not True:
+            trade["path_last_gross_pct"] = gross_pct
+            trade["path_seeded"] = True
+            trade["path_adverse_streak"] = 0
+            trade["path_favorable_streak"] = 0
+        else:
+            eps = 1e-6
+            if gross_pct < last - eps:
+                streak = int(trade.get("path_adverse_streak") or 0) + 1
+                trade["path_adverse_streak"] = streak
+                trade["path_favorable_streak"] = 0
+                if streak >= cfg.adverse_steps:
+                    trade["path_continuous_dump"] = True
+                if last > eps or gross_pct > eps:
+                    trade["path_profit_choppy"] = True
+            elif gross_pct > last + eps:
+                fav = int(trade.get("path_favorable_streak") or 0) + 1
+                trade["path_favorable_streak"] = fav
+                trade["path_adverse_streak"] = 0
+                if fav >= cfg.favorable_steps:
+                    trade["path_continuous_run"] = True
+                if last < -eps or gross_pct < -eps:
+                    trade["path_choppy"] = True  # bounce in loss — do NOT widen SL
+            else:
+                trade["path_adverse_streak"] = 0
+                trade["path_favorable_streak"] = 0
+            trade["path_last_gross_pct"] = gross_pct
+
+        protect_floor = self.profit_protect_floor_pct()
+        if gross_pct >= cfg.profit_protection_pct:
             trade["profit_protect"] = True
 
+        # Effective SL for UI: never wider than |initial_sl|; protect uses BE+buffer.
         if trade.get("profit_protect"):
-            # Effective stop is entry + fee/slip buffer (positive gross), never −0.45 again.
-            trade["path_sl_pct"] = protect_floor  # stop in profit zone (BE+buffer)
+            trade["path_sl_pct"] = protect_floor
             trade["is_lock_active"] = True
             trade["lock_level_pct"] = protect_floor
         else:
-            trade["path_sl_pct"] = PATH_SL_INITIAL_PCT
+            trade["path_sl_pct"] = abs(cfg.initial_sl_pct)
             trade["is_lock_active"] = False
 
-        trade["path_tp_pct"] = PATH_TP_HARD_PCT
+        trade["path_tp_pct"] = cfg.hard_tp_pct
 
         entry = float(trade.get("entry") or 0)
         side = trade.get("side")
-        if entry > 0 and side in ("LONG", "SHORT"):
-            if trade.get("profit_protect"):
-                # SL price at +protect_floor from entry (BE+buffer)
-                if side == "LONG":
-                    sl = entry * (1.0 + protect_floor / 100.0)
-                    tp = entry * (1.0 + PATH_TP_HARD_PCT / 100.0)
-                else:
-                    sl = entry * (1.0 - protect_floor / 100.0)
-                    tp = entry * (1.0 - PATH_TP_HARD_PCT / 100.0)
-                trade["sl_price"] = round(sl, price_decimals_for_mark(entry))
-                trade["tp_price"] = round(tp, price_decimals_for_mark(entry))
+        if entry <= 0 or side not in ("LONG", "SHORT"):
+            return
+
+        if trade.get("profit_protect"):
+            if side == "LONG":
+                sl = entry * (1.0 + protect_floor / 100.0)
+                tp = entry * (1.0 + cfg.hard_tp_pct / 100.0)
             else:
-                sl, tp = self._fixed_exit_prices(
-                    entry,
-                    side,
-                    loss_pct=PATH_SL_INITIAL_PCT,
-                    profit_pct=PATH_TP_HARD_PCT,
-                )
-                if sl is not None:
-                    trade["sl_price"] = sl
-                if tp is not None:
-                    trade["tp_price"] = tp
+                sl = entry * (1.0 - protect_floor / 100.0)
+                tp = entry * (1.0 - cfg.hard_tp_pct / 100.0)
+            trade["sl_price"] = round(sl, price_decimals_for_mark(entry))
+            trade["tp_price"] = round(tp, price_decimals_for_mark(entry))
+        else:
+            sl, tp = self._fixed_exit_prices(
+                entry,
+                side,
+                loss_pct=abs(cfg.initial_sl_pct),
+                profit_pct=cfg.hard_tp_pct,
+            )
+            if sl is not None:
+                trade["sl_price"] = sl
+            if tp is not None:
+                trade["tp_price"] = tp
 
     def _mark_from_gross_pct(self, entry: float, side: str, gross_pct: float) -> float:
         """Price that realizes exactly gross_pct for side (paper SL/TP fill clamp)."""
@@ -1882,12 +2024,17 @@ class AITradingAgent:
             return entry * (1.0 + float(gross_pct) / 100.0)
         return entry * (1.0 - float(gross_pct) / 100.0)
 
-    def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
-        """Position-management hierarchy (gross %). LONG/SHORT symmetric.
+    def _format_exit_reason(self, code: str, detail: str) -> str:
+        return f"{code} | {detail}"
 
-        INITIAL SL −0.45% → PROFIT PROTECT +0.30% → WEAK BOOK +0.40…+0.50%
-        → STRONG HOLD → HARD TP +0.70% → OPPOSITE TRAP = EARLY EXIT.
-        −0.70% emergency floor only (never hold choppy losers past −0.45%).
+    def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
+        """Path-based exit engine (in-place). Interface unchanged: returns reason or None.
+
+        Hierarchy (configurable via PATH_EXIT):
+          EMERGENCY_FLOOR → INITIAL_SL / PATH_CONTINUOUS_SL → OPPOSITE_TRAP_EXIT
+          → HARD_TP → PROFIT_PROTECTION → EARLY_PROFIT_BOOK (weak/trap in zone)
+          → continuous +++ + strong momentum → hold to hard_tp.
+        Losing/choppy paths never widen SL toward emergency_floor.
         """
         trade.pop("_exit_fill_mark", None)
         entry = float(trade.get("entry") or 0)
@@ -1897,6 +2044,7 @@ class AITradingAgent:
         if side not in ("LONG", "SHORT"):
             return None
 
+        cfg = PATH_EXIT
         if side == "LONG":
             gross_pct = ((mark - entry) / entry) * 100.0
         else:
@@ -1918,63 +2066,85 @@ class AITradingAgent:
             elif target_gross < 0 and gross_pct < target_gross - 1e-9:
                 trade["_exit_fill_mark"] = self._mark_from_gross_pct(entry, side, target_gross)
 
-        # 1) Emergency hard floor −0.70% (gap / flash only — never intentional hold target)
-        if gross_pct <= -PATH_SL_EMERGENCY_PCT:
-            _arm_paper_fill(-PATH_SL_EMERGENCY_PCT)
-            return (
-                f"Emergency SL −{PATH_SL_EMERGENCY_PCT:g}%: {side} gross {gross_pct:.3f}% "
-                f"(mark {mark:.6f} vs entry {entry:.6f})"
+        # 1) Absolute emergency floor (signed)
+        if gross_pct <= cfg.emergency_floor_pct:
+            _arm_paper_fill(cfg.emergency_floor_pct)
+            return self._format_exit_reason(
+                EXIT_CODE_EMERGENCY_FLOOR,
+                f"{side} gross {gross_pct:.3f}% floor={cfg.emergency_floor_pct:g}% "
+                f"mark={mark:.6f} entry={entry:.6f} params={cfg.as_log_dict()}",
             )
 
-        # 2) Initial SL −0.45% while not yet profit-protected
-        if not trade.get("profit_protect") and gross_pct <= -PATH_SL_INITIAL_PCT:
-            _arm_paper_fill(-PATH_SL_INITIAL_PCT)
-            return (
-                f"Initial SL −{PATH_SL_INITIAL_PCT:g}%: {side} gross {gross_pct:.3f}% "
-                f"(mark {mark:.6f} vs entry {entry:.6f})"
+        # 2) Initial SL — never widen for choppy; continuous --- gets PATH_CONTINUOUS_SL
+        if not trade.get("profit_protect") and gross_pct <= cfg.initial_sl_pct:
+            _arm_paper_fill(cfg.initial_sl_pct)
+            if trade.get("path_continuous_dump"):
+                code = EXIT_CODE_PATH_CONTINUOUS_SL
+                why = f"continuous --- streak={trade.get('path_adverse_streak')}"
+            else:
+                code = EXIT_CODE_INITIAL_SL
+                why = "initial stop (choppy does not widen)"
+            return self._format_exit_reason(
+                code,
+                f"{side} gross {gross_pct:.3f}% sl={cfg.initial_sl_pct:g}% ({why}) "
+                f"mark={mark:.6f} entry={entry:.6f}",
             )
 
-        # 3) Opposite trap / absorption / exhaustion / failed H-L → early exit
+        # 3) Trap Detection Engine as exit override only (no duplicated OF math here)
         trap_reason = adverse_trap_exit_reason(side, of_snap)
         if trap_reason:
-            return f"{trap_reason} | {side} gross {gross_pct:.3f}%"
-
-        # 4) Hard profit ceiling +0.70%
-        if gross_pct >= PATH_TP_HARD_PCT:
-            _arm_paper_fill(PATH_TP_HARD_PCT)
-            return (
-                f"Hard TP +{PATH_TP_HARD_PCT:g}%: {side} gross {gross_pct:.3f}% "
-                f"(mark {mark:.6f} vs entry {entry:.6f})"
+            return self._format_exit_reason(
+                EXIT_CODE_OPPOSITE_TRAP,
+                f"{trap_reason} | {side} gross {gross_pct:.3f}%",
             )
 
-        # 5) Profit protection: once +0.30% seen, stop at entry+fee/slip buffer
+        # 4) Hard TP
+        if gross_pct >= cfg.hard_tp_pct:
+            _arm_paper_fill(cfg.hard_tp_pct)
+            return self._format_exit_reason(
+                EXIT_CODE_HARD_TP,
+                f"{side} gross {gross_pct:.3f}% tp={cfg.hard_tp_pct:g}% "
+                f"mark={mark:.6f} entry={entry:.6f}",
+            )
+
+        # 5) Profit protection stop (entry + fee/slip buffer)
         if trade.get("profit_protect") and gross_pct <= protect_floor:
             _arm_paper_fill(protect_floor)
-            return (
-                f"Profit protect BE+buffer +{protect_floor:g}%: {side} gross {gross_pct:.3f}% "
-                f"(activated at +{PATH_PROTECT_ACTIVATE_PCT:g}%)"
+            return self._format_exit_reason(
+                EXIT_CODE_PROFIT_PROTECTION,
+                f"{side} gross {gross_pct:.3f}% protect_floor=+{protect_floor:g}% "
+                f"(armed at +{cfg.profit_protection_pct:g}%)",
             )
 
-        # 6–7) +0.40%…+0.50% weak-momentum book; +0.50%+ strong hold else book
+        # 6) Early profit-book zone: weak momentum / choppy profit → book; continuous +++ hold
         strength = momentum_of_strength(side, of_snap)
-        if gross_pct >= PATH_WEAK_BOOK_LO_PCT:
-            if gross_pct < PATH_STRONG_HOLD_PCT:
-                # In +0.40 … +0.50 zone — book only on confirmed weakness / traps
-                if strength == "weak":
-                    return (
-                        f"Weak-momentum book +{gross_pct:.2f}% (1M·5M/OF soft): {side} "
-                        f"(zone +{PATH_WEAK_BOOK_LO_PCT:g}…+{PATH_WEAK_BOOK_HI_PCT:g}%)"
+        continuous_run = bool(trade.get("path_continuous_run"))
+        profit_choppy = bool(trade.get("path_profit_choppy"))
+
+        if gross_pct >= cfg.early_profit_book_pct:
+            in_early_zone = gross_pct < cfg.early_profit_book_hi_pct
+            if in_early_zone:
+                if strength == "weak" or profit_choppy:
+                    return self._format_exit_reason(
+                        EXIT_CODE_EARLY_PROFIT_BOOK,
+                        f"{side} gross {gross_pct:.3f}% zone="
+                        f"+{cfg.early_profit_book_pct:g}…+{cfg.early_profit_book_hi_pct:g}% "
+                        f"strength={strength} profit_choppy={profit_choppy}",
                     )
-                # strong or unknown → keep holding toward 0.70 / wait for clearer OF
+                # strong or unknown with clean path → hold toward hard_tp
                 return None
 
-            # >= +0.50%: hold only if strong continuation; otherwise book
-            if strength == "strong":
-                return None  # hold to hard TP
-            _arm_paper_fill(PATH_STRONG_HOLD_PCT if paper else gross_pct)
-            return (
-                f"Book +{gross_pct:.2f}% (no strong 1M+5M continuation): {side} "
-                f"strength={strength}"
+            # >= early_profit_book_hi: hold only if continuous +++ AND strong OF
+            if continuous_run and strength == "strong":
+                return None
+            if strength == "strong" and not profit_choppy:
+                return None
+            _arm_paper_fill(cfg.early_profit_book_hi_pct if paper else gross_pct)
+            return self._format_exit_reason(
+                EXIT_CODE_EARLY_PROFIT_BOOK,
+                f"{side} gross {gross_pct:.3f}% no strong continuous hold "
+                f"strength={strength} continuous_run={continuous_run} "
+                f"profit_choppy={profit_choppy}",
             )
 
         return None
@@ -2715,11 +2885,12 @@ def get_bybit_executor_agent():
 
 def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
+    c = PATH_EXIT
     return (
-        "CANDLESTICK BRAIN + Trap/OF | mgmt: "
-        f"SL −{PATH_SL_INITIAL_PCT:g}% | protect @{PATH_PROTECT_ACTIVATE_PCT:g}% | "
-        f"weak book {PATH_WEAK_BOOK_LO_PCT:g}–{PATH_WEAK_BOOK_HI_PCT:g}% | "
-        f"strong hold → TP +{PATH_TP_HARD_PCT:g}% | emerg −{PATH_SL_EMERGENCY_PCT:g}% | "
+        "CANDLESTICK BRAIN + Trap/OF | path-exit "
+        f"SL {c.initial_sl_pct:g}% protect@{c.profit_protection_pct:g}% "
+        f"early {c.early_profit_book_pct:g}…{c.early_profit_book_hi_pct:g}% "
+        f"TP {c.hard_tp_pct:g}% emerg {c.emergency_floor_pct:g}% | "
         "manual BUY/SELL + emergency sell-all"
     )
 
@@ -3472,7 +3643,9 @@ async def self_ping_keepalive():
 
 async def auto_exit_watchdog():
     """Re-check path-SL / path-TP even if a ticker tick was skipped or failed."""
-    print("[AUTO-EXIT] Watchdog online (SL −0.45% / protect@+0.30% / TP +0.70% / emerg −0.70%).")
+    print(
+        f"[AUTO-EXIT] Watchdog online (path engine) params={PATH_EXIT.as_log_dict()}"
+    )
     while True:
         try:
             if AUTO_TRADE_AUTO_EXIT_ENABLED and agent.trades:
