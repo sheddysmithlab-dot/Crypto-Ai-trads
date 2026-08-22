@@ -726,6 +726,8 @@ class AITradingAgent:
         self._ai_skip_until = 0.0
         self._last_feed_ts = time.time()
         self._last_runtime_save = 0.0
+        # After START: no new auto trades until trading_ready_at (boot intro + analysis).
+        self.trading_ready_at = 0.0
         self.session_stats_snapshot: dict = {
             "trade_notional": 0.0,
             "daily_profit": 0.0,
@@ -2233,6 +2235,7 @@ class AITradingAgent:
         self.session_hold_mode = False
         self._close_all_positions(reason)
         self.is_active = False
+        self.trading_ready_at = 0.0
         _clear_entry_pipeline()
         self.end_ai_season(clear_live_table=True, reason="manual_stop")
         self.peak_net_pct = 0.0
@@ -2248,6 +2251,7 @@ class AITradingAgent:
         print(f"[AI ENGINE] HOLD STOP — {reason}")
         self.is_active = False
         self.session_hold_mode = True
+        self.trading_ready_at = 0.0
         _clear_entry_pipeline()
         # Keep season_id + start capital so held closes still roll into portfolio counters.
         self.session_stats_frozen = False
@@ -2297,22 +2301,53 @@ class AITradingAgent:
         if self.ai_season_start_capital is None:
             self.begin_ai_season()
         self.is_active = True
+        self.begin_trading_warmup()
         print(f"[SESSION SCHEDULE] Auto-start — {reason}")
         system_log.push(
             "ai",
             f"Session schedule STARTED AI automation — {reason}",
-            {"open_positions": open_count},
+            {"open_positions": open_count, "warmup_sec": ENGINE_WARMUP_SEC},
         )
-        notifications.push(f"Session schedule ON — AI automation started ({reason}).", "success")
+        notifications.push(
+            f"Session schedule ON — AI warming up {ENGINE_WARMUP_SEC}s before trades ({reason}).",
+            "success",
+        )
         self.persist_runtime()
 
     def resume_trading_after_emergency(self):
         """ Legacy continue endpoint — portfolio stop-loss removed; clears halt flags only. """
         self.clear_emergency_state()
         self.is_active = True
+        self.begin_trading_warmup()
         print("[AI AGENT] Trading resumed (portfolio stop-loss disabled).")
-        notifications.push("Trading resumed.", "warning")
+        notifications.push(
+            f"Trading resumed — {ENGINE_WARMUP_SEC}s warmup before new entries.",
+            "warning",
+        )
         self.persist_runtime()
+
+    def begin_trading_warmup(self) -> None:
+        """Block new auto entries for ENGINE_WARMUP_SEC after engine arm."""
+        self.trading_ready_at = time.time() + float(ENGINE_WARMUP_SEC)
+        _clear_entry_pipeline()
+        print(
+            f"[AI ENGINE] Warmup {ENGINE_WARMUP_SEC}s "
+            f"(intro {ENGINE_BOOT_INTRO_SEC}s + analysis {ENGINE_BOOT_ANALYSIS_SEC}s) — no new fires yet."
+        )
+
+    def trading_ready(self) -> bool:
+        if not self.is_active:
+            return False
+        ready_at = float(getattr(self, "trading_ready_at", 0) or 0)
+        if ready_at <= 0:
+            return True
+        return time.time() >= ready_at
+
+    def warmup_remaining_sec(self) -> float:
+        ready_at = float(getattr(self, "trading_ready_at", 0) or 0)
+        if ready_at <= 0:
+            return 0.0
+        return max(0.0, ready_at - time.time())
 
     def persist_runtime(self, force: bool = False) -> None:
         """Checkpoint engine state so restart/outage does not wipe open book."""
@@ -2404,12 +2439,14 @@ class AITradingAgent:
         )
 
     def entries_allowed(self) -> bool:
-        """False while frozen / hold / emergency — open trades still update via process_tick."""
+        """False while frozen / hold / emergency / warmup — open trades still update via process_tick."""
         if self.emergency_triggered:
             return False
         if self.connectivity_frozen:
             return False
         if self.session_hold_mode and not self.is_active:
+            return False
+        if not self.trading_ready():
             return False
         return bool(self.is_active)
 
@@ -2547,6 +2584,10 @@ PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
 # 1m only: last auto fire candle open-time per pair (blocks fires on next 2 candles).
 LAST_AUTO_FIRE_CANDLE_MS: dict[str, int] = {}
 ONE_M_MIN_BARS_BETWEEN_FIRES = 3  # fire on N → next fire earliest N+3 (detect on N+2 OK)
+# Engine boot: intro media (10s) + analysis countdown (30s) before auto trades.
+ENGINE_BOOT_INTRO_SEC = 10
+ENGINE_BOOT_ANALYSIS_SEC = 30
+ENGINE_WARMUP_SEC = ENGINE_BOOT_INTRO_SEC + ENGINE_BOOT_ANALYSIS_SEC  # 40s
 PATTERN_NEON_STAGES: list[dict] = []
 THREE_CANDLE_ENTRY = False
 
@@ -3241,6 +3282,10 @@ async def auto_buy_loop():
                 poll = 0.5  # same fast scan cadence as 1m on every TF
                 if agent.is_active and not agent.emergency_triggered:
                     agent.refresh_feed_health()
+                    if not agent.trading_ready():
+                        # Boot intro + analysis window — no detect/queue/fire yet.
+                        await asyncio.sleep(poll)
+                        continue
                     # Feed-stale freeze: pause NEW detects only; keep managing open + pending fires.
                     frozen = bool(agent.connectivity_frozen)
                     pairs = list(agent.get_scan_pairs())
@@ -3502,26 +3547,35 @@ async def bot_start():
     agent.freeze_reason = None
     agent._ai_fail_streak = 0
     agent._last_feed_ts = time.time()
+    agent.begin_trading_warmup()
     agent.persist_runtime(force=True)
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     profile = entry_pattern_profile(tf_key)
     print(f"[AI ENGINE] START — {agent.active_pair} ({tf_key}) brain.py")
     system_log.push(
         "ai",
-        f"AI Engine STARTED on {agent.active_pair} ({open_count} open preserved).",
-        {"open_positions": open_count, "timeframe_seconds": agent.timeframe_seconds},
+        f"AI Engine STARTED on {agent.active_pair} ({open_count} open preserved). "
+        f"Warmup {ENGINE_WARMUP_SEC}s before new trades.",
+        {"open_positions": open_count, "timeframe_seconds": agent.timeframe_seconds, "warmup_sec": ENGINE_WARMUP_SEC},
     )
     system_log.push_agent_chat(
-        f"AI Engine ON — {profile['name']} · {agent.active_pair} · {tf_key}",
+        f"AI Engine ON — warmup {ENGINE_WARMUP_SEC}s · {profile['name']} · {agent.active_pair} · {tf_key}",
         status="active",
-        details={"pair": agent.active_pair, "timeframe": tf_key, "entry_pattern": profile},
+        details={"pair": agent.active_pair, "timeframe": tf_key, "entry_pattern": profile, "warmup_sec": ENGINE_WARMUP_SEC},
     )
-    notifications.push(f"AI Engine STARTED on {agent.active_pair}.", "success")
+    notifications.push(
+        f"AI Engine STARTED — {ENGINE_BOOT_INTRO_SEC}s intro + {ENGINE_BOOT_ANALYSIS_SEC}s analysis, then trading.",
+        "success",
+    )
     return {
         "status": "success",
         "is_active": True,
-        "message": f"AI Engine started — {profile['name']} ({tf_key}).",
+        "message": f"AI Engine started — warmup {ENGINE_WARMUP_SEC}s then {profile['name']} ({tf_key}).",
         "open_positions": open_count,
+        "warmup_sec": ENGINE_WARMUP_SEC,
+        "boot_intro_sec": ENGINE_BOOT_INTRO_SEC,
+        "boot_analysis_sec": ENGINE_BOOT_ANALYSIS_SEC,
+        "trading_ready_at": agent.trading_ready_at,
         "entry_pattern": profile["name"],
         "session_schedule_enabled": False,
     }
@@ -4430,6 +4484,11 @@ async def portfolio_feed(websocket: WebSocket):
                 "session_hold_mode": bool(agent.session_hold_mode),
                 "connectivity_frozen": bool(agent.connectivity_frozen),
                 "freeze_reason": agent.freeze_reason,
+                "trading_ready": bool(agent.trading_ready()),
+                "warmup_remaining_sec": round(agent.warmup_remaining_sec(), 1),
+                "warmup_total_sec": ENGINE_WARMUP_SEC,
+                "boot_intro_sec": ENGINE_BOOT_INTRO_SEC,
+                "boot_analysis_sec": ENGINE_BOOT_ANALYSIS_SEC,
                 "portfolio_drop_pct": round(portfolio_drop, 2),
                 "is_active": agent.is_active,
                 "timeframe_seconds": agent.timeframe_seconds,

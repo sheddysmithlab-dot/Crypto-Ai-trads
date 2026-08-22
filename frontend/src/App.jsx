@@ -28,6 +28,7 @@ import AgentInstructionsModal from './components/AgentInstructionsModal';
 import StartConfirmModal from './components/StartConfirmModal';
 import StopEngineModal from './components/StopEngineModal';
 import SessionStopConfirmModal from './components/SessionStopConfirmModal';
+import EngineBootOverlay from './components/EngineBootOverlay';
 import TradeExitConfirmModal from './components/TradeExitConfirmModal';
 import SystemLogModal from './components/SystemLogModal';
 import AgentChatStrip from './components/AgentChatStrip';
@@ -679,6 +680,14 @@ export default function App() {
         onManualBuy={handleManualBuy}
         onManualSell={handleManualSell}
         onOpenSessionModal={() => setSessionModalOpen(true)}
+      />
+
+      <EngineBootOverlay
+        active={effectiveBotActive}
+        warmupRemainingSec={portfolio.warmupRemainingSec}
+        warmupTotalSec={portfolio.warmupTotalSec}
+        introSec={portfolio.bootIntroSec}
+        analysisSec={portfolio.bootAnalysisSec}
       />
 
       <PaperTradingModal

@@ -42,6 +42,7 @@ def dump_runtime(agent: Any) -> dict:
     return {
         "version": 1,
         "saved_at": time.time(),
+        "trading_ready_at": float(getattr(agent, "trading_ready_at", 0) or 0),
         "is_active": bool(getattr(agent, "is_active", False)),
         "session_hold_mode": bool(getattr(agent, "session_hold_mode", False)),
         "connectivity_frozen": bool(getattr(agent, "connectivity_frozen", False)),
@@ -102,6 +103,11 @@ def restore_runtime(agent: Any) -> dict:
 
     try:
         agent.is_active = bool(data.get("is_active"))
+        # Resume mid-session without forcing another full 40s boot (open book continuity).
+        if agent.is_active:
+            agent.trading_ready_at = float(data.get("trading_ready_at") or 0) or time.time()
+        else:
+            agent.trading_ready_at = 0.0
         agent.session_hold_mode = bool(data.get("session_hold_mode"))
         # Never restore as frozen — force re-evaluate connectivity after boot
         agent.connectivity_frozen = False
