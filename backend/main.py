@@ -630,12 +630,12 @@ MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", 
 AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path lock/trail profit + protective SL (same engine)
 INVERT_AUTO_TRADE_FIRE = False
 # Profit book (gross %, LONG/SHORT symmetric):
-#   +0.50% → LOCK ON; track peak; exit when peak − current ≥ 0.20%
-#   after lock, if gross drops below +0.50% before trail → BE exit (0% gross)
+#   +0.50% → PROFIT LOCK; track peak_profit (never resets while open);
+#   EXIT when profit_giveback = peak_profit − current ≥ 0.20% (no separate BE rule).
 PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.50"))
 PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.20"))
 # Protective stop-loss (gross %, LONG/SHORT symmetric) — no widen for choppy:
-#   −0.50% → LOCK (hold); track best_recovery (never moves backward);
+#   −0.50% → LOSS LOCK (hold); track best_recovery (never moves backward);
 #   EXIT when recovery_drawdown = best_recovery − current ≥ 0.20%;
 #   emergency floor −0.70%.
 LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.50"))
@@ -1842,7 +1842,7 @@ class AITradingAgent:
             trade["profit_lock"] = True
         if trade.get("profit_lock"):
             peak = float(trade.get("peak_gross_pct") or gross_pct)
-            trail_stop = max(0.0, peak - PROFIT_TRAIL_GIVEBACK_PCT)
+            trail_stop = peak - PROFIT_TRAIL_GIVEBACK_PCT
             trade["path_tp_pct"] = peak
             trade["is_lock_active"] = True
             trade["lock_level_pct"] = PROFIT_LOCK_PCT
@@ -1868,7 +1868,7 @@ class AITradingAgent:
 
         if trade.get("profit_lock"):
             peak = float(trade.get("peak_gross_pct") or gross_pct)
-            trail_stop = max(0.0, peak - PROFIT_TRAIL_GIVEBACK_PCT)
+            trail_stop = peak - PROFIT_TRAIL_GIVEBACK_PCT
             if side == "LONG":
                 sl = entry * (1.0 + trail_stop / 100.0)
                 tp = entry * (1.0 + peak / 100.0)
@@ -1946,13 +1946,13 @@ class AITradingAgent:
         return entry * (1.0 - float(gross_pct) / 100.0)
 
     def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
-        """Single path-exit engine: profit lock/trail + protective SL (no parallel engine).
+        """Single path-exit engine: peak-profit trail + best-recovery trail (no parallel engine).
 
-        Profit: +0.50% lock → peak−0.20% trail; drop below lock → BE.
-        Loss: −0.50% → LOCK (hold, do not close); track best_recovery_pnl (never
-              moves backward); EXIT when recovery_drawdown =
-              best_recovery − current ≥ 0.20%; emergency −0.70%.
-        LONG/SHORT symmetric on gross %.
+        Priority on every mark: (1) EMERGENCY −0.70% (2) PROFIT LOCK/TRAIL (3) LOSS LOCK/RECOVERY.
+        Profit: +0.50% → LOCK; track peak_profit; EXIT when peak − current ≥ 0.20% (no BE rule).
+        Loss: −0.50% → LOCK (hold); track best_recovery (never moves backward);
+              EXIT when best_recovery − current ≥ 0.20%; emergency −0.70%.
+        LONG/SHORT symmetric on gross %. Fees stay out of the trigger.
         """
         trade.pop("_exit_fill_mark", None)
         entry = float(trade.get("entry") or 0)
@@ -1967,6 +1967,7 @@ class AITradingAgent:
         else:
             gross_pct = ((entry - mark) / entry) * 100.0
 
+        # peak_profit / trough: ratchet only; never reset while position open
         trade["peak_gross_pct"] = max(float(trade.get("peak_gross_pct") or 0), gross_pct)
         trade["trough_gross_pct"] = min(float(trade.get("trough_gross_pct") or 0), gross_pct)
 
@@ -1989,28 +1990,22 @@ class AITradingAgent:
                 f"floor=−{LOSS_EMERGENCY_PCT:g}% mark={mark:.6f} entry={entry:.6f}"
             )
 
-        # 2) Profit lock / trail
+        # 2) Profit LOCK at +0.50% → trail on peak_profit only (no separate BE exit)
         if gross_pct >= PROFIT_LOCK_PCT:
             trade["profit_lock"] = True
 
         if trade.get("profit_lock"):
-            peak = float(trade.get("peak_gross_pct") or 0.0)
-            giveback = peak - gross_pct
-            if giveback >= PROFIT_TRAIL_GIVEBACK_PCT - 1e-9:
-                fill_at = max(0.0, peak - PROFIT_TRAIL_GIVEBACK_PCT)
+            peak_profit = float(trade.get("peak_gross_pct") or 0.0)
+            profit_giveback = peak_profit - gross_pct
+            if profit_giveback >= PROFIT_TRAIL_GIVEBACK_PCT - 1e-9:
+                fill_at = peak_profit - PROFIT_TRAIL_GIVEBACK_PCT
                 _arm_paper_fill(fill_at)
                 return (
-                    f"PROFIT_TRAIL | {side} peak={peak:.3f}% now={gross_pct:.3f}% "
-                    f"giveback={giveback:.3f}%≥{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
+                    f"PROFIT_TRAIL | {side} peak_profit={peak_profit:.3f}% now={gross_pct:.3f}% "
+                    f"profit_giveback={profit_giveback:.3f}%≥{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
                     f"(lock@{PROFIT_LOCK_PCT:g}%) mark={mark:.6f} entry={entry:.6f}"
                 )
-            if gross_pct < PROFIT_LOCK_PCT - 1e-9:
-                _arm_paper_fill(0.0)
-                return (
-                    f"PROFIT_BE | {side} locked@{PROFIT_LOCK_PCT:g}% then gross={gross_pct:.3f}% "
-                    f"< lock → BE exit (peak was {peak:.3f}%) "
-                    f"mark={mark:.6f} entry={entry:.6f}"
-                )
+            # HOLD: giveback < 0.20% — keep tracking peak; no BE rule below +0.50%
             return None
 
         # 3) Loss LOCK at −0.50% — hold and track best recovery (never reset anchor)
@@ -2024,7 +2019,7 @@ class AITradingAgent:
                 if trade.get("loss_recovery_peak_gross") is not None
                 else gross_pct
             )
-            # recovery_drawdown = best_recovery_pnl − current_pnl
+            # recovery_drawdown = best_recovery − current_pnl
             recovery_drawdown = best_recovery - gross_pct
             if recovery_drawdown >= LOSS_RECOVERY_RETRACE_PCT - 1e-9:
                 fill_at = best_recovery - LOSS_RECOVERY_RETRACE_PCT
@@ -2780,7 +2775,7 @@ def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
         "CANDLESTICK BRAIN + path exit | "
-        f"profit LOCK +{PROFIT_LOCK_PCT:g}% trail−{PROFIT_TRAIL_GIVEBACK_PCT:g}% (BE if <lock) | "
+        f"profit LOCK +{PROFIT_LOCK_PCT:g}% trail−{PROFIT_TRAIL_GIVEBACK_PCT:g}% (peak giveback only) | "
         f"loss PROTECT −{LOSS_PROTECT_PCT:g}% then recovery−{LOSS_RECOVERY_RETRACE_PCT:g}% "
         f"(emerg −{LOSS_EMERGENCY_PCT:g}%, no choppy widen) | "
         "manual BUY/SELL + emergency sell-all"
