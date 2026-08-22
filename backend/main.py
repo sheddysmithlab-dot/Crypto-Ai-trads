@@ -630,9 +630,9 @@ MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", 
 AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path lock/trail profit + protective SL (same engine)
 INVERT_AUTO_TRADE_FIRE = False
 # Profit book (gross %, LONG/SHORT symmetric):
-#   +0.50% → first LOCK; then ratchet +0.20% steps (+0.70, +0.90, +1.10…);
+#   +0.70% → first LOCK; then ratchet +0.20% steps (+0.90, +1.10, +1.30…);
 #   from current (upper) lock, EXIT immediately if giveback ≥ 0.20% (lock − current).
-PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.50"))
+PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.70"))
 PROFIT_LOCK_STEP_PCT = float(os.environ.get("PROFIT_LOCK_STEP_PCT", "0.20"))
 PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.20"))
 # Protective stop-loss (gross %, LONG/SHORT symmetric) — no widen for choppy:
@@ -1537,7 +1537,7 @@ class AITradingAgent:
             "entry_pattern": ENTRY_PATTERN_NAME,
             # Path SL + profit lock/trail state (auto):
             #   SL --- → −0.5%; SL -+-+ → −0.7%
-            #   Profit: +0.50% lock → trail peak−0.20%; drop below lock → BE
+            #   Profit: +0.70% first lock → +0.20% steps; exit lock−0.20
             "path_last_gross_pct": 0.0,
             "path_adverse_streak": 0,
             "path_favorable_streak": 0,
@@ -1844,7 +1844,7 @@ class AITradingAgent:
         # Never widen permitted risk for choppy — UI SL stays at protect level
         trade["path_sl_pct"] = LOSS_PROTECT_PCT
 
-        # Profit step-lock UI: +0.50 → +0.70 → +0.90…; exit at lock − 0.20
+        # Profit step-lock UI: +0.70 → +0.90 → +1.10…; exit at lock − 0.20
         if gross_pct >= PROFIT_LOCK_PCT:
             self._ratchet_profit_lock_level(trade, gross_pct)
         if trade.get("profit_lock"):
@@ -1903,7 +1903,7 @@ class AITradingAgent:
                 trade["tp_price"] = tp
 
     def _ratchet_profit_lock_level(self, trade: dict, gross_pct: float) -> float:
-        """Step profit locks: +0.50 → +0.70 → +0.90 → … (never move lock backward)."""
+        """Step profit locks: +0.70 → +0.90 → +1.10 → … (never move lock backward)."""
         trade["profit_lock"] = True
         start = float(PROFIT_LOCK_PCT)
         step = float(PROFIT_LOCK_STEP_PCT)
@@ -1990,7 +1990,7 @@ class AITradingAgent:
         """Single path-exit engine: stepped profit locks + best-recovery trail (no parallel engine).
 
         Priority on every mark: (1) EMERGENCY −0.70% (2) PROFIT STEP-LOCK/EXIT (3) LOSS LOCK/RECOVERY.
-        Profit: +0.50% first lock, then +0.70/+0.90/…; EXIT when lock − current ≥ 0.20%.
+        Profit: +0.70% first lock, then +0.90/+1.10/…; EXIT when lock − current ≥ 0.20%.
         Loss: −0.50% → LOCK (hold); track best_recovery (never moves backward);
               EXIT when best_recovery − current ≥ 0.20%;
               if gross recovers to −0.20% or better → CLEAR lock (re-arm later at −0.50%);
@@ -2033,7 +2033,7 @@ class AITradingAgent:
                 f"floor=−{LOSS_EMERGENCY_PCT:g}% mark={mark:.6f} entry={entry:.6f}"
             )
 
-        # 2) Profit step-locks: +0.50 → +0.70 → +0.90…; exit lock−0.20 from upper lock
+        # 2) Profit step-locks: +0.70 → +0.90 → +1.10…; exit lock−0.20 from upper lock
         if gross_pct >= PROFIT_LOCK_PCT:
             self._ratchet_profit_lock_level(trade, gross_pct)
 
