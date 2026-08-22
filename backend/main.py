@@ -637,9 +637,11 @@ PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0
 # Protective stop-loss (gross %, LONG/SHORT symmetric) — no widen for choppy:
 #   −0.50% → LOSS LOCK (hold); track best_recovery (never moves backward);
 #   EXIT when recovery_drawdown = best_recovery − current ≥ 0.20%;
+#   if recovery reaches −0.20% or better → CLEAR lock (may still go to profit);
 #   emergency floor −0.70%.
 LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.50"))
 LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0.20"))
+LOSS_LOCK_CLEAR_PCT = float(os.environ.get("LOSS_LOCK_CLEAR_PCT", "0.20"))
 LOSS_EMERGENCY_PCT = float(os.environ.get("LOSS_EMERGENCY_PCT", "0.70"))
 # Legacy aliases
 PATH_TP_TIGHT_PCT = PROFIT_LOCK_PCT
@@ -1831,7 +1833,11 @@ class AITradingAgent:
         if gross_pct <= -LOSS_PROTECT_PCT:
             trade["loss_protect"] = True
         if trade.get("loss_protect"):
-            self._update_loss_protect_extremes(trade, gross_pct, mark)
+            # Recovered to −0.20% or better → clear −0.50% lock (may still go to profit)
+            if gross_pct >= -LOSS_LOCK_CLEAR_PCT - 1e-9:
+                self._clear_loss_protect_lock(trade)
+            else:
+                self._update_loss_protect_extremes(trade, gross_pct, mark)
 
         # Never widen permitted risk for choppy — UI SL stays at protect level
         trade["path_sl_pct"] = LOSS_PROTECT_PCT
@@ -1894,6 +1900,22 @@ class AITradingAgent:
             if tp is not None:
                 trade["tp_price"] = tp
 
+    def _clear_loss_protect_lock(self, trade: dict) -> None:
+        """Remove −0.50% loss LOCK after recovery to −0.20% or better.
+
+        Clears recovery anchors so a later re-dip to −0.50% can arm a fresh lock.
+        Does not touch profit_lock / peak_profit. Emergency −0.70% stays always on.
+        """
+        trade["loss_protect"] = False
+        trade["loss_recovery_peak_gross"] = None
+        trade["loss_recovery_peak_price"] = None
+        trade["loss_adverse_extreme_gross"] = None
+        trade["loss_adverse_extreme_price"] = None
+        trade["is_stop_active"] = False
+        trade["stop_level_pct"] = None
+        if not trade.get("profit_lock"):
+            trade["sell_trigger_pct"] = None
+
     def _update_loss_protect_extremes(
         self, trade: dict, gross_pct: float, mark: float | None
     ) -> None:
@@ -1902,6 +1924,7 @@ class AITradingAgent:
         best_recovery only improves (higher gross / less loss). New deeper troughs
         do NOT reset the recovery anchor while the position stays open.
         recovery_drawdown = best_recovery_pnl − current_pnl (evaluated in exit).
+        Lock clears separately when gross recovers to −LOSS_LOCK_CLEAR_PCT or better.
         """
         side = trade.get("side")
         # Optional: still record worst adverse for logs (does not reset recovery)
@@ -1950,7 +1973,9 @@ class AITradingAgent:
         Priority on every mark: (1) EMERGENCY −0.70% (2) PROFIT LOCK/TRAIL (3) LOSS LOCK/RECOVERY.
         Profit: +0.50% → LOCK; track peak_profit; EXIT when peak − current ≥ 0.20% (no BE rule).
         Loss: −0.50% → LOCK (hold); track best_recovery (never moves backward);
-              EXIT when best_recovery − current ≥ 0.20%; emergency −0.70%.
+              EXIT when best_recovery − current ≥ 0.20%;
+              if gross recovers to −0.20% or better → CLEAR lock (re-arm later at −0.50%);
+              emergency −0.70%.
         LONG/SHORT symmetric on gross %. Fees stay out of the trigger.
         """
         trade.pop("_exit_fill_mark", None)
@@ -2012,6 +2037,11 @@ class AITradingAgent:
             trade["loss_protect"] = True
 
         if trade.get("loss_protect"):
+            # Recovered to −0.20% or better (−0.19, 0, profit…) → CLEAR lock
+            if gross_pct >= -LOSS_LOCK_CLEAR_PCT - 1e-9:
+                self._clear_loss_protect_lock(trade)
+                return None
+
             self._update_loss_protect_extremes(trade, gross_pct, mark)
             best_recovery = float(
                 trade.get("loss_recovery_peak_gross")
@@ -2800,7 +2830,7 @@ def agent_policy_summary() -> str:
         "CANDLESTICK BRAIN + path exit | "
         f"profit LOCK +{PROFIT_LOCK_PCT:g}% trail−{PROFIT_TRAIL_GIVEBACK_PCT:g}% (peak giveback only) | "
         f"loss PROTECT −{LOSS_PROTECT_PCT:g}% then recovery−{LOSS_RECOVERY_RETRACE_PCT:g}% "
-        f"(emerg −{LOSS_EMERGENCY_PCT:g}%, no choppy widen) | "
+        f"(clear lock @−{LOSS_LOCK_CLEAR_PCT:g}%+, emerg −{LOSS_EMERGENCY_PCT:g}%) | "
         "manual BUY/SELL + emergency sell-all"
     )
 
@@ -3075,7 +3105,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             )
             exit_label = (
                 f"loss protect −{LOSS_PROTECT_PCT:g}%/retrace −{LOSS_RECOVERY_RETRACE_PCT:g}% "
-                f"emerg −{LOSS_EMERGENCY_PCT:g}% | "
+                f"clear@−{LOSS_LOCK_CLEAR_PCT:g}%+ emerg −{LOSS_EMERGENCY_PCT:g}% | "
                 f"profit lock +{PROFIT_LOCK_PCT:g}% trail −{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
                 f"SL={sl_price} TP={tp_price}"
             )
@@ -3554,7 +3584,7 @@ async def auto_exit_watchdog():
         f"[AUTO-EXIT] Watchdog online "
         f"(profit +{PROFIT_LOCK_PCT:g}%/−{PROFIT_TRAIL_GIVEBACK_PCT:g}% | "
         f"loss protect −{LOSS_PROTECT_PCT:g}%/retrace −{LOSS_RECOVERY_RETRACE_PCT:g}% | "
-        f"emerg −{LOSS_EMERGENCY_PCT:g}%)."
+        f"clear@−{LOSS_LOCK_CLEAR_PCT:g}%+ | emerg −{LOSS_EMERGENCY_PCT:g}%)."
     )
     while True:
         try:
