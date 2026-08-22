@@ -627,22 +627,25 @@ bybit_api = BybitAPIWrapper()
 # Manual-mode defaults (auto strategy wiped)
 MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "10"))
 MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "1"))
-AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path-based SL + lock/trail profit book
+AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path lock/trail profit + protective SL (same engine)
 INVERT_AUTO_TRADE_FIRE = False
 # Profit book (gross %, LONG/SHORT symmetric):
 #   +0.50% → LOCK ON; track peak; exit when peak − current ≥ 0.20%
 #   after lock, if gross drops below +0.50% before trail → BE exit (0% gross)
 PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.50"))
 PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.20"))
-# Legacy aliases (UI / older labels) — lock level is the book floor; trail is giveback from peak.
+# Protective stop-loss (gross %, LONG/SHORT symmetric) — no widen for choppy:
+#   allow adverse to −0.50% → activate protect; track trough + recovery peak;
+#   EXIT when recovery_peak − current ≥ 0.20%; emergency floor −0.70%.
+LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.50"))
+LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0.20"))
+LOSS_EMERGENCY_PCT = float(os.environ.get("LOSS_EMERGENCY_PCT", "0.70"))
+# Legacy aliases
 PATH_TP_TIGHT_PCT = PROFIT_LOCK_PCT
-PATH_TP_WIDE_PCT = PROFIT_LOCK_PCT + PROFIT_TRAIL_GIVEBACK_PCT  # informational (0.70)
+PATH_TP_WIDE_PCT = PROFIT_LOCK_PCT + PROFIT_TRAIL_GIVEBACK_PCT
 FIXED_EXIT_PROFIT_PCT = PROFIT_LOCK_PCT
-# Path-based stop-loss (per trade, tick path) — unchanged:
-#   continuous adverse --- (3 steps) → exit at -0.50%
-#   choppy -+-+ path → hold past 0.50%, exit at -0.70%
-PATH_SL_TIGHT_PCT = 0.5
-PATH_SL_WIDE_PCT = 0.7
+PATH_SL_TIGHT_PCT = LOSS_PROTECT_PCT
+PATH_SL_WIDE_PCT = LOSS_EMERGENCY_PCT
 PATH_SL_ADVERSE_STEPS = 3
 PATH_TP_FAVORABLE_STEPS = 3
 FIXED_EXIT_LOSS_PCT = PATH_SL_TIGHT_PCT
@@ -1540,7 +1543,12 @@ class AITradingAgent:
             "path_continuous_dump": False,
             "path_continuous_run": False,
             "profit_lock": False,
-            "path_sl_pct": PATH_SL_TIGHT_PCT,
+            "loss_protect": False,
+            "loss_adverse_extreme_gross": None,  # worst trough after protect (most negative)
+            "loss_recovery_peak_gross": None,    # best recovery after trough
+            "loss_adverse_extreme_price": None,
+            "loss_recovery_peak_price": None,
+            "path_sl_pct": LOSS_PROTECT_PCT,
             "path_tp_pct": PROFIT_LOCK_PCT,
         }
         self.trades.append(trade)
@@ -1782,18 +1790,13 @@ class AITradingAgent:
             round(tp, price_decimals_for_mark(entry)),
         )
 
-    def _update_path_sl_state(self, trade: dict, gross_pct: float) -> None:
-        """Track adverse/favorable steps for path-based SL + TP.
+    def _update_path_sl_state(self, trade: dict, gross_pct: float, mark: float | None = None) -> None:
+        """Update path streaks + profit/loss protect UI levels.
 
-        Loss path:
-          Adverse (-) → dump streak; 3× → continuous --- → tight −0.50% SL.
-          Bounce (+) while in loss → choppy → wide −0.70% SL.
-        Profit path:
-          Favorable (+) → run streak; 3× → continuous +++ → hold to +0.70% TP.
-          Dip (-) while in profit → profit-choppy → book at +0.50% TP.
+        Never widen loss SL past LOSS_PROTECT_PCT for choppy paths.
+        Emergency floor is enforced only in _evaluate_fixed_pct_exit.
         """
         last = float(trade.get("path_last_gross_pct") if trade.get("path_last_gross_pct") is not None else 0.0)
-        # First sample after open: seed only.
         if trade.get("path_seeded") is not True:
             trade["path_last_gross_pct"] = gross_pct
             trade["path_seeded"] = True
@@ -1803,85 +1806,136 @@ class AITradingAgent:
 
         eps = 1e-6
         if gross_pct < last - eps:
-            # Adverse step (PnL worsened)
             streak = int(trade.get("path_adverse_streak") or 0) + 1
             trade["path_adverse_streak"] = streak
             trade["path_favorable_streak"] = 0
             if streak >= PATH_SL_ADVERSE_STEPS:
                 trade["path_continuous_dump"] = True
-            # Dip while already in profit → choppy profit path (book early at +0.5%)
             if last > eps or gross_pct > eps:
                 trade["path_profit_choppy"] = True
         elif gross_pct > last + eps:
-            # Favorable step (PnL improved)
             fav = int(trade.get("path_favorable_streak") or 0) + 1
             trade["path_favorable_streak"] = fav
             trade["path_adverse_streak"] = 0
             if fav >= PATH_TP_FAVORABLE_STEPS:
                 trade["path_continuous_run"] = True
-            # Bounce while in loss → choppy loss path (wide SL)
             if last < -eps or gross_pct < -eps:
                 trade["path_choppy"] = True
         else:
-            # Flat — break both continuity streaks
             trade["path_adverse_streak"] = 0
             trade["path_favorable_streak"] = 0
 
         trade["path_last_gross_pct"] = gross_pct
 
-        # Active SL distance for UI (loss path only — never widen past emergency floor intent)
-        if trade.get("path_choppy") and not trade.get("path_continuous_dump"):
-            trade["path_sl_pct"] = PATH_SL_WIDE_PCT
-        elif trade.get("path_continuous_dump") and not trade.get("path_choppy"):
-            trade["path_sl_pct"] = PATH_SL_TIGHT_PCT
-        elif trade.get("path_choppy"):
-            trade["path_sl_pct"] = PATH_SL_WIDE_PCT
-        else:
-            trade["path_sl_pct"] = PATH_SL_TIGHT_PCT
+        # Loss protect activate + track extremes (price + gross)
+        if gross_pct <= -LOSS_PROTECT_PCT:
+            trade["loss_protect"] = True
+        if trade.get("loss_protect"):
+            self._update_loss_protect_extremes(trade, gross_pct, mark)
 
-        # Profit lock / trail UI levels
+        # Never widen permitted risk for choppy — UI SL stays at protect level
+        trade["path_sl_pct"] = LOSS_PROTECT_PCT
+
+        # Profit lock / trail UI
         if gross_pct >= PROFIT_LOCK_PCT:
             trade["profit_lock"] = True
         if trade.get("profit_lock"):
             peak = float(trade.get("peak_gross_pct") or gross_pct)
             trail_stop = max(0.0, peak - PROFIT_TRAIL_GIVEBACK_PCT)
-            trade["path_tp_pct"] = peak  # show running peak as TP reference
+            trade["path_tp_pct"] = peak
             trade["is_lock_active"] = True
             trade["lock_level_pct"] = PROFIT_LOCK_PCT
             trade["sell_trigger_pct"] = trail_stop
+        elif trade.get("loss_protect"):
+            trade["is_stop_active"] = True
+            trade["stop_level_pct"] = -LOSS_PROTECT_PCT
+            rec = trade.get("loss_recovery_peak_gross")
+            if rec is not None:
+                trade["sell_trigger_pct"] = float(rec) - LOSS_RECOVERY_RETRACE_PCT
+            trade["path_tp_pct"] = PROFIT_LOCK_PCT
+            trade["is_lock_active"] = False
         else:
             trade["path_tp_pct"] = PROFIT_LOCK_PCT
             trade["is_lock_active"] = False
+            trade["is_stop_active"] = False
             trade["sell_trigger_pct"] = None
 
-        # Keep sl_price / tp_price in sync for UI.
         entry = float(trade.get("entry") or 0)
         side = trade.get("side")
-        if entry > 0 and side in ("LONG", "SHORT"):
-            loss_pct = float(trade["path_sl_pct"])
-            if trade.get("profit_lock"):
-                # SL display = trail stop (peak − giveback), floored at BE (0%)
-                peak = float(trade.get("peak_gross_pct") or gross_pct)
-                trail_stop = max(0.0, peak - PROFIT_TRAIL_GIVEBACK_PCT)
-                if side == "LONG":
-                    sl = entry * (1.0 + trail_stop / 100.0)
-                    tp = entry * (1.0 + peak / 100.0)
-                else:
-                    sl = entry * (1.0 - trail_stop / 100.0)
-                    tp = entry * (1.0 - peak / 100.0)
-                trade["sl_price"] = round(sl, price_decimals_for_mark(entry))
-                trade["tp_price"] = round(tp, price_decimals_for_mark(entry))
+        if entry <= 0 or side not in ("LONG", "SHORT"):
+            return
+
+        if trade.get("profit_lock"):
+            peak = float(trade.get("peak_gross_pct") or gross_pct)
+            trail_stop = max(0.0, peak - PROFIT_TRAIL_GIVEBACK_PCT)
+            if side == "LONG":
+                sl = entry * (1.0 + trail_stop / 100.0)
+                tp = entry * (1.0 + peak / 100.0)
             else:
-                sl, tp = self._fixed_exit_prices(
-                    entry,
-                    side,
-                    loss_pct=loss_pct,
-                    profit_pct=PROFIT_LOCK_PCT,
-                )
-                if sl is not None:
-                    trade["sl_price"] = sl
-                if tp is not None:
-                    trade["tp_price"] = tp
+                sl = entry * (1.0 - trail_stop / 100.0)
+                tp = entry * (1.0 - peak / 100.0)
+            trade["sl_price"] = round(sl, price_decimals_for_mark(entry))
+            trade["tp_price"] = round(tp, price_decimals_for_mark(entry))
+        elif trade.get("loss_protect"):
+            # SL display at protect level (−0.50%); emergency is separate floor
+            sl, tp = self._fixed_exit_prices(
+                entry, side, loss_pct=LOSS_PROTECT_PCT, profit_pct=PROFIT_LOCK_PCT
+            )
+            if sl is not None:
+                trade["sl_price"] = sl
+            if tp is not None:
+                trade["tp_price"] = tp
+        else:
+            sl, tp = self._fixed_exit_prices(
+                entry, side, loss_pct=LOSS_PROTECT_PCT, profit_pct=PROFIT_LOCK_PCT
+            )
+            if sl is not None:
+                trade["sl_price"] = sl
+            if tp is not None:
+                trade["tp_price"] = tp
+
+    def _update_loss_protect_extremes(
+        self, trade: dict, gross_pct: float, mark: float | None
+    ) -> None:
+        """After −0.50% protect: track adverse trough + best recovery (gross + price)."""
+        side = trade.get("side")
+        adv = trade.get("loss_adverse_extreme_gross")
+        if adv is None:
+            trade["loss_adverse_extreme_gross"] = gross_pct
+            trade["loss_recovery_peak_gross"] = gross_pct
+            if mark is not None and mark > 0:
+                trade["loss_adverse_extreme_price"] = float(mark)
+                trade["loss_recovery_peak_price"] = float(mark)
+            return
+
+        # New worse trough → reset recovery to trough
+        if gross_pct < float(adv) - 1e-9:
+            trade["loss_adverse_extreme_gross"] = gross_pct
+            trade["loss_recovery_peak_gross"] = gross_pct
+            if mark is not None and mark > 0:
+                trade["loss_adverse_extreme_price"] = float(mark)
+                trade["loss_recovery_peak_price"] = float(mark)
+            return
+
+        # Improving / flat from trough → raise recovery peak
+        rec = float(trade.get("loss_recovery_peak_gross") if trade.get("loss_recovery_peak_gross") is not None else adv)
+        if gross_pct > rec + 1e-9:
+            trade["loss_recovery_peak_gross"] = gross_pct
+        if mark is not None and mark > 0:
+            ext_px = trade.get("loss_adverse_extreme_price")
+            rec_px = trade.get("loss_recovery_peak_price")
+            if side == "LONG":
+                if ext_px is None or mark < float(ext_px):
+                    trade["loss_adverse_extreme_price"] = float(mark)
+                    trade["loss_recovery_peak_price"] = float(mark)
+                elif rec_px is None or mark > float(rec_px):
+                    trade["loss_recovery_peak_price"] = float(mark)
+            elif side == "SHORT":
+                if ext_px is None or mark > float(ext_px):
+                    trade["loss_adverse_extreme_price"] = float(mark)
+                    trade["loss_recovery_peak_price"] = float(mark)
+                elif rec_px is None or mark < float(rec_px):
+                    trade["loss_recovery_peak_price"] = float(mark)
 
     def _mark_from_gross_pct(self, entry: float, side: str, gross_pct: float) -> float:
         """Price that realizes exactly gross_pct for side (paper SL/TP fill clamp)."""
@@ -1890,13 +1944,13 @@ class AITradingAgent:
         return entry * (1.0 - float(gross_pct) / 100.0)
 
     def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
-        """Path SL + lock/trail profit book (gross %). LONG/SHORT symmetric on profit %.
+        """Single path-exit engine: profit lock/trail + protective SL (no parallel engine).
 
-        Profit:
-          +0.50% → LOCK; track peak; EXIT when peak − current ≥ 0.20%;
-          after lock, drop below +0.50% → BE exit (0% gross).
-        Loss (unchanged path):
-          continuous --- → −0.50%; choppy → −0.70%; hard floor −0.70%.
+        Profit: +0.50% lock → peak−0.20% trail; drop below lock → BE.
+        Loss: allow to −0.50% → protect; track trough + recovery; EXIT when
+              recovery_peak − current ≥ 0.20% (price extremes, not tick counts);
+              never widen for choppy; emergency floor −0.70%.
+        LONG/SHORT symmetric on gross %.
         """
         trade.pop("_exit_fill_mark", None)
         entry = float(trade.get("entry") or 0)
@@ -1914,7 +1968,7 @@ class AITradingAgent:
         trade["peak_gross_pct"] = max(float(trade.get("peak_gross_pct") or 0), gross_pct)
         trade["trough_gross_pct"] = min(float(trade.get("trough_gross_pct") or 0), gross_pct)
 
-        self._update_path_sl_state(trade, gross_pct)
+        self._update_path_sl_state(trade, gross_pct, mark=mark)
         paper = trade.get("exchange") == "paper" or not trade_uses_bybit_executor(trade)
 
         def _arm_paper_fill(target_gross: float) -> None:
@@ -1925,15 +1979,21 @@ class AITradingAgent:
             elif target_gross < 0 and gross_pct < target_gross - 1e-9:
                 trade["_exit_fill_mark"] = self._mark_from_gross_pct(entry, side, target_gross)
 
-        # ---- Profit lock / trail (LONG & SHORT same gross math) ----
+        # 1) Absolute emergency floor −0.70% (never remain open beyond)
+        if gross_pct <= -LOSS_EMERGENCY_PCT:
+            _arm_paper_fill(-LOSS_EMERGENCY_PCT)
+            return (
+                f"LOSS_EMERGENCY | {side} gross={gross_pct:.3f}% "
+                f"floor=−{LOSS_EMERGENCY_PCT:g}% mark={mark:.6f} entry={entry:.6f}"
+            )
+
+        # 2) Profit lock / trail (takes priority when in profit lock)
         if gross_pct >= PROFIT_LOCK_PCT:
             trade["profit_lock"] = True
 
         if trade.get("profit_lock"):
             peak = float(trade.get("peak_gross_pct") or 0.0)
             giveback = peak - gross_pct
-
-            # Trail: peak − current ≥ 0.20% → EXIT
             if giveback >= PROFIT_TRAIL_GIVEBACK_PCT - 1e-9:
                 fill_at = max(0.0, peak - PROFIT_TRAIL_GIVEBACK_PCT)
                 _arm_paper_fill(fill_at)
@@ -1942,8 +2002,6 @@ class AITradingAgent:
                     f"giveback={giveback:.3f}%≥{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
                     f"(lock@{PROFIT_LOCK_PCT:g}%) mark={mark:.6f} entry={entry:.6f}"
                 )
-
-            # After lock, dropped back below +0.50% before 0.20 trail → BE exit
             if gross_pct < PROFIT_LOCK_PCT - 1e-9:
                 _arm_paper_fill(0.0)
                 return (
@@ -1951,34 +2009,39 @@ class AITradingAgent:
                     f"< lock → BE exit (peak was {peak:.3f}%) "
                     f"mark={mark:.6f} entry={entry:.6f}"
                 )
-
-            # Still above lock, giveback < 0.20 → hold / let peak grow
             return None
 
-        # ---- Loss path (no profit lock yet) ----
-        # Hard loss floor −0.70%
-        if gross_pct <= -PATH_SL_WIDE_PCT:
-            _arm_paper_fill(-PATH_SL_WIDE_PCT)
-            return (
-                f"Path SL −{PATH_SL_WIDE_PCT:g}%: {side} gross {gross_pct:.3f}% "
-                f"(mark {mark:.6f} vs entry {entry:.6f})"
+        # 3) Protective stop-loss path (no widen for choppy)
+        if gross_pct <= -LOSS_PROTECT_PCT:
+            trade["loss_protect"] = True
+
+        if trade.get("loss_protect"):
+            self._update_loss_protect_extremes(trade, gross_pct, mark)
+            trough = float(trade.get("loss_adverse_extreme_gross") or gross_pct)
+            recovery = float(
+                trade.get("loss_recovery_peak_gross")
+                if trade.get("loss_recovery_peak_gross") is not None
+                else trough
             )
-
-        if gross_pct > -PATH_SL_TIGHT_PCT:
+            # Retrace from best recovery (combined 0.10s OK — measured on peak/trough)
+            retrace = recovery - gross_pct
+            if retrace >= LOSS_RECOVERY_RETRACE_PCT - 1e-9:
+                fill_at = recovery - LOSS_RECOVERY_RETRACE_PCT
+                _arm_paper_fill(fill_at)
+                return (
+                    f"LOSS_PROTECT_TRAIL | {side} trough={trough:.3f}% "
+                    f"recovery={recovery:.3f}% now={gross_pct:.3f}% "
+                    f"retrace={retrace:.3f}%≥{LOSS_RECOVERY_RETRACE_PCT:g}% "
+                    f"(protect@−{LOSS_PROTECT_PCT:g}%) "
+                    f"ext_px={trade.get('loss_adverse_extreme_price')} "
+                    f"rec_px={trade.get('loss_recovery_peak_price')} "
+                    f"mark={mark:.6f} entry={entry:.6f}"
+                )
+            # Still protected, waiting for recovery-then-retrace or emergency
             return None
 
-        choppy = bool(trade.get("path_choppy"))
-        continuous = bool(trade.get("path_continuous_dump"))
-
-        if choppy:
-            return None  # hold to −0.70%
-
-        why = "continuous ---" if continuous else "no-bounce dump"
-        _arm_paper_fill(-PATH_SL_TIGHT_PCT)
-        return (
-            f"Path SL −{PATH_SL_TIGHT_PCT:g}% ({why}): {side} gross {gross_pct:.3f}% "
-            f"streak={trade.get('path_adverse_streak')} (mark {mark:.6f})"
-        )
+        # Above −0.50% and no profit lock → hold
+        return None
 
     def _close_single_trade(self, trade, metrics, reason) -> bool:
         """Close one position. Returns True if closed locally (and on Bybit when applicable)."""
@@ -2717,10 +2780,10 @@ def get_bybit_executor_agent():
 def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
-        "CANDLESTICK BRAIN + path SL | "
-        f"profit LOCK +{PROFIT_LOCK_PCT:g}% → trail peak−{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
-        f"(drop < lock → BE) | "
-        f"SL −{PATH_SL_TIGHT_PCT:g}% (---) / −{PATH_SL_WIDE_PCT:g}% (choppy) | "
+        "CANDLESTICK BRAIN + path exit | "
+        f"profit LOCK +{PROFIT_LOCK_PCT:g}% trail−{PROFIT_TRAIL_GIVEBACK_PCT:g}% (BE if <lock) | "
+        f"loss PROTECT −{LOSS_PROTECT_PCT:g}% then recovery−{LOSS_RECOVERY_RETRACE_PCT:g}% "
+        f"(emerg −{LOSS_EMERGENCY_PCT:g}%, no choppy widen) | "
         "manual BUY/SELL + emergency sell-all"
     )
 
@@ -2989,10 +3052,11 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             exit_label = f"brain SL={sl_price} TP={tp_price}"
         else:
             sl_price, tp_price = agent._fixed_exit_prices(
-                float(mark_px), side, loss_pct=PATH_SL_TIGHT_PCT, profit_pct=PROFIT_LOCK_PCT
+                float(mark_px), side, loss_pct=LOSS_PROTECT_PCT, profit_pct=PROFIT_LOCK_PCT
             )
             exit_label = (
-                f"path SL −{PATH_SL_TIGHT_PCT:g}%/−{PATH_SL_WIDE_PCT:g}% | "
+                f"loss protect −{LOSS_PROTECT_PCT:g}%/retrace −{LOSS_RECOVERY_RETRACE_PCT:g}% "
+                f"emerg −{LOSS_EMERGENCY_PCT:g}% | "
                 f"profit lock +{PROFIT_LOCK_PCT:g}% trail −{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
                 f"SL={sl_price} TP={tp_price}"
             )
@@ -3466,8 +3530,10 @@ async def self_ping_keepalive():
 async def auto_exit_watchdog():
     """Re-check path-SL / path-TP even if a ticker tick was skipped or failed."""
     print(
-        f"[AUTO-EXIT] Watchdog online (profit lock +{PROFIT_LOCK_PCT:g}% / "
-        f"trail −{PROFIT_TRAIL_GIVEBACK_PCT:g}% / path SL −{PATH_SL_TIGHT_PCT:g}%/−{PATH_SL_WIDE_PCT:g}%)."
+        f"[AUTO-EXIT] Watchdog online "
+        f"(profit +{PROFIT_LOCK_PCT:g}%/−{PROFIT_TRAIL_GIVEBACK_PCT:g}% | "
+        f"loss protect −{LOSS_PROTECT_PCT:g}%/retrace −{LOSS_RECOVERY_RETRACE_PCT:g}% | "
+        f"emerg −{LOSS_EMERGENCY_PCT:g}%)."
     )
     while True:
         try:
