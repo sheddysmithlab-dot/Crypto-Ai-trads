@@ -1,14 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import bootVideo from '../assets/animation.mp4';
 
 const INTRO_SEC = 10;
-const ANALYSIS_SEC = 30;
+const ANALYSIS_SEC = 10;
 const TOTAL_SEC = INTRO_SEC + ANALYSIS_SEC;
+
+const RING_SIZE = 220;
+const RING_STROKE = 10;
+const RING_R = (RING_SIZE - RING_STROKE) / 2;
+const RING_C = 2 * Math.PI * RING_R;
 
 /**
  * Full-screen boot sequence after AI Engine START:
  * 0–10s  intro MP4 (autoplay, muted)
- * 10–40s neon round analysis countdown
+ * 10–20s smooth neon countdown ring (continuous, no tick jumps)
  * Blocks all background interaction; Cancel stops engine immediately (no confirm).
  */
 export default function EngineBootOverlay({
@@ -20,37 +25,30 @@ export default function EngineBootOverlay({
   onCancel,
   cancelLoading = false,
 }) {
-  const [tick, setTick] = useState(0);
   const [videoOk, setVideoOk] = useState(true);
+  const [smoothLeft, setSmoothLeft] = useState(0);
+  const [smoothProgress, setSmoothProgress] = useState(0);
   const videoRef = useRef(null);
+  const countdownEndRef = useRef(0);
+  const countdownDurRef = useRef(ANALYSIS_SEC);
 
-  useEffect(() => {
-    if (!active) return undefined;
-    const id = setInterval(() => setTick((n) => n + 1), 200);
-    return () => clearInterval(id);
-  }, [active]);
+  const remainingWs = Math.max(0, Number(warmupRemainingSec) || 0);
+  const total = Math.max(1, Number(warmupTotalSec) || TOTAL_SEC);
+  const intro = Math.max(1, Number(introSec) || INTRO_SEC);
+  const analysis = Math.max(1, Number(analysisSec) || ANALYSIS_SEC);
+  const inIntro = remainingWs > analysis + 0.05;
+  const show = Boolean(active && remainingWs > 0.05);
+  const elapsedIntro = Math.max(0, Math.min(intro, total - remainingWs));
 
-  // Lock body scroll / interaction while boot overlay is up
+  // Lock body scroll while boot overlay is up
   useEffect(() => {
-    if (!active || !(Number(warmupRemainingSec) > 0.05)) return undefined;
+    if (!show) return undefined;
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => {
       document.body.style.overflow = prev;
     };
-  }, [active, warmupRemainingSec]);
-
-  const remaining = Math.max(0, Number(warmupRemainingSec) || 0);
-  const total = Math.max(1, Number(warmupTotalSec) || TOTAL_SEC);
-  const intro = Math.max(1, Number(introSec) || INTRO_SEC);
-  const analysis = Math.max(1, Number(analysisSec) || ANALYSIS_SEC);
-  const elapsed = Math.max(0, total - remaining);
-  const inIntro = remaining > analysis;
-  const analysisLeft = Math.min(analysis, Math.max(0, remaining));
-  const analysisProgress = 1 - analysisLeft / analysis;
-
-  const show = active && remaining > 0.05;
-  void tick;
+  }, [show]);
 
   // Start / restart intro video when intro phase is visible
   useEffect(() => {
@@ -62,7 +60,7 @@ export default function EngineBootOverlay({
     const play = el.play();
     if (play && typeof play.catch === 'function') {
       play.catch(() => {
-        // Autoplay blocked — still show first frame
+        /* Autoplay blocked — still show first frame */
       });
     }
     return () => {
@@ -74,16 +72,39 @@ export default function EngineBootOverlay({
     };
   }, [show, inIntro, videoOk]);
 
-  const ring = useMemo(() => {
-    const size = 220;
-    const stroke = 10;
-    const r = (size - stroke) / 2;
-    const c = 2 * Math.PI * r;
-    const offset = c * (1 - analysisProgress);
-    return { size, stroke, r, c, offset };
-  }, [analysisProgress]);
+  // Smooth continuous countdown (rAF) — no discrete tick jumps
+  useEffect(() => {
+    if (!show || inIntro) {
+      countdownEndRef.current = 0;
+      setSmoothLeft(analysis);
+      setSmoothProgress(0);
+      return undefined;
+    }
+    const left = Math.min(analysis, Math.max(0, remainingWs));
+    countdownDurRef.current = analysis;
+    countdownEndRef.current = performance.now() + left * 1000;
+
+    let raf = 0;
+    const frame = (now) => {
+      const end = countdownEndRef.current;
+      const dur = countdownDurRef.current;
+      const leftMs = Math.max(0, end - now);
+      const leftSec = leftMs / 1000;
+      const progress = dur > 0 ? 1 - leftSec / dur : 1;
+      setSmoothLeft(leftSec);
+      setSmoothProgress(Math.min(1, Math.max(0, progress)));
+      if (leftMs > 0) raf = requestAnimationFrame(frame);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf);
+    // Seed once when countdown phase starts (not on every WS tick).
+  }, [show, inIntro, analysis]); // remainingWs read only at phase enter
+
 
   if (!show) return null;
+
+  const offset = RING_C * (1 - smoothProgress);
+  const displaySec = Math.max(0, Math.ceil(smoothLeft));
 
   return (
     <div
@@ -95,7 +116,6 @@ export default function EngineBootOverlay({
       onClick={(e) => e.stopPropagation()}
       onTouchStart={(e) => e.stopPropagation()}
     >
-      {/* Blocks all clicks to chart / control bar */}
       <div className="absolute inset-0 bg-black/70 backdrop-blur-[2px]" />
 
       {inIntro ? (
@@ -125,12 +145,12 @@ export default function EngineBootOverlay({
             </div>
             <div className="mx-auto h-1.5 w-48 sm:w-64 rounded-full bg-white/15 overflow-hidden">
               <div
-                className="h-full rounded-full bg-cyan-400 shadow-[0_0_12px_#22d3ee]"
-                style={{ width: `${Math.min(100, (elapsed / intro) * 100)}%` }}
+                className="h-full rounded-full bg-cyan-400 shadow-[0_0_12px_#22d3ee] transition-[width] duration-100 linear"
+                style={{ width: `${Math.min(100, (elapsedIntro / intro) * 100)}%` }}
               />
             </div>
             <div className="mt-2 text-gray-200 text-[11px] font-mono">
-              Intro {Math.ceil(Math.max(0, remaining - analysis))}s · then analysis
+              Intro {Math.ceil(Math.max(0, remainingWs - analysis))}s · then countdown
             </div>
           </div>
         </div>
@@ -139,35 +159,34 @@ export default function EngineBootOverlay({
           <div className="text-orange-300 text-xs sm:text-sm font-black tracking-[0.2em] uppercase drop-shadow-[0_0_8px_rgba(255,138,31,0.8)]">
             Analysis countdown
           </div>
-          <div className="relative" style={{ width: ring.size, height: ring.size }}>
-            <svg width={ring.size} height={ring.size} className="-rotate-90">
+          <div className="relative" style={{ width: RING_SIZE, height: RING_SIZE }}>
+            <svg width={RING_SIZE} height={RING_SIZE} className="-rotate-90">
               <circle
-                cx={ring.size / 2}
-                cy={ring.size / 2}
-                r={ring.r}
+                cx={RING_SIZE / 2}
+                cy={RING_SIZE / 2}
+                r={RING_R}
                 fill="none"
                 stroke="rgba(255,255,255,0.12)"
-                strokeWidth={ring.stroke}
+                strokeWidth={RING_STROKE}
               />
               <circle
-                cx={ring.size / 2}
-                cy={ring.size / 2}
-                r={ring.r}
+                cx={RING_SIZE / 2}
+                cy={RING_SIZE / 2}
+                r={RING_R}
                 fill="none"
                 stroke="#3b9eff"
-                strokeWidth={ring.stroke}
-                strokeLinecap="round"
-                strokeDasharray={ring.c}
-                strokeDashoffset={ring.offset}
+                strokeWidth={RING_STROKE}
+                strokeLinecap="butt"
+                strokeDasharray={RING_C}
+                strokeDashoffset={offset}
                 style={{
                   filter: 'drop-shadow(0 0 10px #3b9eff) drop-shadow(0 0 18px rgba(255,138,31,0.55))',
-                  transition: 'stroke-dashoffset 0.2s linear',
                 }}
               />
             </svg>
             <div className="absolute inset-0 flex flex-col items-center justify-center">
               <div className="text-5xl sm:text-6xl font-black tabular-nums text-white drop-shadow-[0_0_14px_rgba(59,158,255,0.9)]">
-                {Math.ceil(analysisLeft)}
+                {displaySec}
               </div>
               <div className="text-[10px] sm:text-xs font-bold tracking-widest text-orange-300/90 uppercase mt-1">
                 seconds
