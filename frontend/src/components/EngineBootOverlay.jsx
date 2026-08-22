@@ -159,37 +159,55 @@ export default function EngineBootOverlay({
           <div className="text-orange-300 text-xs sm:text-sm font-black tracking-[0.2em] uppercase drop-shadow-[0_0_8px_rgba(255,138,31,0.8)]">
             Analysis countdown
           </div>
-          <div className="relative" style={{ width: RING_SIZE, height: RING_SIZE }}>
-            <svg width={RING_SIZE} height={RING_SIZE} className="-rotate-90">
-              <circle
-                cx={RING_SIZE / 2}
-                cy={RING_SIZE / 2}
-                r={RING_R}
-                fill="none"
-                stroke="rgba(255,255,255,0.12)"
-                strokeWidth={RING_STROKE}
-              />
-              <circle
-                cx={RING_SIZE / 2}
-                cy={RING_SIZE / 2}
-                r={RING_R}
-                fill="none"
-                stroke="#3b9eff"
-                strokeWidth={RING_STROKE}
-                strokeLinecap="butt"
-                strokeDasharray={RING_C}
-                strokeDashoffset={offset}
-                style={{
-                  filter: 'drop-shadow(0 0 10px #3b9eff) drop-shadow(0 0 18px rgba(255,138,31,0.55))',
-                }}
-              />
-            </svg>
-            <div className="absolute inset-0 flex flex-col items-center justify-center">
-              <div className="text-5xl sm:text-6xl font-black tabular-nums text-white drop-shadow-[0_0_14px_rgba(59,158,255,0.9)]">
-                {displaySec}
-              </div>
-              <div className="text-[10px] sm:text-xs font-bold tracking-widest text-orange-300/90 uppercase mt-1">
-                seconds
+          {/* Round card — padding + overflow visible so neon glow is not clipped square */}
+          <div
+            className="relative rounded-full flex items-center justify-center overflow-visible bg-black/45 border border-cyan-400/35 shadow-[0_0_36px_rgba(59,158,255,0.35)]"
+            style={{
+              width: RING_SIZE + 56,
+              height: RING_SIZE + 56,
+            }}
+          >
+            <div
+              className="relative overflow-visible"
+              style={{ width: RING_SIZE, height: RING_SIZE }}
+            >
+              <svg
+                width={RING_SIZE}
+                height={RING_SIZE}
+                className="-rotate-90 overflow-visible"
+                style={{ overflow: 'visible' }}
+              >
+                <circle
+                  cx={RING_SIZE / 2}
+                  cy={RING_SIZE / 2}
+                  r={RING_R}
+                  fill="none"
+                  stroke="rgba(255,255,255,0.12)"
+                  strokeWidth={RING_STROKE}
+                />
+                <circle
+                  cx={RING_SIZE / 2}
+                  cy={RING_SIZE / 2}
+                  r={RING_R}
+                  fill="none"
+                  stroke="#3b9eff"
+                  strokeWidth={RING_STROKE}
+                  strokeLinecap="butt"
+                  strokeDasharray={RING_C}
+                  strokeDashoffset={offset}
+                  style={{
+                    filter:
+                      'drop-shadow(0 0 10px #3b9eff) drop-shadow(0 0 22px rgba(59,158,255,0.85)) drop-shadow(0 0 18px rgba(255,138,31,0.45))',
+                  }}
+                />
+              </svg>
+              <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                <div className="text-5xl sm:text-6xl font-black tabular-nums text-white drop-shadow-[0_0_14px_rgba(59,158,255,0.9)]">
+                  {displaySec}
+                </div>
+                <div className="text-[10px] sm:text-xs font-bold tracking-widest text-orange-300/90 uppercase mt-1">
+                  seconds
+                </div>
               </div>
             </div>
           </div>
