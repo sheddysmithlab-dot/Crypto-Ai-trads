@@ -2175,63 +2175,12 @@ class AITradingAgent:
     def close_opposite_positions_for_flip(
         self, side: str, pair: str, *, pattern: str | None = None
     ) -> int:
-        """AI flip-exit training: opposite signal on the same chart/pair closes the old side.
+        """Flip-exit disabled — exits only via path profit/loss (lock/trail/emergency).
 
-        Long + short on different candles of one pair is allowed, but when the new side
-        fires, open opposite positions on that pair exit immediately — do not ride the
-        reverse move into deeper loss (e.g. LONG still open when SHORT fires).
+        Previously closed opposite side on reverse signal (caused −0.01%/−0.09% exits).
+        Kept as no-op so callers do not reopen that behavior accidentally.
         """
-        opposite = "SHORT" if side == "LONG" else "LONG"
-        targets = [
-            t
-            for t in list(self.trades)
-            if (t.get("pair") or "") == pair and t.get("side") == opposite
-        ]
-        if not targets:
-            return 0
-
-        why = (
-            f"Flip-exit on {pair}: {side} signal"
-            + (f" ({pattern})" if pattern else "")
-            + f" closed opposite {opposite}"
-        )
-        target_ids = {t["id"] for t in targets}
-        still_open: list = []
-        closed_n = 0
-        for trade in list(self.trades):
-            if trade.get("id") not in target_ids:
-                still_open.append(trade)
-                continue
-            m = self._trade_metrics(trade, for_close=True)
-            if self._close_single_trade(trade, m, why):
-                closed_n += 1
-                print(
-                    f"[FLIP-EXIT] {why} | #{trade.get('id')} "
-                    f"gross={m['gross_pct']:.3f}% net=${m['net_usd']:.2f}"
-                )
-                system_log.push_agent_chat(
-                    f"FLIP-EXIT {opposite} #{trade.get('id')} on {pair} — new {side} signal"
-                    + (f" ({pattern})" if pattern else ""),
-                    status="match",
-                    details={
-                        "pair": pair,
-                        "closed_side": opposite,
-                        "new_side": side,
-                        "pattern": pattern,
-                        "trade_id": trade.get("id"),
-                        "gross_pct": m.get("gross_pct"),
-                        "net_usd": m.get("net_usd"),
-                    },
-                )
-            else:
-                still_open.append(trade)
-        self.trades = still_open
-        if closed_n:
-            notifications.push(
-                f"Flip-exit: closed {closed_n}× {opposite} on {pair} before new {side}.",
-                "info",
-            )
-        return closed_n
+        return 0
 
     def same_side_auto_count(self, side: str, pair: str) -> int:
         return sum(
@@ -3077,11 +3026,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                     fire_candle_ms=fire_candle_ms,
                 )
 
-        # Flip-exit training: SHORT fire → close open LONGs on this pair (and vice versa)
-        # before capacity checks / new entry, so we do not ride the reverse into loss.
-        agent.close_opposite_positions_for_flip(
-            side, pair, pattern=detect.get("pattern")
-        )
+        # Flip-exit DISABLED: path profit/loss engine owns exits (no close at −0.01%/−0.09%
+        # just because an opposite signal fired). Opposite side may still open if capacity allows.
+        # agent.close_opposite_positions_for_flip(side, pair, pattern=detect.get("pattern"))
 
         if len(agent.trades) >= agent.max_concurrent_trades:
             return await _skip_pending(
