@@ -1339,8 +1339,7 @@ class AITradingAgent:
         if self.timeframe_seconds == seconds:
             return
         self.timeframe_seconds = seconds
-        LAST_CANDLE_TIMESTAMPS.clear()
-        _clear_entry_pipeline()
+        _reset_scan_candle_baseline()
         reset_blue_box_state()
         _invalidate_kline_cache()
         print(f"[TIMEFRAME SYNC] Backend trading timeframe set to {seconds}s.")
@@ -2406,10 +2405,12 @@ class AITradingAgent:
     def begin_trading_warmup(self) -> None:
         """Arm engine now; scan/detect immediately; block new fires for ENGINE_WARMUP_SEC."""
         self.trading_ready_at = time.time() + float(ENGINE_WARMUP_SEC)
-        _clear_entry_pipeline()
+        # Drop stale queues + candle cursors so we do not trade already-closed bars.
+        _reset_scan_candle_baseline()
         print(
             f"[AI ENGINE] Armed — scanning ON; new trades after {ENGINE_WARMUP_SEC}s "
-            f"(intro {ENGINE_BOOT_INTRO_SEC}s + analysis {ENGINE_BOOT_ANALYSIS_SEC}s)."
+            f"(intro {ENGINE_BOOT_INTRO_SEC}s + analysis {ENGINE_BOOT_ANALYSIS_SEC}s). "
+            f"Detect on NEW closed candle only → fire at next candle open."
         )
 
     def trading_ready(self) -> bool:
@@ -2742,6 +2743,28 @@ def _clear_entry_pipeline() -> None:
     LAST_AUTO_FIRE_CANDLE_MS.clear()
 
 
+def _reset_scan_candle_baseline() -> None:
+    """Forget closed-candle cursors so the next scan only seeds, then waits for a NEW close.
+
+    Prevents engine-start / TF-change from treating already-closed history as fresh
+    detects and dumping many immediate 'next candle already open' fires.
+    """
+    LAST_CANDLE_TIMESTAMPS.clear()
+    _clear_entry_pipeline()
+
+
+def _next_unopened_candle_open_ms(from_open_ms: int, interval_ms: int, now_ms: int) -> int:
+    """Return the earliest candle open at/after from_open_ms that has not started yet.
+
+    Strict entry: never schedule a fire into a candle that is already underway.
+    """
+    open_ms = int(from_open_ms)
+    step = max(int(interval_ms), 1)
+    while now_ms >= open_ms:
+        open_ms += step
+    return open_ms
+
+
 def get_pattern_neon_snapshot(pair: str | None = None) -> list[dict]:
     if not pair:
         return list(PATTERN_NEON_STAGES[-80:])
@@ -2936,8 +2959,10 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     """Scan last CLOSED candle for pattern; fire only at the NEXT candle open.
 
     Flow:
-      1) Try to fire any queued signal once the next candle has started.
-      2) On a newly closed candle: detect pattern → queue (DETECTED), do NOT fire yet.
+      1) Try to fire any queued signal once its scheduled next-candle open arrives.
+      2) First observation after engine arm only seeds the candle cursor (no trade).
+      3) On a newly closed candle: detect → queue; schedule the next *unopened* open.
+         Never fire mid-candle on already-open history after engine start.
     """
     bybit_symbol = get_bybit_symbol(pair)
     if not bybit_symbol:
@@ -3149,17 +3174,34 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         elif now_ms > deadline_ms:
             await _skip_pending(pending, "Next-candle fire window expired", fire_candle_ms=fire_candle_ms)
         elif now_ms >= fire_candle_ms:
-            _push_pattern_neon(
-                pair=pair,
-                candle_time_ms=fire_candle_ms,
-                stage="confirming",
-                side=pending.get("side"),
-                action=(pending.get("detect") or {}).get("action"),
-                pattern=(pending.get("detect") or {}).get("pattern"),
-                reason="Waiting next-candle open → firing",
-            )
-            if await _execute_queued_fire(pending):
-                return True
+            ready_at_ms = int(float(getattr(agent, "trading_ready_at", 0) or 0) * 1000)
+            # Warmup held a queue whose fire candle already opened → wait for a fresh open.
+            if ready_at_ms > 0 and fire_candle_ms < ready_at_ms:
+                rolled = _next_unopened_candle_open_ms(
+                    fire_candle_ms, interval_ms, max(now_ms, ready_at_ms)
+                )
+                pending["fire_candle_time"] = rolled
+                _push_pattern_neon(
+                    pair=pair,
+                    candle_time_ms=rolled,
+                    stage="confirming",
+                    side=pending.get("side"),
+                    action=(pending.get("detect") or {}).get("action"),
+                    pattern=(pending.get("detect") or {}).get("pattern"),
+                    reason="Warmup ended mid-candle → wait next open",
+                )
+            else:
+                _push_pattern_neon(
+                    pair=pair,
+                    candle_time_ms=fire_candle_ms,
+                    stage="confirming",
+                    side=pending.get("side"),
+                    action=(pending.get("detect") or {}).get("action"),
+                    pattern=(pending.get("detect") or {}).get("pattern"),
+                    reason="Waiting next-candle open → firing",
+                )
+                if await _execute_queued_fire(pending):
+                    return True
     elif pending and pending.get("timeframe_key") != timeframe_key:
         PENDING_ENTRY_SIGNALS.pop(pair, None)
 
@@ -3170,7 +3212,17 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return False
 
     close_time = int(history[-1]["close_time"])  # Bybit startTime of last closed bar
-    if close_time <= LAST_CANDLE_TIMESTAMPS.get(pair, 0):
+    last_seen = LAST_CANDLE_TIMESTAMPS.get(pair)
+    if last_seen is None:
+        # First observation after engine arm / TF change: seed only.
+        # Never detect/trade on candles that were already closed before this session.
+        LAST_CANDLE_TIMESTAMPS[pair] = close_time
+        print(
+            f"[BRAIN] Baseline seed {pair} @ closed={close_time} — "
+            f"wait for NEXT closed candle before detect"
+        )
+        return False
+    if close_time <= int(last_seen):
         return False
     LAST_CANDLE_TIMESTAMPS[pair] = close_time
 
@@ -3256,7 +3308,11 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         agent.set_pair_mark(pair, candle_close)
 
     side = "LONG" if detect["action"] == "BUY" else "SHORT"
-    fire_candle_ms = close_time + interval_ms
+    now_ms = int(time.time() * 1000)
+    # Pattern closed on this bar → schedule the NEXT unopened candle open (strict).
+    fire_candle_ms = _next_unopened_candle_open_ms(
+        close_time + interval_ms, interval_ms, now_ms
+    )
 
     # 1m only: after fire on candle 1, skip queue if fire would land on candle 2 or 3.
     # Detect on candle 3 → fire candle 4 is allowed when pattern confirms.
@@ -3342,36 +3398,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     )
 
     # AI confirm already applied in evaluate_live_entry_async (NO → never reaches here).
-
-    # If next candle already opened while we scanned, fire now (after warmup only).
-    now_ms = int(time.time() * 1000)
-    pending = PENDING_ENTRY_SIGNALS.get(pair)
-    if pending and now_ms >= fire_candle_ms:
-        if not agent.trading_ready():
-            _push_pattern_neon(
-                pair=pair,
-                candle_time_ms=fire_candle_ms,
-                stage="confirming",
-                side=pending.get("side"),
-                action=(pending.get("detect") or {}).get("action"),
-                pattern=(pending.get("detect") or {}).get("pattern"),
-                reason=f"Warmup hold · trades unlock in {agent.warmup_remaining_sec():.0f}s",
-            )
-            return False
-        deadline_ms = fire_candle_ms + interval_ms + fire_grace_ms
-        if now_ms > deadline_ms:
-            await _skip_pending(pending, "Next-candle fire window expired", fire_candle_ms=fire_candle_ms)
-            return False
-        _push_pattern_neon(
-            pair=pair,
-            candle_time_ms=fire_candle_ms,
-            stage="confirming",
-            side=pending.get("side"),
-            action=(pending.get("detect") or {}).get("action"),
-            pattern=(pending.get("detect") or {}).get("pattern"),
-            reason="Next candle already open → firing",
-        )
-        return await _execute_queued_fire(pending)
+    # Do NOT fire here even if the clock crossed during AI — pending path fires at open.
     return False
 
 
