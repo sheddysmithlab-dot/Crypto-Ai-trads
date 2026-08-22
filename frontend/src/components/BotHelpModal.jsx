@@ -4,7 +4,7 @@ const SECTIONS = [
     items: [
       'START AI ENGINE scans watchlist pairs on your chart TF (1m–1D).',
       'Brain patterns + structure traps + order-flow trap (1M exec / 5M bias) → AI BUY/SELL/HOLD.',
-      'Pattern scan uses the last closed candle; trade fires at the next candle open (not on the detect bar).',
+      'Pattern scan uses the last closed candle; trade fires at the next candle END/close (not open).',
       'Size by TF capital %: 1m 3% · 5m 7% · 15m 10% · 1h 15% · 1D 20%.',
     ],
   },
