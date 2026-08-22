@@ -299,6 +299,12 @@ export default function App() {
     setStartConfirmOpen(true);
   }
 
+  async function handleBootCancel() {
+    pushActionLog('Boot cancelled — stopping AI Engine (no confirmation)…');
+    const ok = await stopBotEngine('hold');
+    pushActionLog(ok ? 'AI Engine stopped from boot Cancel.' : 'Boot cancel stop failed.');
+  }
+
   async function handleConfirmContinue() {
     if (!pendingConfig) return;
     const { stopLossPct, dailyProfitPct, trades } = pendingConfig;
@@ -688,6 +694,8 @@ export default function App() {
         warmupTotalSec={portfolio.warmupTotalSec}
         introSec={portfolio.bootIntroSec}
         analysisSec={portfolio.bootAnalysisSec}
+        onCancel={handleBootCancel}
+        cancelLoading={botLoading}
       />
 
       <PaperTradingModal

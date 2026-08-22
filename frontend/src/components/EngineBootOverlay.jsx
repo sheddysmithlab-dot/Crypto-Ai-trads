@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import bootArt from '../assets/engine-boot.jpg';
 
 const INTRO_SEC = 10;
 const ANALYSIS_SEC = 30;
@@ -6,9 +7,9 @@ const TOTAL_SEC = INTRO_SEC + ANALYSIS_SEC;
 
 /**
  * Full-screen boot sequence after AI Engine START:
- * 0–10s  translucent engine diagram
+ * 0–10s  translucent engine diagram (animated)
  * 10–40s neon round analysis countdown
- * then hide — trading may begin (backend also enforces 40s)
+ * Blocks all background interaction; Cancel stops engine immediately (no confirm).
  */
 export default function EngineBootOverlay({
   active,
@@ -16,14 +17,27 @@ export default function EngineBootOverlay({
   warmupTotalSec = TOTAL_SEC,
   introSec = INTRO_SEC,
   analysisSec = ANALYSIS_SEC,
+  onCancel,
+  cancelLoading = false,
 }) {
   const [tick, setTick] = useState(0);
+  const [imgOk, setImgOk] = useState(true);
 
   useEffect(() => {
     if (!active) return undefined;
     const id = setInterval(() => setTick((n) => n + 1), 200);
     return () => clearInterval(id);
   }, [active]);
+
+  // Lock body scroll / interaction while boot overlay is up
+  useEffect(() => {
+    if (!active || !(Number(warmupRemainingSec) > 0.05)) return undefined;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [active, warmupRemainingSec]);
 
   const remaining = Math.max(0, Number(warmupRemainingSec) || 0);
   const total = Math.max(1, Number(warmupTotalSec) || TOTAL_SEC);
@@ -35,7 +49,6 @@ export default function EngineBootOverlay({
   const analysisProgress = 1 - analysisLeft / analysis;
 
   const show = active && remaining > 0.05;
-  // tick forces re-render while parent WS updates remaining
   void tick;
 
   const ring = useMemo(() => {
@@ -51,23 +64,35 @@ export default function EngineBootOverlay({
 
   return (
     <div
-      className="fixed inset-0 z-[90] flex items-center justify-center pointer-events-none"
-      aria-live="polite"
+      className="fixed inset-0 z-[200] flex flex-col items-center justify-center pointer-events-auto"
+      role="dialog"
+      aria-modal="true"
       aria-label="AI Engine warmup"
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      onTouchStart={(e) => e.stopPropagation()}
     >
-      <div className="absolute inset-0 bg-black/55" />
+      {/* Blocks all clicks to chart / control bar */}
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-[2px]" />
 
       {inIntro ? (
-        <div className="relative z-[91] w-[min(92vw,920px)] max-h-[82vh] rounded-xl overflow-hidden border border-cyan-400/40 shadow-[0_0_40px_rgba(59,158,255,0.35)]">
-          <img
-            src="/engine-boot.jpg"
-            alt="AI Engine initializing"
-            className="w-full h-auto object-contain opacity-55"
-            draggable={false}
-          />
-          <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-black/30" />
-          <div className="absolute bottom-0 left-0 right-0 p-4 sm:p-6 text-center">
-            <div className="text-cyan-300 text-xs sm:text-sm font-black tracking-[0.25em] uppercase mb-2">
+        <div className="relative z-[201] w-[min(96vw,980px)] max-h-[78vh] rounded-xl overflow-hidden border border-cyan-400/50 shadow-[0_0_48px_rgba(59,158,255,0.45)] bg-black">
+          {imgOk ? (
+            <img
+              src={bootArt}
+              alt="AI Engine initializing"
+              className="engine-boot-media w-full max-h-[78vh] object-contain opacity-80"
+              draggable={false}
+              onError={() => setImgOk(false)}
+            />
+          ) : (
+            <div className="flex items-center justify-center min-h-[280px] text-cyan-300 font-bold tracking-widest uppercase text-sm p-8">
+              AI Engine initializing…
+            </div>
+          )}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-transparent to-black/25 pointer-events-none" />
+          <div className="absolute bottom-0 left-0 right-0 p-4 sm:p-5 text-center pointer-events-none">
+            <div className="text-cyan-300 text-xs sm:text-sm font-black tracking-[0.25em] uppercase mb-2 drop-shadow-[0_0_8px_rgba(34,211,238,0.9)]">
               Initializing core…
             </div>
             <div className="mx-auto h-1.5 w-48 sm:w-64 rounded-full bg-white/15 overflow-hidden">
@@ -76,13 +101,13 @@ export default function EngineBootOverlay({
                 style={{ width: `${Math.min(100, (elapsed / intro) * 100)}%` }}
               />
             </div>
-            <div className="mt-2 text-gray-300 text-[11px] font-mono">
+            <div className="mt-2 text-gray-200 text-[11px] font-mono">
               Intro {Math.ceil(Math.max(0, remaining - analysis))}s · then analysis
             </div>
           </div>
         </div>
       ) : (
-        <div className="relative z-[91] flex flex-col items-center gap-4 px-4">
+        <div className="relative z-[201] flex flex-col items-center gap-4 px-4">
           <div className="text-orange-300 text-xs sm:text-sm font-black tracking-[0.2em] uppercase drop-shadow-[0_0_8px_rgba(255,138,31,0.8)]">
             Analysis countdown
           </div>
@@ -126,6 +151,20 @@ export default function EngineBootOverlay({
           </div>
         </div>
       )}
+
+      <div className="relative z-[202] mt-5 flex flex-col items-center gap-2">
+        <button
+          type="button"
+          className="pointer-events-auto px-6 py-2.5 rounded-lg text-sm font-black uppercase tracking-wider text-white bg-red-600 hover:bg-red-500 border border-red-400/60 shadow-[0_0_20px_rgba(239,68,68,0.45)] disabled:opacity-60 disabled:cursor-wait transition"
+          disabled={cancelLoading}
+          onClick={() => onCancel?.()}
+        >
+          {cancelLoading ? 'Stopping…' : 'Cancel — Stop Engine'}
+        </button>
+        <span className="text-[10px] text-gray-400 font-medium">
+          Stops immediately · no confirmation
+        </span>
+      </div>
     </div>
   );
 }
