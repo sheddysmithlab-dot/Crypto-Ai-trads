@@ -190,7 +190,8 @@ export default function TradeLauncherPopup({
           color: '#10b981',
         };
         const isActiveEdit = showEditor && editingId === slot.id;
-        const isMainChip = slot.symbol === activeSymbol;
+        // Main-chart chip highlight: match live activeSymbol (not pairs[0] BTC fallback).
+        const isMainChip = String(slot.symbol || '').toUpperCase() === String(activeSymbol || '').toUpperCase();
         return (
           <div key={slot.id} className="relative group flex items-center">
             <button
@@ -200,7 +201,7 @@ export default function TradeLauncherPopup({
                   if (!locked) onRestoreSlot?.(slot.id);
                   return;
                 }
-                // Chart-only swap: docked coin ↔ main (works while AI is edit-locked too).
+                // Chart-only swap with whatever is on the MAIN chart right now.
                 onSwapWithMain?.(slot.id);
               }}
               onDoubleClick={() => {
@@ -211,19 +212,21 @@ export default function TradeLauncherPopup({
                 locked
                   ? isMainChip
                     ? `${slot.symbol} is already on the main chart`
-                    : `Swap charts: ${slot.symbol} → main (main moves here)`
+                    : `Swap charts: ${slot.symbol} → main (main ${activeSymbol || '?'} moves here)`
                   : isMainChip
                     ? `Edit ${slot.symbol}`
-                    : `Click: swap with main · Double-click: edit ${slot.symbol}`
+                    : `Click: swap with main (${activeSymbol || '?'}) · Double-click: edit ${slot.symbol}`
               }
               className={`flex items-center gap-1.5 pl-1.5 pr-2 py-1 rounded-md border text-[11px] font-bold shadow-lg transition-colors ${
                 locked
                   ? isMainChip
-                    ? 'border-emerald-400/80 bg-emerald-500/20 text-emerald-200 cursor-default'
+                    ? 'border-white/90 bg-emerald-500/25 text-white ring-1 ring-white/40 cursor-default'
                     : 'border-emerald-900/60 bg-black/70 text-emerald-500/80 hover:border-emerald-400/50 hover:text-emerald-200 cursor-pointer'
                   : isActiveEdit
                     ? 'border-emerald-300 bg-emerald-500/20 text-emerald-100'
-                    : 'border-emerald-500/70 bg-black/90 text-emerald-300 hover:bg-emerald-500/10'
+                    : isMainChip
+                      ? 'border-white/80 bg-emerald-500/15 text-emerald-100'
+                      : 'border-emerald-500/70 bg-black/90 text-emerald-300 hover:bg-emerald-500/10'
               }`}
             >
               <span

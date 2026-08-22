@@ -1,7 +1,25 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '../config/api';
 import { debugLog } from '../config/debug';
 import { TRADING_PAIRS, getBybitSymbol, pairLabelForSymbol } from '../data/pairs';
+
+const ACTIVE_SYMBOL_KEY = 'ai_trading_bot_active_symbol';
+
+function normalizeSymbol(symbol) {
+  const raw = String(symbol || '').trim().toUpperCase().replace('-', '/');
+  if (!raw) return '';
+  return raw.includes('/') ? raw.split('/')[0] : raw;
+}
+
+function readStoredSymbol() {
+  try {
+    const saved = normalizeSymbol(localStorage.getItem(ACTIVE_SYMBOL_KEY));
+    if (saved && TRADING_PAIRS.some((p) => p.symbol === saved)) return saved;
+  } catch {
+    /* storage blocked */
+  }
+  return 'BTC';
+}
 
 async function fetchLivePairPrice(symbol) {
   const bybitSymbol = getBybitSymbol(pairLabelForSymbol(symbol));
@@ -25,30 +43,42 @@ async function fetchLivePairPrice(symbol) {
  */
 export function usePairSelector() {
   const [pairs, setPairs] = useState(TRADING_PAIRS);
-  const [activeSymbol, setActiveSymbol] = useState('BTC');
+  const [activeSymbol, setActiveSymbol] = useState(readStoredSymbol);
   const [syncing, setSyncing] = useState(false);
 
-  const activePair = pairs.find((p) => p.symbol === activeSymbol) || pairs[0];
-  const activePairLabel = pairLabelForSymbol(activePair.symbol);
+  const activePair =
+    pairs.find((p) => p.symbol === activeSymbol) ||
+    pairs.find((p) => p.symbol === 'BTC') ||
+    pairs[0];
+  const activePairLabel = pairLabelForSymbol(activeSymbol || activePair.symbol);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ACTIVE_SYMBOL_KEY, activeSymbol);
+    } catch {
+      /* storage blocked */
+    }
+  }, [activeSymbol]);
 
   const selectPair = useCallback(async (symbol, { silent = false } = {}) => {
-    const pair = pairs.find((p) => p.symbol === symbol);
+    const sym = normalizeSymbol(symbol);
+    const pair = pairs.find((p) => p.symbol === sym);
     if (!pair) return { ok: false, message: 'Unknown pair' };
 
     const fullLabel = pairLabelForSymbol(pair.symbol);
 
     // 1) Instant UI + chart switch (cached seed price), even before network.
-    setActiveSymbol(symbol);
+    setActiveSymbol(sym);
     setSyncing(true);
 
     try {
-      const livePrice = await fetchLivePairPrice(symbol);
+      const livePrice = await fetchLivePairPrice(sym);
       const seedPrice = livePrice ?? pair.price;
       const priceLabel = seedPrice < 1 ? Number(seedPrice).toPrecision(6) : Number(seedPrice).toFixed(2);
       debugLog(`[PAIR SELECTOR] Switching to ${fullLabel} @ $${priceLabel}`);
 
       if (livePrice) {
-        setPairs((prev) => prev.map((p) => (p.symbol === symbol ? { ...p, price: livePrice } : p)));
+        setPairs((prev) => prev.map((p) => (p.symbol === sym ? { ...p, price: livePrice } : p)));
       }
 
       // 2) Backend focus — chart engine / auto-entries follow this pair.

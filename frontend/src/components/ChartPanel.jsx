@@ -94,7 +94,7 @@ export default function ChartPanel({
             onRemoveSlot={launcher?.onRemoveSlot}
             onSwapWithMain={launcher?.onSwapWithMain}
             pairs={pairSelector.pairs}
-            activeSymbol={pairSelector.activePair.symbol}
+            activeSymbol={pairSelector.activeSymbol}
             timeframe={timeframe}
             botIsActive={botIsActive}
           />

@@ -459,21 +459,44 @@ export default function App() {
     if (nextSlots) syncWatchlist(nextSlots);
   }
 
-  /** Chart-only: docked coin ↔ main chart; slot keeps the previous main (edit-locked when AI on). */
-  function handleLauncherSwapWithMain(slotId) {
+  /** Chart-only: docked coin ↔ current main chart (not hard-coded BTC). */
+  async function handleLauncherSwapWithMain(slotId) {
     const slot = launcherSlots.find((s) => s.id === slotId);
     if (!slot) return;
-    const mainSym = pairSelector.activeSymbol;
-    if (!mainSym || slot.symbol === mainSym) return;
-    const incoming = slot.symbol;
-    const nextSlots = launcherSlots.map((s) =>
-      s.id === slotId ? { ...s, symbol: mainSym, timeframe: timeframe || s.timeframe } : s,
-    );
+
+    // Always read the live main-chart symbol (persisted selector), never assume BTC.
+    const mainSym = String(pairSelector.activeSymbol || '')
+      .trim()
+      .toUpperCase()
+      .split('/')[0];
+    const incoming = String(slot.symbol || '')
+      .trim()
+      .toUpperCase()
+      .split('/')[0];
+    if (!mainSym || !incoming || incoming === mainSym) return;
+
+    // 1) Switch main chart first so UI/chart leave the current pair (not stuck on BTC).
+    await pairSelector.selectPair(incoming, { silent: true });
+
+    // 2) Park the previous main coin on this chip; drop duplicate chips of that symbol.
+    const nextSlots = launcherSlots
+      .map((s) =>
+        s.id === slotId
+          ? { ...s, symbol: mainSym, timeframe: timeframe || s.timeframe }
+          : s,
+      )
+      .filter((s, _i, arr) => {
+        if (s.symbol !== mainSym) return true;
+        const same = arr.filter((x) => x.symbol === mainSym);
+        if (same.length <= 1) return true;
+        // Keep the chip we just wrote (clicked slot), drop older duplicates.
+        return s.id === slotId;
+      });
+
     setLauncherSlots(nextSlots);
     setLauncherEditorOpen(false);
     setLauncherEditingId(null);
     syncWatchlist(nextSlots);
-    pairSelector.selectPair(incoming, { silent: true });
     pushActionLog(`Chart swap: ${incoming}/USDT → main, ${mainSym}/USDT → dock`);
   }
 
