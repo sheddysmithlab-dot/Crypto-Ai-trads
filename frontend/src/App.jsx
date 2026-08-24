@@ -26,6 +26,7 @@ import AlertModal from './components/AlertModal';
 import SettingsModal from './components/SettingsModal';
 import AgentInstructionsModal from './components/AgentInstructionsModal';
 import StartConfirmModal from './components/StartConfirmModal';
+import TermsConditionsModal from './components/TermsConditionsModal';
 import StopEngineModal from './components/StopEngineModal';
 import SessionStopConfirmModal from './components/SessionStopConfirmModal';
 import EngineBootOverlay from './components/EngineBootOverlay';
@@ -79,6 +80,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentModalOpen, setAgentModalOpen] = useState(false);
   const [startConfirmOpen, setStartConfirmOpen] = useState(false);
+  const [termsOpen, setTermsOpen] = useState(false);
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
   const [pendingConfig, setPendingConfig] = useState(null);
   const [logModalOpen, setLogModalOpen] = useState(false);
@@ -305,12 +307,25 @@ export default function App() {
     pushActionLog(ok ? 'AI Engine stopped from boot Cancel.' : 'Boot cancel stop failed.');
   }
 
-  async function handleConfirmContinue() {
+  function handleConfirmContinue() {
+    if (!pendingConfig) return;
+    setStartConfirmOpen(false);
+    pushActionLog('Safety check OK. Opening Terms & Conditions…');
+    setTermsOpen(true);
+  }
+
+  function handleTermsCancel() {
+    pushActionLog('Terms declined. AI Engine start aborted.');
+    setTermsOpen(false);
+    setPendingConfig(null);
+  }
+
+  async function handleTermsContinue() {
     if (!pendingConfig) return;
     const { stopLossPct, dailyProfitPct, trades } = pendingConfig;
-    setStartConfirmOpen(false);
+    setTermsOpen(false);
     pushActionLog(
-      `Safety check OK. Starting AI Engine (risk=${stopLossPct}%, daily=${dailyProfitPct}%, max_trades=${trades})…`,
+      `Terms accepted. Starting AI Engine (risk=${stopLossPct}%, daily=${dailyProfitPct}%, max_trades=${trades})…`,
     );
     try {
       const configRes = await authFetch('/agent/config', {
@@ -335,7 +350,7 @@ export default function App() {
       pushActionLog(ok ? 'AI Engine ON.' : 'AI Engine start failed.');
       if (ok) refreshSessionEngine();
     } catch (err) {
-      console.error('Failed to start AI Engine from safety check:', err);
+      console.error('Failed to start AI Engine after Terms:', err);
       pushActionLog('AI Engine start failed (network).');
     } finally {
       setPendingConfig(null);
@@ -346,6 +361,7 @@ export default function App() {
     pushActionLog('Safety check cancelled. AI Engine start aborted.');
     debugLog('Safety check: Emergency Exit. Start cancelled.');
     setStartConfirmOpen(false);
+    setTermsOpen(false);
     setPendingConfig(null);
   }
 
@@ -762,6 +778,12 @@ export default function App() {
         activeCount={activeCount}
         onContinue={handleConfirmContinue}
         onExit={handleConfirmExit}
+      />
+
+      <TermsConditionsModal
+        open={termsOpen}
+        onContinue={handleTermsContinue}
+        onCancel={handleTermsCancel}
       />
 
       <StopEngineModal
