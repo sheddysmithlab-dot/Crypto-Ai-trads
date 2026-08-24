@@ -124,7 +124,7 @@ function StatusIcon({ trade }) {
   );
 }
 
-function TradeRowDesktop({ trade, onRequestClose }) {
+function TradeRowDesktop({ trade, onRequestClose, onSelectTrade }) {
   const meta = getPairMeta(trade.pair);
   const isSold = trade.status === 'sold';
   const isProtected = trade.protected || trade.source === 'manual';
@@ -137,7 +137,11 @@ function TradeRowDesktop({ trade, onRequestClose }) {
   const pnlColor = isSold ? 'text-white/90' : isProfit ? 'text-green-500' : 'text-red-500';
 
   return (
-    <tr className={`${rowBg} border-b border-gray-100 dark:border-gray-800 trade-row group`}>
+    <tr
+      className={`${rowBg} border-b border-gray-100 dark:border-gray-800 trade-row group cursor-pointer hover:ring-1 hover:ring-inset hover:ring-cyan-500/40`}
+      title="Show this trade’s neon candle on the main chart"
+      onClick={() => onSelectTrade?.(trade)}
+    >
       <td className="px-3 py-1.5 font-semibold flex items-center gap-1.5">
         <span
           className="w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold text-white"
@@ -186,7 +190,10 @@ function TradeRowDesktop({ trade, onRequestClose }) {
             <button
               className="p-1 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded hover:bg-red-200 dark:hover:bg-red-900/50 transition opacity-0 group-hover:opacity-100"
               title="Force Close (confirmation required)"
-              onClick={() => onRequestClose(trade.id)}
+              onClick={(e) => {
+                e.stopPropagation();
+                onRequestClose(trade.id);
+              }}
             >
               <i className="fas fa-trash text-[10px]"></i>
             </button>
@@ -197,7 +204,7 @@ function TradeRowDesktop({ trade, onRequestClose }) {
   );
 }
 
-function TradeRowMobile({ trade }) {
+function TradeRowMobile({ trade, onSelectTrade }) {
   const meta = getPairMeta(trade.pair);
   const isSold = trade.status === 'sold';
   const isProtected = trade.protected || trade.source === 'manual';
@@ -210,7 +217,19 @@ function TradeRowMobile({ trade }) {
   const pnlColor = isSold ? 'text-white/90' : isProfit ? 'text-green-500' : 'text-red-500';
 
   return (
-    <div className={`${rowBg} p-2 flex items-center justify-between trade-row`}>
+    <div
+      className={`${rowBg} p-2 flex items-center justify-between trade-row cursor-pointer active:opacity-80`}
+      title="Show this trade’s neon candle on the main chart"
+      onClick={() => onSelectTrade?.(trade)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelectTrade?.(trade);
+        }
+      }}
+    >
       <div className="flex items-center gap-1.5">
         <span
           className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold text-white"
@@ -255,7 +274,7 @@ function SectionLabel({ children }) {
   );
 }
 
-export default function LiveTradesPanel({ trades, activeCount, activePair, onRequestClose }) {
+export default function LiveTradesPanel({ trades, activeCount, activePair, onRequestClose, onSelectTrade }) {
   const activeAll = useMemo(
     () => sortLatestFirst(trades.filter((t) => t.status !== 'sold')),
     [trades],
@@ -320,7 +339,12 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                 <>
                   {activeAll.length > 0 ? <SectionLabel>Open</SectionLabel> : null}
                   {active.map((trade) => (
-                    <TradeRowDesktop key={trade.id} trade={trade} onRequestClose={onRequestClose} />
+                    <TradeRowDesktop
+                      key={trade.id}
+                      trade={trade}
+                      onRequestClose={onRequestClose}
+                      onSelectTrade={onSelectTrade}
+                    />
                   ))}
                   {activeAll.length > 0 ? (
                     <tr>
@@ -336,7 +360,12 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                   ) : null}
                   {closedAll.length > 0 ? <SectionLabel>Exited (booked)</SectionLabel> : null}
                   {closed.map((trade) => (
-                    <TradeRowDesktop key={`sold-${trade.id}`} trade={trade} onRequestClose={onRequestClose} />
+                    <TradeRowDesktop
+                      key={`sold-${trade.id}`}
+                      trade={trade}
+                      onRequestClose={onRequestClose}
+                      onSelectTrade={onSelectTrade}
+                    />
                   ))}
                   {closedAll.length > 0 ? (
                     <tr>
@@ -370,7 +399,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                 </div>
               ) : null}
               {active.map((trade) => (
-                <TradeRowMobile key={trade.id} trade={trade} />
+                <TradeRowMobile key={trade.id} trade={trade} onSelectTrade={onSelectTrade} />
               ))}
               {activeAll.length > 0 ? (
                 <PaginationBar
@@ -386,7 +415,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                 </div>
               ) : null}
               {closed.map((trade) => (
-                <TradeRowMobile key={`sold-${trade.id}`} trade={trade} />
+                <TradeRowMobile key={`sold-${trade.id}`} trade={trade} onSelectTrade={onSelectTrade} />
               ))}
               {closedAll.length > 0 ? (
                 <PaginationBar

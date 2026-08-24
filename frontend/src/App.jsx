@@ -157,7 +157,7 @@ export default function App() {
 
   const chartContainerRef = useRef(null);
   const volumeContainerRef = useRef(null);
-  const { timeframe, switchTimeframe, readouts, chartSourceMode, chartHistorySource, chartLiveSource } = useTradingChart({
+  const { timeframe, switchTimeframe, focusTradeCandle, readouts, chartSourceMode, chartHistorySource, chartLiveSource } = useTradingChart({
     chartContainerRef,
     volumeContainerRef,
     pairLabel: pairSelector.activePairLabel,
@@ -540,6 +540,41 @@ export default function App() {
     pushActionLog(`Chart swap: ${incoming}/USDT → main, ${mainSym}/USDT → dock`);
   }
 
+  /** Live/exited trade row → main chart replace + scroll to that trade’s neon fire candle. */
+  async function handleTradeSelectOnChart(trade) {
+    if (!trade?.pair) return;
+    const incoming = String(trade.pair)
+      .trim()
+      .toUpperCase()
+      .split('/')[0];
+    const mainSym = String(pairSelector.activeSymbol || '')
+      .trim()
+      .toUpperCase()
+      .split('/')[0];
+    if (!incoming) return;
+
+    // Queue neon focus before pair reload so history load scrolls to the fire bar.
+    focusTradeCandle(trade);
+
+    if (incoming !== mainSym) {
+      const dockSlot = launcherSlots.find(
+        (s) => String(s.symbol || '').trim().toUpperCase() === incoming,
+      );
+      if (dockSlot) {
+        await handleLauncherSwapWithMain(dockSlot.id);
+      } else {
+        await pairSelector.selectPair(incoming, { silent: true });
+      }
+      // Re-arm focus after swap (pair clear/reload may have raced).
+      focusTradeCandle(trade);
+      pushActionLog(
+        `Chart replace: ${incoming}/USDT → main · trade #${trade.id} neon candle`,
+      );
+    } else {
+      pushActionLog(`Chart focus: ${trade.pair} trade #${trade.id} neon candle`);
+    }
+  }
+
   async function handleManualBuy() {
     const pair = pairSelector.activePairLabel;
     pushActionLog(`Manual BUY (LONG) on ${pair}…`);
@@ -733,6 +768,7 @@ export default function App() {
           activeCount={activeCount}
           activePair={activeTradesPair}
           onRequestClose={requestForceClose}
+          onSelectTrade={handleTradeSelectOnChart}
         />
       </main>
 

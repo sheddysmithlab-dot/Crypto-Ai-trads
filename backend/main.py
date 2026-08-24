@@ -1028,6 +1028,7 @@ class AITradingAgent:
             "signal_candle_time": trade.get("signal_candle_time"),
             "pattern": trade.get("pattern"),
             "opened_at": trade.get("opened_at"),
+            "timeframe_key": trade.get("timeframe_key"),
             "exchange": trade.get("exchange"),
             "season_id": trade.get("season_id") or self.ai_season_id,
         })
@@ -5115,7 +5116,7 @@ async def trades_feed(websocket: WebSocket):
                 "active_count": len(agent.trades),
                 "lock_active": agent.is_lock_active,
                 "entry_candles": agent.get_entry_candle_highlights(),
-                "pattern_neon": get_pattern_neon_snapshot(agent.active_pair),
+                "pattern_neon": get_pattern_neon_snapshot(),
             }
             await websocket.send_json(payload)
             await asyncio.sleep(1)

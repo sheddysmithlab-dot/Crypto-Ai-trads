@@ -288,6 +288,10 @@ export function useTradingChart({
   const tradeFireOverlayElRef = useRef(null);
   const tradeFireLookupRef = useRef(new Map());
   const hoveredTradeFireTimeRef = useRef(null);
+  /** Pending scroll+neon focus from Live Trades row click (pair may still be loading). */
+  const pendingTradeFocusRef = useRef(null);
+  /** Keep clicked-trade neon visible across overlay rebuilds until pair changes / user pans. */
+  const pinnedTradeNeonRef = useRef(null);
   const redrawTradeFireOverlayRef = useRef(() => {});
   const blueBoxLineRefsRef = useRef([]);
   const blueBoxOverlayDataRef = useRef(null);
@@ -341,6 +345,23 @@ export function useTradingChart({
       pairLabelRef.current,
       patternNeonRef.current,
     );
+    const pin = pinnedTradeNeonRef.current;
+    if (pin?.time != null) {
+      const bar = mockDataRef.current.find((b) => b.time === pin.time);
+      if (bar) {
+        lookup.set(pin.time, {
+          time: pin.time,
+          bar,
+          side: pin.side || 'LONG',
+          stage: pin.stage || 'fired',
+          pair: pin.pair || pairLabelRef.current,
+          pattern: pin.pattern || 'Trade fire',
+          reason: pin.reason || null,
+          opened_at: pin.opened_at ?? null,
+          signal_candle_time: pin.signal_candle_time ?? pin.time,
+        });
+      }
+    }
     tradeFireLookupRef.current = lookup;
 
     renderTradeFireOverlay({
@@ -354,6 +375,124 @@ export function useTradingChart({
   }, []);
 
   redrawTradeFireOverlayRef.current = redrawTradeFireOverlay;
+
+  const tryApplyPendingTradeFocus = useCallback(() => {
+    const pending = pendingTradeFocusRef.current;
+    const chart = chartRef.current;
+    const series = candleSeriesRef.current;
+    const data = mockDataRef.current;
+    if (!pending || !chart || !series || !data?.length) return false;
+
+    // Wait until main chart has switched to this trade's pair.
+    const wantPair = String(pending.pair || '')
+      .trim()
+      .toUpperCase();
+    const chartPair = String(pairLabelRef.current || '')
+      .trim()
+      .toUpperCase();
+    if (wantPair && chartPair && wantPair !== chartPair) return false;
+
+    const interval = currentIntervalRef.current;
+    const want = snapToChartInterval(
+      normalizeChartCandleTime(pending.time) ?? pending.time,
+      interval,
+    );
+    if (want == null || !Number.isFinite(want)) {
+      pendingTradeFocusRef.current = null;
+      return false;
+    }
+
+    let idx = data.findIndex((b) => b.time === want);
+    if (idx < 0) {
+      // Nearest bar (trade candle may sit just outside loaded window).
+      let best = -1;
+      let bestDist = Infinity;
+      for (let i = 0; i < data.length; i++) {
+        const d = Math.abs(data[i].time - want);
+        if (d < bestDist) {
+          bestDist = d;
+          best = i;
+        }
+      }
+      // Only accept if within ~2 bars of the target TF.
+      if (best < 0 || bestDist > interval * 2) return false;
+      idx = best;
+    }
+
+    const bar = data[idx];
+    const barTime = bar.time;
+
+    // Ensure neon exists for this trade even if WS entry_candles lag.
+    let lookup = tradeFireLookupRef.current;
+    if (!(lookup instanceof Map)) lookup = new Map();
+    const pinEntry = {
+      time: barTime,
+      bar,
+      side: pending.side || 'LONG',
+      stage: 'fired',
+      pair: pending.pair || pairLabelRef.current,
+      pattern: pending.pattern || 'Trade fire',
+      reason: null,
+      opened_at: pending.opened_at ?? null,
+      signal_candle_time: normalizeChartCandleTime(pending.time) ?? barTime,
+    };
+    lookup.set(barTime, pinEntry);
+    tradeFireLookupRef.current = lookup;
+    pinnedTradeNeonRef.current = pinEntry;
+
+    const half = Math.floor(DEFAULT_VISIBLE_CANDLES / 2);
+    const from = Math.max(0, idx - half);
+    const to = Math.min(data.length, Math.max(from + DEFAULT_VISIBLE_CANDLES, idx + 1));
+    try {
+      chart.timeScale().setVisibleLogicalRange({ from, to });
+      volumeChartRef.current?.timeScale().setVisibleLogicalRange({ from, to });
+    } catch (err) {
+      console.warn('[CHART] focusTradeCandle range failed:', err);
+    }
+
+    hoveredTradeFireTimeRef.current = barTime;
+    const tip = tradeFireTooltipFromLookup(lookup, barTime);
+    setReadouts((prev) => ({
+      ...prev,
+      tradeFireTooltip: tip,
+      chartCandleTime: formatChartAxisTime(barTime, interval),
+    }));
+    // Render with the enriched lookup — do not call redrawTradeFireOverlay()
+    // (it rebuilds from WS and would drop a synthetic pin for manual/lag trades).
+    const overlayEl = tradeFireOverlayElRef.current;
+    if (overlayEl) {
+      renderTradeFireOverlay({
+        chart,
+        series,
+        overlayEl,
+        lookup,
+        intervalSecs: interval,
+        hoveredTime: barTime,
+      });
+    }
+    pendingTradeFocusRef.current = null;
+    return true;
+  }, []);
+
+  const focusTradeCandle = useCallback(
+    (trade) => {
+      if (!trade) return false;
+      const raw =
+        trade.signal_candle_time != null ? trade.signal_candle_time : trade.opened_at;
+      const time = normalizeChartCandleTime(raw);
+      if (time == null) return false;
+      pendingTradeFocusRef.current = {
+        time,
+        side: trade.side || 'LONG',
+        pattern: trade.pattern || 'Trade fire',
+        opened_at: trade.opened_at ?? null,
+        pair: trade.pair || pairLabelRef.current,
+      };
+      // Apply now if candles already loaded; else wait for next history/push.
+      return tryApplyPendingTradeFocus();
+    },
+    [tryApplyPendingTradeFocus],
+  );
 
   const pushCandlesToChart = useCallback((data) => {
     const series = candleSeriesRef.current;
@@ -376,7 +515,8 @@ export function useTradingChart({
     const fireMarkers = computeTradeFireMarkers();
     series.setMarkers(fireMarkers.length ? fireMarkers : computeExtremeMarkers(data));
     redrawTradeFireOverlay();
-  }, [redrawTradeFireOverlay]);
+    tryApplyPendingTradeFocus();
+  }, [redrawTradeFireOverlay, tryApplyPendingTradeFocus]);
 
   const redrawBlueBoxOverlay = useCallback(() => {
     const chart = chartRef.current;
@@ -478,13 +618,28 @@ export function useTradingChart({
     (data, { zoomToRecent = false } = {}) => {
       const cleaned = sanitizeCandleData(data, currentIntervalRef.current);
       mockDataRef.current = cleaned;
+      const hadPendingFocus = Boolean(pendingTradeFocusRef.current);
       applyAllOverlays(cleaned);
       resetPriceScale();
-      if (zoomToRecent) zoomToRecentCandles(cleaned.length);
-      if (cleaned.length > 0) updateReadouts(cleaned[cleaned.length - 1], cleaned);
+      // Trade-row focus wins over default "zoom to recent" after a pair switch.
+      if (hadPendingFocus) {
+        tryApplyPendingTradeFocus();
+      } else if (zoomToRecent) {
+        zoomToRecentCandles(cleaned.length);
+      }
+      if (cleaned.length > 0 && !hadPendingFocus) {
+        updateReadouts(cleaned[cleaned.length - 1], cleaned);
+      }
       redrawBlueBoxOverlay();
     },
-    [updateReadouts, applyAllOverlays, zoomToRecentCandles, resetPriceScale, redrawBlueBoxOverlay]
+    [
+      updateReadouts,
+      applyAllOverlays,
+      zoomToRecentCandles,
+      resetPriceScale,
+      redrawBlueBoxOverlay,
+      tryApplyPendingTradeFocus,
+    ]
   );
 
   // Kicks off the async real-history fetch and swaps it in once ready, unless
@@ -740,6 +895,7 @@ export function useTradingChart({
     (basePrice) => {
       entryPriceRef.current = basePrice;
       // Clear candles + fire overlays so previous pair's neon pattern cannot linger.
+      pinnedTradeNeonRef.current = null;
       applyDataset([]);
       clearTradeFireOverlay(tradeFireOverlayElRef.current);
       tradeFireLookupRef.current = new Map();
@@ -1060,5 +1216,13 @@ export function useTradingChart({
     }
   }, [entryCandles, patternNeon, pairLabel, pushCandlesToChart]);
 
-  return { timeframe, switchTimeframe, readouts, chartSourceMode, chartHistorySource, chartLiveSource };
+  return {
+    timeframe,
+    switchTimeframe,
+    focusTradeCandle,
+    readouts,
+    chartSourceMode,
+    chartHistorySource,
+    chartLiveSource,
+  };
 }
