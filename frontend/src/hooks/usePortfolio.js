@@ -32,6 +32,13 @@ export function usePortfolio(setConnected) {
     agentChat: [],
     blueBoxOverlay: null,
     sessionSchedule: null,
+    watchlist: [],
+    scanPairs: [],
+    momentumGateReady: false,
+    momentumThresholdPct: 0,
+    momentumFirePairs: [],
+    momentumScores: [],
+    momentumLastRefreshMs: 0,
   });
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
@@ -82,6 +89,13 @@ export function usePortfolio(setConnected) {
           agentChat: data.agent_chat || [],
           blueBoxOverlay: data.blue_box_overlay || null,
           sessionSchedule: data.session_schedule || null,
+          watchlist: Array.isArray(data.watchlist) ? data.watchlist : [],
+          scanPairs: Array.isArray(data.scan_pairs) ? data.scan_pairs : [],
+          momentumGateReady: Boolean(data.momentum_gate_ready),
+          momentumThresholdPct: Number(data.momentum_threshold_pct) || 0,
+          momentumFirePairs: Array.isArray(data.momentum_fire_pairs) ? data.momentum_fire_pairs : [],
+          momentumScores: Array.isArray(data.momentum_scores) ? data.momentum_scores : [],
+          momentumLastRefreshMs: Number(data.momentum_last_refresh_ms) || 0,
         });
       };
 

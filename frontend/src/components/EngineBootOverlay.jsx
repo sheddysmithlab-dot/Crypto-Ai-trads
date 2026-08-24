@@ -22,6 +22,10 @@ export default function EngineBootOverlay({
   warmupTotalSec = TOTAL_SEC,
   introSec = INTRO_SEC,
   analysisSec = ANALYSIS_SEC,
+  momentumThresholdPct = 0,
+  momentumFirePairs = [],
+  momentumScores = [],
+  momentumGateReady = false,
   onCancel,
   cancelLoading = false,
 }) {
@@ -211,8 +215,31 @@ export default function EngineBootOverlay({
               </div>
             </div>
           </div>
-          <div className="text-center text-gray-300 text-[11px] sm:text-xs max-w-sm leading-relaxed">
-            Engine trading live in background. Pattern detect → next candle open. First signal per chart skipped.
+          <div className="text-center text-gray-300 text-[11px] sm:text-xs max-w-sm leading-relaxed space-y-2">
+            <p>
+              Engine trading live in background. Pattern detect → next candle open. First signal per
+              chart skipped.
+            </p>
+            {momentumGateReady ? (
+              <p className="text-sky-300/90">
+                Momentum thr&gt;{Number(momentumThresholdPct || 0).toFixed(3)}% · fire{' '}
+                {(momentumFirePairs || []).length}
+                {(momentumFirePairs || []).length
+                  ? `: ${(momentumFirePairs || [])
+                      .slice(0, 6)
+                      .map((p) => String(p).split('/')[0])
+                      .join(', ')}${(momentumFirePairs || []).length > 6 ? '…' : ''}`
+                  : ' — none (entries quiet)'}
+              </p>
+            ) : (
+              <p className="text-amber-300/80">Scoring MARKET avg% across all coins…</p>
+            )}
+            {Array.isArray(momentumScores) && momentumScores.length > 0 ? (
+              <p className="text-[10px] text-gray-500">
+                Passed{' '}
+                {momentumScores.filter((s) => s?.passed).length}/{momentumScores.length} coins
+              </p>
+            ) : null}
           </div>
         </div>
       )}

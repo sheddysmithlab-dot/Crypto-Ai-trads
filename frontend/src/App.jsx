@@ -211,6 +211,30 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // While engine active: keep launcher chips in sync with momentum-filtered backend watchlist.
+  useEffect(() => {
+    if (!effectiveBotActive) return;
+    const pairs = Array.isArray(portfolio.watchlist) ? portfolio.watchlist : [];
+    if (!pairs.length) return;
+    const next = pairs.slice(0, MAX_LAUNCHER_SLOTS).map((pair, i) => {
+      const symbol = String(pair).split('/')[0].toUpperCase();
+      const prev = launcherSlots.find((s) => s.symbol === symbol);
+      return {
+        id: prev?.id || `${symbol}-mom-${i}`,
+        symbol,
+        timeframe: prev?.timeframe || timeframe || '1M',
+      };
+    });
+    const same =
+      next.length === launcherSlots.length &&
+      next.every((s, i) => s.symbol === launcherSlots[i]?.symbol);
+    if (!same) {
+      setLauncherSlots(next);
+      persistLauncherSlots(next);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveBotActive, portfolio.watchlist, portfolio.momentumLastRefreshMs]);
+
   function pushActionLog(message) {
     setActionLogs((prev) => [
       { timestamp: new Date().toISOString(), message },
@@ -733,6 +757,10 @@ export default function App() {
         warmupTotalSec={portfolio.warmupTotalSec}
         introSec={portfolio.bootIntroSec}
         analysisSec={portfolio.bootAnalysisSec}
+        momentumThresholdPct={portfolio.momentumThresholdPct}
+        momentumFirePairs={portfolio.momentumFirePairs}
+        momentumScores={portfolio.momentumScores}
+        momentumGateReady={portfolio.momentumGateReady}
         onCancel={handleBootCancel}
         cancelLoading={botLoading}
       />

@@ -48,6 +48,11 @@ from api_secrets import (
 )
 from chart_24h import chart_24h_refresh_loop, chart_24h_store
 from chart_tf_move import fetch_tf_move
+from momentum_watchlist import (
+    MOMENTUM_REFRESH_EVERY_N_CANDLES,
+    build_momentum_watchlist,
+    momentum_threshold_pct,
+)
 from system_log import system_log
 from volume_spread_system import (
     MIN_CANDLES,
@@ -730,6 +735,13 @@ class AITradingAgent:
         self.session_stats_frozen = False
         self.session_hold_mode = False  # STOP→Hold: no new entries; open trades still auto-exit
         self.one_m_fee_hold = False  # 1m only: pause new entries when fees dominate
+        # Momentum watchlist gate (MARKET avg% filter)
+        self.momentum_gate_ready = False
+        self.momentum_fire_pairs: list[str] = []
+        self.momentum_scores: list[dict] = []
+        self.momentum_threshold_pct = 0.0
+        self.last_momentum_candle_ms = 0
+        self.momentum_last_refresh_ms = 0
         # Connectivity freeze: engine stays ON, but new fires pause until feed/AI recover.
         self.connectivity_frozen = False
         self.freeze_reason: str | None = None
@@ -778,7 +790,15 @@ class AITradingAgent:
     MAX_WATCHLIST = 32
 
     def get_scan_pairs(self) -> list[str]:
-        """Pairs the AI scans for patterns + fires on. Watchlist first; else chart pair."""
+        """Pairs the AI scans for patterns + fires on.
+
+        While engine active: empty until momentum gate ready, then only MARKET-avg% passers.
+        When inactive: watchlist / chart pair (UI sync only).
+        """
+        if bool(self.is_active):
+            if not bool(getattr(self, "momentum_gate_ready", False)):
+                return []
+            return list(getattr(self, "momentum_fire_pairs", None) or [])
         out: list[str] = []
         seen: set[str] = set()
         for p in self.watchlist or []:
@@ -2420,6 +2440,11 @@ class AITradingAgent:
         self.is_active = True
         self.begin_trading_warmup()
         print(f"[SESSION SCHEDULE] Auto-start — {reason}")
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(apply_momentum_watchlist_refresh(reason="schedule_start"))
+        except RuntimeError:
+            pass
         system_log.push(
             "ai",
             f"Session schedule STARTED AI automation — {reason}",
@@ -2447,10 +2472,14 @@ class AITradingAgent:
         """Arm on Continue: scan + trade immediately; boot intro/countdown is UI-only."""
         self.trading_ready_at = 0.0
         self.boot_ui_until = time.time() + float(ENGINE_WARMUP_SEC)
+        self.momentum_gate_ready = False
+        self.momentum_fire_pairs = []
+        self.last_momentum_candle_ms = 0
         # Seed cursor on next scan so already-closed history is not traded as fresh detects.
         _reset_scan_candle_baseline()
         print(
             f"[AI ENGINE] Armed — trading READY now (boot UI {ENGINE_WARMUP_SEC}s cosmetic). "
+            f"Momentum watchlist gate pending. "
             f"Detect on closed candle → fire at next candle open. "
             f"First detect per pair is skipped."
         )
@@ -2871,6 +2900,146 @@ def _reset_scan_candle_baseline() -> None:
     LAST_CANDLE_TIMESTAMPS.clear()
     FIRST_DETECT_SKIPPED.clear()
     _clear_entry_pipeline()
+
+
+async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
+    """Score all mapped coins; rewrite watchlist to MARKET-avg% qualifiers."""
+    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+    prev_fire = set(getattr(agent, "momentum_fire_pairs", None) or [])
+    prev_watch = set(agent.watchlist or [])
+
+    built = await build_momentum_watchlist(
+        symbol_map=BYBIT_SYMBOL_MAP,
+        engine_tf=tf_key,
+        active_pair=agent.active_pair,
+        max_pairs=int(getattr(agent, "MAX_WATCHLIST", 32) or 32),
+    )
+    thr = float(built["threshold"])
+    new_watch = list(built["watchlist"])
+    new_fire = list(built["qualified"])
+    scores = list(built["scores"])
+
+    agent.set_watchlist(new_watch)
+    agent.momentum_fire_pairs = new_fire
+    agent.momentum_scores = [
+        {
+            "pair": s["pair"],
+            "avg_pct": s["avg_pct"],
+            "passed": s["passed"],
+        }
+        for s in scores
+    ]
+    agent.momentum_threshold_pct = thr
+    agent.momentum_gate_ready = True
+    agent.momentum_last_refresh_ms = int(time.time() * 1000)
+
+    dropped = prev_fire - set(new_fire)
+    for pair in list(PENDING_ENTRY_SIGNALS.keys()):
+        if pair in dropped or (new_fire and pair not in set(new_fire) and pair not in PENDING_ENTRY_SIGNALS):
+            # Drop pending for pairs no longer fire-eligible
+            if pair not in set(new_fire):
+                PENDING_ENTRY_SIGNALS.pop(pair, None)
+
+    # Also clear pending for any pair not in new fire set
+    for pair in list(PENDING_ENTRY_SIGNALS.keys()):
+        if pair not in set(new_fire):
+            PENDING_ENTRY_SIGNALS.pop(pair, None)
+
+    added = sorted(set(new_fire) - prev_fire)
+    removed = sorted(prev_fire - set(new_fire))
+    kept = sorted(set(new_fire) & prev_fire)
+
+    summary = (
+        f"Momentum gate ({reason}) TF={tf_key} thr>{thr:g}% · "
+        f"fire={len(new_fire)} watch={len(new_watch)} · "
+        f"+{len(added)} -{len(removed)}"
+    )
+    print(f"[MOMENTUM] {summary}")
+    if built.get("quiet"):
+        system_log.push_agent_chat(
+            f"Momentum: no pairs above {thr:g}% on {tf_key} — new entries quiet "
+            f"(chart {agent.active_pair} docked only).",
+            status="no_match",
+            details={"threshold": thr, "tf": tf_key, "reason": reason},
+        )
+        notifications.push(
+            f"Momentum filter: no coins above {thr:g}% ({tf_key}). New entries paused.",
+            "warning",
+        )
+    else:
+        system_log.push_agent_chat(
+            f"Momentum watchlist · thr>{thr:g}% · "
+            f"{', '.join(new_fire[:8])}{'…' if len(new_fire) > 8 else ''}",
+            status="match",
+            details={
+                "threshold": thr,
+                "tf": tf_key,
+                "added": added,
+                "removed": removed,
+                "fire_count": len(new_fire),
+                "reason": reason,
+            },
+        )
+
+    return {
+        "threshold": thr,
+        "added": added,
+        "removed": removed,
+        "kept": kept,
+        "watchlist": new_watch,
+        "fire_pairs": new_fire,
+        "scores": agent.momentum_scores,
+        "quiet": bool(built.get("quiet")),
+        "prev_watch": sorted(prev_watch),
+    }
+
+
+async def maybe_refresh_momentum_every_n_candles(
+    client: httpx.AsyncClient, timeframe_key: str
+) -> None:
+    """Re-run momentum universe filter every N closed candles of active TF."""
+    if not agent.is_active or agent.emergency_triggered:
+        return
+    if not getattr(agent, "momentum_gate_ready", False):
+        await apply_momentum_watchlist_refresh(reason="boot")
+        # Seed candle cursor from active pair so the next refresh waits N bars
+        bybit_symbol = get_bybit_symbol(agent.active_pair)
+        if bybit_symbol:
+            try:
+                hist = await fetch_closed_candle_history(
+                    client, bybit_symbol, timeframe_key, limit=3
+                )
+                if hist:
+                    agent.last_momentum_candle_ms = int(hist[-1]["close_time"])
+            except Exception:
+                agent.last_momentum_candle_ms = int(time.time() * 1000)
+        return
+
+    bybit_symbol = get_bybit_symbol(agent.active_pair)
+    if not bybit_symbol:
+        return
+    try:
+        hist = await fetch_closed_candle_history(
+            client, bybit_symbol, timeframe_key, limit=3
+        )
+    except Exception as exc:
+        print(f"[MOMENTUM] candle probe failed: {exc}")
+        return
+    if not hist:
+        return
+    close_time = int(hist[-1]["close_time"])
+    last = int(getattr(agent, "last_momentum_candle_ms", 0) or 0)
+    if last <= 0:
+        agent.last_momentum_candle_ms = close_time
+        return
+    interval_ms = _timeframe_interval_ms(timeframe_key)
+    if interval_ms <= 0:
+        return
+    bars = (close_time - last) // interval_ms
+    if bars < MOMENTUM_REFRESH_EVERY_N_CANDLES:
+        return
+    await apply_momentum_watchlist_refresh(reason=f"every_{MOMENTUM_REFRESH_EVERY_N_CANDLES}_candles")
+    agent.last_momentum_candle_ms = close_time
 
 
 def get_pattern_neon_snapshot(pair: str | None = None) -> list[dict]:
@@ -3625,15 +3794,21 @@ async def auto_buy_loop():
                 if agent.is_active and not agent.emergency_triggered:
                     agent.refresh_feed_health()
                     agent.refresh_one_m_fee_budget()
+                    await maybe_refresh_momentum_every_n_candles(client, timeframe_key)
                     # Warmup: scan + detect + queue immediately; fire gated inside scan_and_maybe_fire_pair.
                     # Feed-stale freeze: pause NEW detects only; keep managing open + pending fires.
                     frozen = bool(agent.connectivity_frozen) or (
                         getattr(agent, "one_m_fee_hold", False)
                         and str(timeframe_key).lower() == "1m"
                     )
-                    pairs = list(agent.get_scan_pairs())
-                    pending_first = [p for p in pairs if p in PENDING_ENTRY_SIGNALS]
-                    rest = [] if frozen else [p for p in pairs if p not in PENDING_ENTRY_SIGNALS]
+                    fire_pairs = list(agent.get_scan_pairs())
+                    pending_keys = [
+                        p
+                        for p, pend in PENDING_ENTRY_SIGNALS.items()
+                        if pend.get("timeframe_key") == timeframe_key
+                    ]
+                    pending_first = [p for p in pending_keys if p in PENDING_ENTRY_SIGNALS]
+                    rest = [] if frozen else [p for p in fire_pairs if p not in PENDING_ENTRY_SIGNALS]
                     for pair in pending_first + rest:
                         try:
                             await scan_and_maybe_fire_pair(client, pair, timeframe_key)
@@ -3898,30 +4073,66 @@ async def bot_start():
     agent._ai_fail_streak = 0
     agent._last_feed_ts = time.time()
     agent.begin_trading_warmup()
+    # First pass: filter all mapped coins by MARKET avg% before any new fires.
+    try:
+        await apply_momentum_watchlist_refresh(reason="bot_start")
+        bybit_symbol = get_bybit_symbol(agent.active_pair)
+        if bybit_symbol:
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                hist = await fetch_closed_candle_history(
+                    client,
+                    bybit_symbol,
+                    SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m"),
+                    limit=3,
+                )
+                if hist:
+                    agent.last_momentum_candle_ms = int(hist[-1]["close_time"])
+    except Exception as exc:
+        print(f"[MOMENTUM] start refresh failed: {exc}")
+        agent.momentum_gate_ready = True
+        agent.momentum_fire_pairs = list(agent.watchlist or ([agent.active_pair] if agent.active_pair else []))
     agent.persist_runtime(force=True)
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     profile = entry_pattern_profile(tf_key)
-    print(f"[AI ENGINE] START — {agent.active_pair} ({tf_key}) brain.py")
+    fire_n = len(getattr(agent, "momentum_fire_pairs", None) or [])
+    thr = float(getattr(agent, "momentum_threshold_pct", 0) or 0)
+    print(f"[AI ENGINE] START — {agent.active_pair} ({tf_key}) brain.py · momentum fire={fire_n} thr>{thr:g}%")
     system_log.push(
         "ai",
         f"AI Engine STARTED on {agent.active_pair} ({open_count} open preserved). "
-        f"Scanning ON; trading READY now (boot UI {ENGINE_WARMUP_SEC}s). "
-        f"Detect → next candle open; first detect per pair skipped.",
-        {"open_positions": open_count, "timeframe_seconds": agent.timeframe_seconds, "warmup_sec": ENGINE_WARMUP_SEC},
+        f"Momentum watchlist: {fire_n} pair(s) above {thr:g}% on {tf_key}. "
+        f"Refresh every {MOMENTUM_REFRESH_EVERY_N_CANDLES} candles.",
+        {
+            "open_positions": open_count,
+            "timeframe_seconds": agent.timeframe_seconds,
+            "warmup_sec": ENGINE_WARMUP_SEC,
+            "momentum_fire": fire_n,
+            "momentum_threshold": thr,
+        },
     )
     system_log.push_agent_chat(
-        f"AI Engine ON — trading live · boot UI {ENGINE_WARMUP_SEC}s · {profile['name']} · {agent.active_pair} · {tf_key}",
+        f"AI Engine ON · momentum thr>{thr:g}% · fire {fire_n} · {profile['name']} · {agent.active_pair} · {tf_key}",
         status="active",
-        details={"pair": agent.active_pair, "timeframe": tf_key, "entry_pattern": profile, "warmup_sec": ENGINE_WARMUP_SEC},
+        details={
+            "pair": agent.active_pair,
+            "timeframe": tf_key,
+            "entry_pattern": profile,
+            "warmup_sec": ENGINE_WARMUP_SEC,
+            "momentum_fire_pairs": list(getattr(agent, "momentum_fire_pairs", None) or []),
+            "momentum_threshold_pct": thr,
+        },
     )
     notifications.push(
-        f"AI Engine STARTED — trading now; boot animation runs in UI only.",
+        f"AI Engine STARTED — momentum filter active (>{thr:g}% · {fire_n} coins).",
         "success",
     )
     return {
         "status": "success",
         "is_active": True,
-        "message": f"AI Engine started — trading READY ({profile['name']}, {tf_key}). Boot UI {ENGINE_WARMUP_SEC}s cosmetic.",
+        "message": (
+            f"AI Engine started — momentum thr>{thr:g}% · {fire_n} fire pair(s) "
+            f"({profile['name']}, {tf_key})."
+        ),
         "open_positions": open_count,
         "warmup_sec": ENGINE_WARMUP_SEC,
         "boot_intro_sec": ENGINE_BOOT_INTRO_SEC,
@@ -3930,6 +4141,9 @@ async def bot_start():
         "boot_ui_until": getattr(agent, "boot_ui_until", 0),
         "entry_pattern": profile["name"],
         "session_schedule_enabled": False,
+        "momentum_threshold_pct": thr,
+        "momentum_fire_pairs": list(getattr(agent, "momentum_fire_pairs", None) or []),
+        "watchlist": list(agent.watchlist),
     }
 
 
@@ -4842,6 +5056,11 @@ async def portfolio_feed(websocket: WebSocket):
                 "boot_intro_sec": ENGINE_BOOT_INTRO_SEC,
                 "boot_analysis_sec": ENGINE_BOOT_ANALYSIS_SEC,
                 "one_m_fee_hold": bool(getattr(agent, "one_m_fee_hold", False)),
+                "momentum_gate_ready": bool(getattr(agent, "momentum_gate_ready", False)),
+                "momentum_threshold_pct": float(getattr(agent, "momentum_threshold_pct", 0) or 0),
+                "momentum_fire_pairs": list(getattr(agent, "momentum_fire_pairs", None) or []),
+                "momentum_scores": list(getattr(agent, "momentum_scores", None) or [])[:24],
+                "momentum_last_refresh_ms": int(getattr(agent, "momentum_last_refresh_ms", 0) or 0),
                 "portfolio_drop_pct": round(portfolio_drop, 2),
                 "is_active": agent.is_active,
                 "timeframe_seconds": agent.timeframe_seconds,
