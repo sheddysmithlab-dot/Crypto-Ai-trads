@@ -28,9 +28,15 @@ THR_BREAK_ATR = 0.10
 THR_BALANCED = 0.05
 THR_SCORE = 65.0  # default floor (15m / 1h / 1d)
 THR_SCORE_5M = 70.0  # 5m confidence floor
-THR_SCORE_1M = 85.0  # 1m only — stricter so fewer fee-burning marginal fires
+THR_SCORE_1M = 90.0  # 1m only — strict floor to cut false REVERSAL / marginal fires
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
+
+# 1m fire allowlist — REVERSAL_TRAP / EXHAUSTION excluded (too many false shorts/longs)
+_1M_LONG_OK = ("SELL_TRAP", "ABSORPTION", "FAKE_BREAKOUT")
+_1M_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "FAKE_BREAKOUT")
+_HTF_LONG_OK = ("SELL_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
+_HTF_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
 
 
 def thr_score_for_tf(exec_tf: str | None) -> float:
@@ -404,7 +410,7 @@ def _detect_patterns(
                     "reason": "Downside break then confirmation above midpoint",
                 })
 
-    # ---- REVERSAL TRAP ----
+    # ---- REVERSAL TRAP (strict: flow fail AND close fail; both required) ----
     if window5:
         hh = max(b.high for b in window5)
         ll = min(b.low for b in window5)
@@ -413,24 +419,32 @@ def _detect_patterns(
         buyer_qs = [b.buyer_qty for b in window5]
         seller_qs = [b.seller_qty for b in window5]
         if bar.high > hh:
-            flow_fail = (bar.buy_volume <= max(buy_vols)) or (bar.buyer_qty <= max(buyer_qs)) or (sell_ratio > buy_ratio)
+            flow_fail = (
+                (bar.buy_volume <= max(buy_vols))
+                or (bar.buyer_qty <= max(buyer_qs))
+                or (sell_ratio > buy_ratio)
+            )
             close_fail = bar.close < bar.high - 0.4 * (bar.high - bar.low)
-            if flow_fail or close_fail:
+            if flow_fail and close_fail:
                 out.append({
                     "name": "REVERSAL_TRAP",
                     "side": "SHORT",
                     "priority": 3,
-                    "reason": "New high without confirming buy flow / closed off highs",
+                    "reason": "New high with weak buy flow AND close off highs",
                 })
         if bar.low < ll:
-            flow_fail = (bar.sell_volume <= max(sell_vols)) or (bar.seller_qty <= max(seller_qs)) or (buy_ratio > sell_ratio)
+            flow_fail = (
+                (bar.sell_volume <= max(sell_vols))
+                or (bar.seller_qty <= max(seller_qs))
+                or (buy_ratio > sell_ratio)
+            )
             close_fail = bar.close > bar.low + 0.4 * (bar.high - bar.low)
-            if flow_fail or close_fail:
+            if flow_fail and close_fail:
                 out.append({
                     "name": "REVERSAL_TRAP",
                     "side": "LONG",
                     "priority": 3,
-                    "reason": "New low without confirming sell flow / closed off lows",
+                    "reason": "New low with weak sell flow AND close off lows",
                 })
 
     # Deduplicate by name+side keeping best priority (lower number = higher priority)
@@ -582,6 +596,20 @@ def evaluate_trap_orderflow(
         else:
             bias_5m = "bearish"
 
+    # Drop 1m REVERSAL_TRAP when it fights 5m bias (false shorts into bull / longs into bear)
+    if setup_1 and setup_1["name"] == "REVERSAL_TRAP":
+        if setup_1["side"] == "SHORT" and bias_5m == "bullish":
+            setup_1 = None
+        elif setup_1["side"] == "LONG" and bias_5m == "bearish":
+            setup_1 = None
+
+    # 1m: never use REVERSAL_TRAP / EXHAUSTION as the primary setup (noise); pick next-best
+    if (exec_tf or "").strip().lower() in ("1m", "30s") and setup_1 and setup_1["name"] in (
+        "REVERSAL_TRAP", "EXHAUSTION",
+    ):
+        rest = [p for p in pats_1 if p["name"] not in ("REVERSAL_TRAP", "EXHAUSTION")]
+        setup_1 = pick(rest)
+
     contradiction = (
         (bias_5m == "bullish" and dir_1m == "bearish")
         or (bias_5m == "bearish" and dir_1m == "bullish")
@@ -606,12 +634,10 @@ def evaluate_trap_orderflow(
     low_conf = max_score < thr
 
     # Named-pattern ok flags (5m+ may bypass low conf; 1m never does)
-    long_ok_pattern = setup_1 and setup_1["side"] == "LONG" and setup_1["name"] in (
-        "SELL_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP",
-    )
-    short_ok_pattern = setup_1 and setup_1["side"] == "SHORT" and setup_1["name"] in (
-        "BUY_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP",
-    )
+    _long_ok = _1M_LONG_OK if strict_1m else _HTF_LONG_OK
+    _short_ok = _1M_SHORT_OK if strict_1m else _HTF_SHORT_OK
+    long_ok_pattern = setup_1 and setup_1["side"] == "LONG" and setup_1["name"] in _long_ok
+    short_ok_pattern = setup_1 and setup_1["side"] == "SHORT" and setup_1["name"] in _short_ok
     if setup_5 and setup_5["priority"] <= 2:
         if setup_5["side"] == "LONG":
             long_ok_pattern = True
@@ -710,19 +736,55 @@ def merge_with_structure_trap(
     structure_trap_side: Optional[str],
     structure_trap_type: Optional[str],
 ) -> TrapOFResult:
-    """Blend classic brain.py structure trap with order-flow trap (both kept)."""
+    """Blend classic brain.py structure trap with order-flow trap (both kept).
+
+    1m: no structure score bonus and no NO_TRADE lift — OF floor alone decides fire.
+    Higher TFs: keep light structure agree bonus + lift.
+    """
     if not structure_trap_side:
         return of_result
     # structure_trap_side is BUY/SELL
     struct_signal = "LONG" if structure_trap_side == "BUY" else "SHORT"
+    tf = (of_result.timeframe or "").strip().lower()
+    strict_1m = tf in ("1m", "30s")
+
+    # 1m: annotate only — do not inflate scores or lift NO_TRADE over the OF floor
+    if strict_1m:
+        reason = of_result.primary_reason
+        pattern = of_result.pattern
+        if of_result.final_signal == struct_signal:
+            pattern = f"{of_result.pattern}+STRUCTURE_{structure_trap_type or 'TRAP'}"
+            reason = f"{of_result.primary_reason} | structure {structure_trap_type} agrees (no 1m score boost)"
+        elif of_result.final_signal in ("LONG", "SHORT"):
+            reason = f"{of_result.primary_reason} | note: structure trap wanted {struct_signal}"
+        return TrapOFResult(
+            timeframe=of_result.timeframe,
+            pattern=pattern,
+            bias_5m=of_result.bias_5m,
+            buy_pressure=of_result.buy_pressure,
+            sell_pressure=of_result.sell_pressure,
+            buy_volume_ratio=of_result.buy_volume_ratio,
+            sell_volume_ratio=of_result.sell_volume_ratio,
+            long_score=of_result.long_score,
+            short_score=of_result.short_score,
+            final_signal=of_result.final_signal,
+            confidence=of_result.confidence,
+            primary_reason=reason,
+            details={
+                **of_result.details,
+                "structure_trap": structure_trap_type,
+                "structure_side": structure_trap_side,
+                "structure_1m_boost": False,
+            },
+        )
+
     bonus = 8.0
     long_s = of_result.long_score + (bonus if struct_signal == "LONG" else 0)
     short_s = of_result.short_score + (bonus if struct_signal == "SHORT" else 0)
 
     # If OF is NO_TRADE only due to low conf but structure agrees with a side, lift it
     thr = thr_score_for_tf(of_result.timeframe)
-    strict_1m = (of_result.timeframe or "").strip().lower() == "1m"
-    lift_floor = thr if strict_1m else (thr - 5)
+    lift_floor = thr - 5
     signal = of_result.final_signal
     reason = of_result.primary_reason
     pattern = of_result.pattern
