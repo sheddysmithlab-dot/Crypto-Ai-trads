@@ -18,7 +18,7 @@ MOMENTUM_MIN_AVG_PCT: dict[str, float] = {
     "1D": 5.0,
 }
 
-MOMENTUM_REFRESH_EVERY_N_CANDLES = 10
+MOMENTUM_REFRESH_EVERY_N_CANDLES = 7
 
 # engine key (1m) → UI key for fetch_tf_move (1M)
 _ENGINE_TO_UI_TF: dict[str, str] = {
