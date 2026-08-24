@@ -7,7 +7,7 @@ const SECTIONS = [
       'Brain patterns + structure traps + order-flow trap (1M exec / 5M bias) → AI BUY/SELL/HOLD.',
       'Pattern scan uses the last closed candle; trade fires at the next candle open. First detect per pair is skipped.',
       'Size by TF capital %: 1m 1.5% · 5m 7% · 15m 10% · 1h 15% · 1D 20%.',
-      '1m fee pack: OF≥85, dual profit lock +0.50→+0.40 then +0.65→+0.55, max 3 concurrent per chart, 5-bar spacing, fee-budget hold.',
+      '1m fee pack: OF≥85, dual profit lock +0.50→+0.40 then +0.65→+0.55, max 3 open per chart (same-side stack OK), 5-bar spacing, fee-budget hold.',
     ],
   },
   {

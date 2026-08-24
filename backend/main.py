@@ -630,7 +630,7 @@ bybit_api = BybitAPIWrapper()
 # ==========================================
 # Manual-mode defaults (auto strategy wiped)
 MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "10"))
-MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "1"))
+MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "3"))
 AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path lock/trail profit + protective SL (same engine)
 INVERT_AUTO_TRADE_FIRE = False
 # Profit book (gross %, LONG/SHORT symmetric):
@@ -2277,8 +2277,17 @@ class AITradingAgent:
         )
 
     def has_same_side_auto_capacity(self, side: str, pair: str) -> bool:
-        """False when this pair already has enough same-side auto positions."""
+        """False when this pair already has enough same-side auto positions.
+
+        1m fee pack: allow up to ONE_M_MAX_CONCURRENT same-side stacks per chart
+        (3 per pair → e.g. 3 charts × 3 = 9 open).
+        """
         limit = max(1, int(MAX_SAME_SIDE_AUTO_PER_PAIR))
+        tf = str(
+            SECONDS_TO_TIMEFRAME_KEY.get(getattr(self, "timeframe_seconds", 60), "1m")
+        ).strip().lower()
+        if tf == "1m":
+            limit = max(limit, int(ONE_M_MAX_CONCURRENT))
         return self.same_side_auto_count(side, pair) < limit
 
     def has_duplicate_auto_entry(
@@ -3156,17 +3165,18 @@ def effective_max_concurrent_trades(agent) -> int:
 
 
 def concurrent_entry_blocked(agent, pair: str) -> str | None:
-    """Skip reason if a new entry would exceed global and/or 1m-per-chart caps; else None.
+    """Skip reason if a new entry would exceed caps; else None.
 
-    1m fee pack: max ONE_M_MAX_CONCURRENT open trades **per pair/chart**, not globally.
-    Other TFs: only the user global max_concurrent_trades applies.
+    1m fee pack: cap is **per pair/chart** (ONE_M_MAX_CONCURRENT), not a low UI
+    global max — otherwise risk%→max_concurrent=3 blocks all other charts.
+    Other TFs: user global max_concurrent_trades only.
     """
-    max_open = effective_max_concurrent_trades(agent)
-    if len(getattr(agent, "trades", None) or []) >= max_open:
-        return f"Max concurrent trades ({max_open}) reached"
     tf = str(
         SECONDS_TO_TIMEFRAME_KEY.get(getattr(agent, "timeframe_seconds", 60), "1m")
     ).strip().lower()
+    open_n = len(getattr(agent, "trades", None) or [])
+    user_max = effective_max_concurrent_trades(agent)
+
     if tf == "1m":
         n = count_open_trades_for_pair(agent, pair)
         if n >= ONE_M_MAX_CONCURRENT:
@@ -3174,6 +3184,14 @@ def concurrent_entry_blocked(agent, pair: str) -> str | None:
                 f"Max concurrent on {pair} ({ONE_M_MAX_CONCURRENT}/chart) reached "
                 f"({n} open on this pair)"
             )
+        # Absolute safety only — never let a UI max of 3 freeze multi-chart stacking.
+        abs_cap = max(user_max, int(ONE_M_MAX_CONCURRENT) * 40)
+        if open_n >= abs_cap:
+            return f"Max concurrent trades ({abs_cap}) reached"
+        return None
+
+    if open_n >= user_max:
+        return f"Max concurrent trades ({user_max}) reached"
     return None
 
 
