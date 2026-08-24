@@ -1,99 +1,105 @@
-"""Timeframe-scoped market move stats (avg % per candle over a lookback window).
+"""Market avg-move % from 24h High/Low range.
 
-Each chart timeframe maps to a lookback window and label shown in the UI:
-  1M  → 1 hour average
-  5M  → 1 hour average
-  15M → 2 hour average
-  1H  → 1 day average
-  1D  → 7 day average
+Formula (per 1 minute):
+  mid = (high_24h + low_24h) / 2
+  avg_1m_pct = (high_24h - low_24h) / mid / (24 * 60) * 100
+
+Selected chart TF scales that 1m average by bar minutes
+(1M→×1, 5M→×5, 15M→×15, 1H→×60, 1D→×1440).
 """
 from __future__ import annotations
 
-import time
-
 import httpx
 
-from bybit_public import fetch_kline_rows, fetch_ticker_last_price
+from bybit_public import ticker_url
 
-# UI timeframe key → Bybit kline interval + lookback seconds + display label
-TF_MOVE_CONFIG: dict[str, dict] = {
-    "1M": {"interval": "1", "lookback_seconds": 3600, "window_label": "1hr"},
-    "5M": {"interval": "5", "lookback_seconds": 3600, "window_label": "1hr"},
-    "15M": {"interval": "15", "lookback_seconds": 7200, "window_label": "2hr"},
-    "1H": {"interval": "60", "lookback_seconds": 86400, "window_label": "1Day"},
-    "1D": {"interval": "D", "lookback_seconds": 7 * 86400, "window_label": "7Day"},
+# UI timeframe → minutes in one bar (scale factor for 1m average)
+TF_BAR_MINUTES: dict[str, int] = {
+    "1M": 1,
+    "5M": 5,
+    "15M": 15,
+    "1H": 60,
+    "1D": 1440,
 }
 
-INTERVAL_SECONDS = {
-    "1": 60,
-    "5": 300,
-    "15": 900,
-    "60": 3600,
-    "D": 86400,
-}
+MINUTES_PER_DAY = 24 * 60  # 1440
 
 
 def _normalize_timeframe(tf: str | None) -> str:
     key = (tf or "1M").strip().upper()
-    return key if key in TF_MOVE_CONFIG else "1M"
+    return key if key in TF_BAR_MINUTES else "1M"
 
 
-def _candles_needed(interval: str, lookback_seconds: int) -> int:
-    bar_sec = INTERVAL_SECONDS.get(interval, 60)
-    return max(2, min(200, (lookback_seconds // bar_sec) + 2))
+async def _fetch_ticker_24h_hl(
+    client: httpx.AsyncClient, bybit_symbol: str
+) -> tuple[float | None, float | None, float | None]:
+    resp = await client.get(ticker_url(bybit_symbol))
+    if resp.status_code != 200:
+        return None, None, None
+    item = ((resp.json().get("result") or {}).get("list") or [{}])[0]
+    try:
+        high = float(item.get("highPrice24h") or 0)
+        low = float(item.get("lowPrice24h") or 0)
+        last = float(item.get("lastPrice") or 0)
+    except (TypeError, ValueError):
+        return None, None, None
+    return (
+        high if high > 0 else None,
+        low if low > 0 else None,
+        last if last > 0 else None,
+    )
 
 
-def _parse_candles(raw_rows: list[list], cutoff_ms: int) -> list[dict]:
-    candles = []
-    for row in reversed(raw_rows):
-        ts = int(row[0])
-        if ts < cutoff_ms:
-            continue
-        open_p = float(row[1])
-        close_p = float(row[4])
-        if open_p <= 0:
-            continue
-        pct = ((close_p - open_p) / open_p) * 100.0
-        candles.append({"time": ts // 1000, "open": open_p, "close": close_p, "pct": pct})
-    return candles
+def avg_move_pct_from_24h_range(high: float, low: float, bar_minutes: int = 1) -> float | None:
+    """Absolute avg % move for `bar_minutes` from 24h high/low range."""
+    if high <= 0 or low <= 0 or high < low:
+        return None
+    mid = (high + low) / 2.0
+    if mid <= 0:
+        return None
+    range_pct = ((high - low) / mid) * 100.0
+    avg_1m = range_pct / float(MINUTES_PER_DAY)
+    mins = max(1, int(bar_minutes))
+    return avg_1m * mins
 
 
 async def fetch_tf_move(pair_label: str, bybit_symbol: str, timeframe: str | None) -> dict:
-    """Return avg signed % move per candle and total window % change."""
+    """Return 24h-range average move % for the active chart timeframe."""
     tf_key = _normalize_timeframe(timeframe)
-    cfg = TF_MOVE_CONFIG[tf_key]
-    interval = cfg["interval"]
-    lookback = cfg["lookback_seconds"]
-    cutoff_ms = int((time.time() - lookback) * 1000)
-    limit = _candles_needed(interval, lookback)
+    bar_minutes = TF_BAR_MINUTES[tf_key]
 
     async with httpx.AsyncClient(timeout=12.0) as client:
-        raw_rows = await fetch_kline_rows(client, bybit_symbol, interval, limit)
-        last_price = await fetch_ticker_last_price(client, bybit_symbol)
+        high, low, last_price = await _fetch_ticker_24h_hl(client, bybit_symbol)
 
-    candles = _parse_candles(raw_rows, cutoff_ms)
-    if not candles:
+    if high is None or low is None:
         return {
             "pair": pair_label,
             "timeframe": tf_key,
-            "window_label": cfg["window_label"],
+            "window_label": "24h avg",
             "avg_pct": None,
             "total_pct": None,
+            "display_pct": None,
             "candle_count": 0,
             "last_price": last_price,
+            "high_24h": high,
+            "low_24h": low,
+            "bar_minutes": bar_minutes,
         }
 
-    avg_pct = sum(c["pct"] for c in candles) / len(candles)
-    first_open = candles[0]["open"]
-    last_close = last_price if last_price and last_price > 0 else candles[-1]["close"]
-    total_pct = ((last_close - first_open) / first_open) * 100.0 if first_open > 0 else None
+    avg_pct = avg_move_pct_from_24h_range(high, low, bar_minutes)
+    # Magnitude only (range-based); no signed direction.
+    display = round(avg_pct, 4) if avg_pct is not None else None
 
     return {
         "pair": pair_label,
         "timeframe": tf_key,
-        "window_label": cfg["window_label"],
-        "avg_pct": round(avg_pct, 4),
-        "total_pct": round(total_pct, 4) if total_pct is not None else None,
-        "candle_count": len(candles),
-        "last_price": last_close,
+        "window_label": "24h avg",
+        "avg_pct": display,
+        "total_pct": display,  # same value so older UI paths that prefer total still work
+        "display_pct": display,
+        "candle_count": 1,
+        "last_price": last_price,
+        "high_24h": high,
+        "low_24h": low,
+        "bar_minutes": bar_minutes,
     }

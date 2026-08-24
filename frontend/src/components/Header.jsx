@@ -51,9 +51,15 @@ export default function Header({
   const tfMoveUp = tfMovePct != null && tfMovePct >= 0;
   const tfMoveStr =
     tfMovePct != null
-      ? `${tfMoveUp ? '+' : ''}${Math.abs(tfMovePct) < 0.005 && tfMovePct !== 0 ? tfMovePct.toFixed(3) : tfMovePct.toFixed(2)}%`
+      ? `${tfMoveUp ? '+' : ''}${
+          Math.abs(tfMovePct) < 0.01 && tfMovePct !== 0
+            ? tfMovePct.toFixed(4)
+            : Math.abs(tfMovePct) < 0.1
+              ? tfMovePct.toFixed(3)
+              : tfMovePct.toFixed(2)
+        }%`
       : '--';
-  const tfMoveTitle = formatTfMoveLabel(chartTimeframe, tfMoveLabel);
+  const tfMoveTitle = `24h High/Low → avg % · ${formatTfMoveLabel(chartTimeframe, tfMoveLabel)}`;
 
   return (
     <header className="bg-lightCard dark:bg-darkCard shadow-md px-3 py-2 flex justify-between items-center sticky top-0 z-50 shrink-0 border-b border-gray-200 dark:border-gray-800 gap-2">

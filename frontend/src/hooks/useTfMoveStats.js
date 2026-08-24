@@ -8,14 +8,15 @@ const WINDOW_LABELS = {
   '2hr': '2hr move',
   '1Day': '1Day move',
   '7Day': '7Day move',
+  '24h avg': '24h avg',
 };
 
 export function formatTfMoveLabel(timeframe, windowLabel) {
-  const win = WINDOW_LABELS[windowLabel] || windowLabel || 'move';
+  const win = WINDOW_LABELS[windowLabel] || windowLabel || '24h avg';
   return `${timeframe || '1M'} · ${win}`;
 }
 
-// Prefer window total % (clear market direction). Avg signed % often cancels to ~0.
+/** 24h High/Low → avg % move for active TF bar (always magnitude ≥ 0). */
 export function useTfMoveStats(pairLabel, timeframe) {
   const [stats, setStats] = useState({
     avgPct: null,
@@ -38,18 +39,19 @@ export function useTfMoveStats(pairLabel, timeframe) {
         if (cancelled) return;
         const avgPct = data.avg_pct != null ? Number(data.avg_pct) : null;
         const totalPct = data.total_pct != null ? Number(data.total_pct) : null;
-        // Show total window move; fall back to avg when total missing.
-        const displayPct =
-          totalPct != null && Number.isFinite(totalPct)
-            ? totalPct
-            : avgPct != null && Number.isFinite(avgPct)
+        const displayRaw =
+          data.display_pct != null
+            ? Number(data.display_pct)
+            : avgPct != null
               ? avgPct
-              : null;
+              : totalPct;
+        const displayPct =
+          displayRaw != null && Number.isFinite(displayRaw) ? Math.abs(displayRaw) : null;
         setStats({
-          avgPct,
-          totalPct,
+          avgPct: displayPct,
+          totalPct: displayPct,
           displayPct,
-          windowLabel: data.window_label || null,
+          windowLabel: data.window_label || '24h avg',
           candleCount: Number(data.candle_count) || 0,
         });
       } catch (err) {

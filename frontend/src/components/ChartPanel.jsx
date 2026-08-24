@@ -158,9 +158,17 @@ export default function ChartPanel({
           className={`font-black normal-case tracking-normal ${
             tfMovePct == null ? 'text-gray-400' : tfMoveUp ? 'text-green-500' : 'text-red-500'
           }`}
-          title={`Avg % per ${timeframe} candle · ${formatTfMoveLabel(timeframe, tfMoveLabel)}`}
+          title={`24h High/Low → avg % for ${timeframe} · ${formatTfMoveLabel(timeframe, tfMoveLabel)}`}
         >
-          {tfMovePct != null ? `${tfMoveUp ? '+' : ''}${tfMovePct.toFixed(2)}%` : '--'}
+          {tfMovePct != null
+            ? `${tfMoveUp ? '+' : ''}${
+                Math.abs(tfMovePct) < 0.01 && tfMovePct !== 0
+                  ? tfMovePct.toFixed(4)
+                  : Math.abs(tfMovePct) < 0.1
+                    ? tfMovePct.toFixed(3)
+                    : tfMovePct.toFixed(2)
+              }%`
+            : '--'}
           <span className="text-gray-500 dark:text-gray-400 font-semibold ml-1">
             {formatTfMoveLabel(timeframe, tfMoveLabel)}
           </span>
