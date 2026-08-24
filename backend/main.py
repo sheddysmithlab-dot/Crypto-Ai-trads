@@ -51,7 +51,6 @@ from chart_tf_move import fetch_tf_move
 from momentum_watchlist import (
     MOMENTUM_REFRESH_EVERY_N_CANDLES,
     build_momentum_watchlist,
-    momentum_threshold_pct,
 )
 from system_log import system_log
 from volume_spread_system import (
