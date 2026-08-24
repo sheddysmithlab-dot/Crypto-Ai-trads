@@ -336,7 +336,7 @@ async def consult_ai_provider(context):
     score_txt = "—" if trap_score is None else str(trap_score)
     tf_l = timeframe.strip().lower()
     if tf_l in ("1m", "30s"):
-        thr = 80
+        thr = 85
     elif tf_l == "5m":
         thr = 70
     else:
@@ -346,7 +346,7 @@ async def consult_ai_provider(context):
         f"PATTERN DETECTED → confirm {side} {pattern} / trap score {score_txt}. "
         f"Pair {pair} {timeframe}. "
         f"Analyze LONG/SHORT, trap/inverse/fake-breakout per policy. "
-        f"Reply YES only if confidence ≥ {thr}% (1m=80, 5m=70, else=65); else NO. "
+        f"Reply YES only if confidence ≥ {thr}% (1m=85, 5m=70, else=65); else NO. "
         f"One word only: YES or NO."
     )
 
@@ -630,9 +630,10 @@ MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", 
 AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path lock/trail profit + protective SL (same engine)
 INVERT_AUTO_TRADE_FIRE = False
 # Profit book (gross %, LONG/SHORT symmetric):
-#   +0.50% → first LOCK; trail giveback 0.10% (exit floor +0.40% — never sell below);
-#   above +0.50% ratchet +0.20% steps (+0.70, +0.90…); those use giveback 0.20%.
+#   Default: +0.50% first LOCK; trail 0.10% → floor +0.40%; then +0.20 steps / 0.20 trail.
+#   1m only: +0.65% first LOCK (fee-clear); same 0.10 first trail → floor +0.55%.
 PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.50"))
+PROFIT_LOCK_PCT_1M = float(os.environ.get("PROFIT_LOCK_PCT_1M", "0.65"))
 PROFIT_LOCK_STEP_PCT = float(os.environ.get("PROFIT_LOCK_STEP_PCT", "0.20"))
 PROFIT_TRAIL_FIRST_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "0.10"))
 PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.20"))
@@ -728,6 +729,7 @@ class AITradingAgent:
         # reset to 0 on next START (not calendar-day / all-time).
         self.session_stats_frozen = False
         self.session_hold_mode = False  # STOP→Hold: no new entries; open trades still auto-exit
+        self.one_m_fee_hold = False  # 1m only: pause new entries when fees dominate
         # Connectivity freeze: engine stays ON, but new fires pause until feed/AI recover.
         self.connectivity_frozen = False
         self.freeze_reason: str | None = None
@@ -1100,11 +1102,13 @@ class AITradingAgent:
 
         closed_gross = 0.0
         closed_fees = 0.0
+        closed_count = 0
         for row in self.trade_history:
             if row.get("status") != "sold":
                 continue
             if sid is not None and row.get("season_id") != sid:
                 continue
+            closed_count += 1
             entry_f = float(row.get("entry_fee_usd") or 0)
             exit_f = float(row.get("exit_fee_usd") or 0)
             if entry_f <= 0 and float(row.get("position_size") or 0) > 0:
@@ -1129,6 +1133,7 @@ class AITradingAgent:
             "closed_gross_usd": closed_gross,
             "open_fee_usd": open_fees,
             "closed_fee_usd": closed_fees,
+            "closed_count": closed_count,
         }
 
     def _session_open_trades(self) -> list:
@@ -1142,6 +1147,7 @@ class AITradingAgent:
         """New AI session — portfolio counters start at 0.0 (live updating resumes)."""
         self.session_stats_frozen = False
         self.session_hold_mode = False
+        self.one_m_fee_hold = False
         self.session_stats_snapshot = {
             "trade_notional": 0.0,
             "daily_profit": 0.0,
@@ -1253,6 +1259,7 @@ class AITradingAgent:
             self.end_ai_season(clear_live_table=False, reason="restarted")
         self.trade_history = []
         self._reset_session_stats()
+        self.one_m_fee_hold = False
         self.ai_season_start_capital = self.get_total_portfolio_value()
         self.ai_season_started_at = time.time()
         self.ai_season_end_reason = None
@@ -1413,9 +1420,11 @@ class AITradingAgent:
                 return None
 
         # AI Agent Instructions modal: cap stacked positions at max_concurrent_trades.
-        if len(self.trades) >= self.max_concurrent_trades:
+        # 1m fee pack: also hard-cap concurrent opens.
+        max_open = effective_max_concurrent_trades(self)
+        if len(self.trades) >= max_open:
             self.last_open_skip_reason = (
-                f"Max concurrent trades ({self.max_concurrent_trades}) reached — "
+                f"Max concurrent trades ({max_open}) reached — "
                 f"new entry skipped on {trade_pair}"
             )
             notifications.push(self.last_open_skip_reason + ".", "info")
@@ -1555,7 +1564,12 @@ class AITradingAgent:
             "loss_adverse_extreme_price": None,
             "loss_recovery_peak_price": None,
             "path_sl_pct": LOSS_PROTECT_PCT,
-            "path_tp_pct": PROFIT_LOCK_PCT,
+            "path_tp_pct": (
+                PROFIT_LOCK_PCT_1M
+                if str(timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")).lower()
+                == "1m"
+                else PROFIT_LOCK_PCT
+            ),
         }
         self.trades.append(trade)
         self.set_pair_mark(trade_pair, filled_price)
@@ -1846,12 +1860,13 @@ class AITradingAgent:
         # Never widen permitted risk for choppy — UI SL stays at protect level
         trade["path_sl_pct"] = LOSS_PROTECT_PCT
 
-        # Profit step-lock UI: +0.50 (trail 0.10→floor 0.40) then +0.70/+0.90… (trail 0.20)
-        if gross_pct >= PROFIT_LOCK_PCT:
+        # Profit step-lock UI (1m first lock higher for fee-clear)
+        lock_start = self._profit_lock_start_pct(trade)
+        if gross_pct >= lock_start:
             self._ratchet_profit_lock_level(trade, gross_pct)
         if trade.get("profit_lock"):
-            lock_lvl = float(trade.get("profit_lock_level") or PROFIT_LOCK_PCT)
-            giveback = self._profit_giveback_for_lock(lock_lvl)
+            lock_lvl = float(trade.get("profit_lock_level") or lock_start)
+            giveback = self._profit_giveback_for_lock(lock_lvl, trade)
             trail_stop = lock_lvl - giveback
             trade["path_tp_pct"] = lock_lvl
             trade["is_lock_active"] = True
@@ -1863,10 +1878,10 @@ class AITradingAgent:
             rec = trade.get("loss_recovery_peak_gross")
             if rec is not None:
                 trade["sell_trigger_pct"] = float(rec) - LOSS_RECOVERY_RETRACE_PCT
-            trade["path_tp_pct"] = PROFIT_LOCK_PCT
+            trade["path_tp_pct"] = lock_start
             trade["is_lock_active"] = False
         else:
-            trade["path_tp_pct"] = PROFIT_LOCK_PCT
+            trade["path_tp_pct"] = lock_start
             trade["is_lock_active"] = False
             trade["is_stop_active"] = False
             trade["sell_trigger_pct"] = None
@@ -1877,8 +1892,8 @@ class AITradingAgent:
             return
 
         if trade.get("profit_lock"):
-            lock_lvl = float(trade.get("profit_lock_level") or PROFIT_LOCK_PCT)
-            giveback = self._profit_giveback_for_lock(lock_lvl)
+            lock_lvl = float(trade.get("profit_lock_level") or lock_start)
+            giveback = self._profit_giveback_for_lock(lock_lvl, trade)
             trail_stop = lock_lvl - giveback
             if side == "LONG":
                 sl = entry * (1.0 + trail_stop / 100.0)
@@ -1891,7 +1906,7 @@ class AITradingAgent:
         elif trade.get("loss_protect"):
             # SL display at protect level (−0.50%); emergency is separate floor
             sl, tp = self._fixed_exit_prices(
-                entry, side, loss_pct=LOSS_PROTECT_PCT, profit_pct=PROFIT_LOCK_PCT
+                entry, side, loss_pct=LOSS_PROTECT_PCT, profit_pct=lock_start
             )
             if sl is not None:
                 trade["sl_price"] = sl
@@ -1899,23 +1914,31 @@ class AITradingAgent:
                 trade["tp_price"] = tp
         else:
             sl, tp = self._fixed_exit_prices(
-                entry, side, loss_pct=LOSS_PROTECT_PCT, profit_pct=PROFIT_LOCK_PCT
+                entry, side, loss_pct=LOSS_PROTECT_PCT, profit_pct=lock_start
             )
             if sl is not None:
                 trade["sl_price"] = sl
             if tp is not None:
                 trade["tp_price"] = tp
 
-    def _profit_giveback_for_lock(self, lock_lvl: float) -> float:
-        """First lock (+0.50%): 0.10% giveback → floor +0.40%. Higher locks: 0.20%."""
-        if float(lock_lvl) <= float(PROFIT_LOCK_PCT) + 1e-9:
+    def _profit_lock_start_pct(self, trade: dict | None = None) -> float:
+        """First profit-lock level: 1m uses higher fee-clear floor; other TFs unchanged."""
+        tf = str((trade or {}).get("timeframe_key") or "").strip().lower()
+        if tf == "1m":
+            return float(PROFIT_LOCK_PCT_1M)
+        return float(PROFIT_LOCK_PCT)
+
+    def _profit_giveback_for_lock(self, lock_lvl: float, trade: dict | None = None) -> float:
+        """First lock: 0.10% giveback. Higher locks: 0.20%."""
+        start = self._profit_lock_start_pct(trade)
+        if float(lock_lvl) <= float(start) + 1e-9:
             return float(PROFIT_TRAIL_FIRST_GIVEBACK_PCT)
         return float(PROFIT_TRAIL_GIVEBACK_PCT)
 
     def _ratchet_profit_lock_level(self, trade: dict, gross_pct: float) -> float:
-        """Step profit locks: +0.50 → +0.70 → +0.90 → … (never move lock backward)."""
+        """Step profit locks from TF first-lock → +step → … (never move lock backward)."""
         trade["profit_lock"] = True
-        start = float(PROFIT_LOCK_PCT)
+        start = self._profit_lock_start_pct(trade)
         step = float(PROFIT_LOCK_STEP_PCT)
         if step <= 0:
             step = 0.20
@@ -2007,6 +2030,7 @@ class AITradingAgent:
               if gross recovers to −0.20% or better → CLEAR lock (re-arm later at −0.50%);
               emergency −0.70%.
         LONG/SHORT symmetric on gross %. Fees stay out of the trigger.
+        1m trades use a higher first profit lock (PROFIT_LOCK_PCT_1M) so winners clear RT fees.
         """
         trade.pop("_exit_fill_mark", None)
         entry = float(trade.get("entry") or 0)
@@ -2015,6 +2039,8 @@ class AITradingAgent:
         side = trade.get("side")
         if side not in ("LONG", "SHORT"):
             return None
+
+        lock_start = self._profit_lock_start_pct(trade)
 
         if side == "LONG":
             gross_pct = ((mark - entry) / entry) * 100.0
@@ -2044,13 +2070,13 @@ class AITradingAgent:
                 f"floor=−{LOSS_EMERGENCY_PCT:g}% mark={mark:.6f} entry={entry:.6f}"
             )
 
-        # 2) Profit step-locks: +0.50 (trail 0.10→min +0.40) then higher steps trail 0.20
-        if gross_pct >= PROFIT_LOCK_PCT:
+        # 2) Profit step-locks (1m starts higher for fee-clear)
+        if gross_pct >= lock_start:
             self._ratchet_profit_lock_level(trade, gross_pct)
 
         if trade.get("profit_lock"):
-            lock_lvl = float(trade.get("profit_lock_level") or PROFIT_LOCK_PCT)
-            giveback_need = self._profit_giveback_for_lock(lock_lvl)
+            lock_lvl = float(trade.get("profit_lock_level") or lock_start)
+            giveback_need = self._profit_giveback_for_lock(lock_lvl, trade)
             lock_giveback = lock_lvl - gross_pct
             if lock_giveback >= giveback_need - 1e-9:
                 fill_at = lock_lvl - giveback_need
@@ -2058,8 +2084,8 @@ class AITradingAgent:
                 return (
                     f"PROFIT_LOCK_EXIT | {side} upper_lock={lock_lvl:.3f}% now={gross_pct:.3f}% "
                     f"giveback={lock_giveback:.3f}%≥{giveback_need:g}% "
-                    f"(first@{PROFIT_LOCK_PCT:g}% trail {PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}% "
-                    f"→ floor +{PROFIT_LOCK_PCT - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%; "
+                    f"(first@{lock_start:g}% trail {PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}% "
+                    f"→ floor +{lock_start - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%; "
                     f"above trail {PROFIT_TRAIL_GIVEBACK_PCT:g}%) "
                     f"mark={mark:.6f} entry={entry:.6f}"
                 )
@@ -2258,9 +2284,9 @@ class AITradingAgent:
         return max(times) if times else None
 
     def one_m_earliest_next_fire_ms(self, pair: str, interval_ms: int) -> int | None:
-        """1m-only: after a fire on candle N, next fire earliest at candle N+3.
+        """1m-only: after a fire on candle N, next fire earliest at candle N+5.
 
-        Example: trade on candle 1 → no fire on 2 or 3; detect may land on 3 → fire on 4.
+        Example: trade on candle 1 → no fire on 2–5; detect may land on 5 → fire on 6.
         """
         last = LAST_AUTO_FIRE_CANDLE_MS.get(pair)
         hist = self.last_auto_entry_candle_time(pair)
@@ -2537,7 +2563,7 @@ class AITradingAgent:
         )
 
     def entries_allowed(self) -> bool:
-        """False while frozen / hold / emergency — open trades still update via process_tick."""
+        """False while frozen / hold / emergency / 1m fee-budget — open trades still update."""
         if self.emergency_triggered:
             return False
         if self.connectivity_frozen:
@@ -2546,7 +2572,49 @@ class AITradingAgent:
             return False
         if not self.trading_ready():
             return False
+        if self.one_m_fee_hold and self._chart_tf_key() == "1m":
+            return False
         return bool(self.is_active)
+
+    def _chart_tf_key(self) -> str:
+        return str(SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")).strip().lower()
+
+    def refresh_one_m_fee_budget(self) -> None:
+        """1m only: pause new entries when broker fees dominate the session book."""
+        if self._chart_tf_key() != "1m":
+            return
+        if self.one_m_fee_hold:
+            return
+        book = self.get_session_gross_and_fees_usd()
+        closed = int(book.get("closed_count") or 0)
+        if closed < ONE_M_FEE_HOLD_MIN_CLOSED:
+            return
+        fees = float(book.get("broker_fee_usd") or 0)
+        gross = float(book.get("gross_usd") or 0)
+        net = float(book.get("net_usd") or 0)
+        reason = None
+        if gross > 0 and fees >= gross * ONE_M_FEE_BUDGET_RATIO:
+            reason = (
+                f"1m fee budget: fees ${fees:.2f} ≥ {ONE_M_FEE_BUDGET_RATIO * 100:.0f}% "
+                f"of gross ${gross:.2f} after {closed} closes"
+            )
+        elif net <= 0 and fees > 0:
+            reason = (
+                f"1m fee budget: net ${net:.2f} ≤ 0 (fees ${fees:.2f}) after {closed} closes"
+            )
+        if not reason:
+            return
+        self.one_m_fee_hold = True
+        print(f"[FEE BUDGET] {reason} — new 1m entries paused")
+        system_log.push_agent_chat(
+            f"1m FEE HOLD — {reason}. Open trades still manage; no new fires.",
+            status="no_match",
+            details={"fees": fees, "gross": gross, "net": net, "closed": closed},
+        )
+        notifications.push(
+            "1m fee budget hit — new entries paused (open trades still exit).",
+            "warning",
+        )
 
 
 agent = AITradingAgent()
@@ -2679,9 +2747,13 @@ LAST_CANDLE_TIMESTAMPS = {}
 
 # Detect on last closed candle → queue → fire at the NEXT candle's open (not on detect bar).
 PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
-# 1m only: last auto fire candle open-time per pair (blocks fires on next 2 candles).
+# 1m only: last auto fire candle open-time per pair (blocks fires after a gap).
 LAST_AUTO_FIRE_CANDLE_MS: dict[str, int] = {}
-ONE_M_MIN_BARS_BETWEEN_FIRES = 3  # fire on N → next fire earliest N+3 (detect on N+2 OK)
+ONE_M_MIN_BARS_BETWEEN_FIRES = 5  # fire on N → next fire earliest N+5 (was 3)
+ONE_M_MAX_CONCURRENT = 3  # hard cap while chart TF is 1m (fee control)
+# Hold new 1m entries when broker fees eat the session book.
+ONE_M_FEE_BUDGET_RATIO = 0.45  # fees ≥ 45% of positive gross → hold
+ONE_M_FEE_HOLD_MIN_CLOSED = 3  # need at least this many round-trips
 # Engine boot UI: intro + analysis overlay (cosmetic; trading starts on Continue).
 ENGINE_BOOT_INTRO_SEC = 10
 ENGINE_BOOT_ANALYSIS_SEC = 10
@@ -2867,6 +2939,15 @@ def price_decimals_for_mark(price: float) -> int:
     if price >= 0.01:
         return 6
     return 8
+
+
+def effective_max_concurrent_trades(agent) -> int:
+    """User max_concurrent, with a hard 1m fee-pack cap."""
+    base = max(1, int(getattr(agent, "max_concurrent_trades", 1) or 1))
+    tf = str(SECONDS_TO_TIMEFRAME_KEY.get(getattr(agent, "timeframe_seconds", 60), "1m")).strip().lower()
+    if tf == "1m":
+        return min(base, ONE_M_MAX_CONCURRENT)
+    return base
 
 
 def auto_trade_capital_pct_for_agent(agent) -> float:
@@ -3076,15 +3157,21 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         # just because an opposite signal fired). Opposite side may still open if capacity allows.
         # agent.close_opposite_positions_for_flip(side, pair, pattern=detect.get("pattern"))
 
-        if len(agent.trades) >= agent.max_concurrent_trades:
+        if len(agent.trades) >= effective_max_concurrent_trades(agent):
             return await _skip_pending(
                 pending,
-                f"Max concurrent trades ({agent.max_concurrent_trades}) reached "
-                f"({len(agent.trades)} open)",
+                f"Max concurrent trades ({effective_max_concurrent_trades(agent)}) reached "
+                f"({len(agent.trades)} open; 1m cap {ONE_M_MAX_CONCURRENT})",
                 fire_candle_ms=fire_candle_ms,
             )
         if agent.daily_target_reached:
             return await _skip_pending(pending, "Daily profit target already reached", fire_candle_ms=fire_candle_ms)
+        if getattr(agent, "one_m_fee_hold", False) and (timeframe_key or "").strip().lower() == "1m":
+            return await _skip_pending(
+                pending,
+                "1m fee budget hold — new entries paused",
+                fire_candle_ms=fire_candle_ms,
+            )
         if not agent.has_same_side_auto_capacity(side, pair):
             return await _skip_pending(
                 pending,
@@ -3115,14 +3202,19 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             tp_price = round(float(brain_tp), price_decimals_for_mark(mark_px))
             exit_label = f"brain SL={sl_price} TP={tp_price}"
         else:
+            lock_pct = (
+                PROFIT_LOCK_PCT_1M
+                if (timeframe_key or "").strip().lower() == "1m"
+                else PROFIT_LOCK_PCT
+            )
             sl_price, tp_price = agent._fixed_exit_prices(
-                float(mark_px), side, loss_pct=LOSS_PROTECT_PCT, profit_pct=PROFIT_LOCK_PCT
+                float(mark_px), side, loss_pct=LOSS_PROTECT_PCT, profit_pct=lock_pct
             )
             exit_label = (
                 f"loss protect −{LOSS_PROTECT_PCT:g}%/retrace −{LOSS_RECOVERY_RETRACE_PCT:g}% "
                 f"clear@−{LOSS_LOCK_CLEAR_PCT:g}%+ emerg −{LOSS_EMERGENCY_PCT:g}% | "
-                f"profit lock +{PROFIT_LOCK_PCT:g}%/−{PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}% "
-                f"(floor +{PROFIT_LOCK_PCT - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%); "
+                f"profit lock +{lock_pct:g}%/−{PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}% "
+                f"(floor +{lock_pct - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%); "
                 f"above +{PROFIT_LOCK_STEP_PCT:g}/−{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
                 f"SL={sl_price} TP={tp_price}"
             )
@@ -3406,7 +3498,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             return False
 
     # Soft capacity checks at queue time (re-checked at fire).
-    if len(agent.trades) >= agent.max_concurrent_trades:
+    if len(agent.trades) >= effective_max_concurrent_trades(agent):
         _push_pattern_neon(
             pair=pair,
             candle_time_ms=close_time,
@@ -3418,6 +3510,17 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         )
         return False
     if agent.daily_target_reached:
+        return False
+    if getattr(agent, "one_m_fee_hold", False) and (timeframe_key or "").strip().lower() == "1m":
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=close_time,
+            stage="skipped",
+            side=side,
+            action=detect.get("action"),
+            pattern=detect.get("pattern"),
+            reason="1m fee budget hold",
+        )
         return False
     if not agent.has_same_side_auto_capacity(side, pair):
         return False
@@ -3521,9 +3624,13 @@ async def auto_buy_loop():
                 poll = 0.5  # same fast scan cadence as 1m on every TF
                 if agent.is_active and not agent.emergency_triggered:
                     agent.refresh_feed_health()
+                    agent.refresh_one_m_fee_budget()
                     # Warmup: scan + detect + queue immediately; fire gated inside scan_and_maybe_fire_pair.
                     # Feed-stale freeze: pause NEW detects only; keep managing open + pending fires.
-                    frozen = bool(agent.connectivity_frozen)
+                    frozen = bool(agent.connectivity_frozen) or (
+                        getattr(agent, "one_m_fee_hold", False)
+                        and str(timeframe_key).lower() == "1m"
+                    )
                     pairs = list(agent.get_scan_pairs())
                     pending_first = [p for p in pairs if p in PENDING_ENTRY_SIGNALS]
                     rest = [] if frozen else [p for p in pairs if p not in PENDING_ENTRY_SIGNALS]
@@ -4734,6 +4841,7 @@ async def portfolio_feed(websocket: WebSocket):
                 "warmup_total_sec": ENGINE_WARMUP_SEC,
                 "boot_intro_sec": ENGINE_BOOT_INTRO_SEC,
                 "boot_analysis_sec": ENGINE_BOOT_ANALYSIS_SEC,
+                "one_m_fee_hold": bool(getattr(agent, "one_m_fee_hold", False)),
                 "portfolio_drop_pct": round(portfolio_drop, 2),
                 "is_active": agent.is_active,
                 "timeframe_seconds": agent.timeframe_seconds,

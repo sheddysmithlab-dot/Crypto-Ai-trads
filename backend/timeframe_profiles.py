@@ -6,7 +6,7 @@ from __future__ import annotations
 
 # Keys match SECONDS_TO_TIMEFRAME_KEY / chart UI (1m, 5m, …).
 TIMEFRAME_PROFILES: dict[str, dict] = {
-    "1m": {"win_rate": 30, "lose_rate": 70, "capital_pct": 3.0},
+    "1m": {"win_rate": 30, "lose_rate": 70, "capital_pct": 1.5},
     "5m": {"win_rate": 50, "lose_rate": 50, "capital_pct": 7.0},
     "15m": {"win_rate": 60, "lose_rate": 40, "capital_pct": 10.0},
     "1h": {"win_rate": 70, "lose_rate": 30, "capital_pct": 15.0},

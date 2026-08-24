@@ -28,7 +28,7 @@ THR_BREAK_ATR = 0.10
 THR_BALANCED = 0.05
 THR_SCORE = 65.0  # default floor (15m / 1h / 1d)
 THR_SCORE_5M = 70.0  # 5m confidence floor
-THR_SCORE_1M = 80.0  # 1m confidence floor — AI YES only at/above this
+THR_SCORE_1M = 85.0  # 1m only — stricter so fewer fee-burning marginal fires
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
 
