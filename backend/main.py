@@ -635,7 +635,9 @@ AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path lock/trail profit + protective SL (s
 INVERT_AUTO_TRADE_FIRE = False
 # Profit book (gross %, LONG/SHORT symmetric):
 #   Default: +0.50% first LOCK; trail 0.10% → floor +0.40%; then +0.20 steps / 0.20 trail.
-#   1m only: +0.65% first LOCK (fee-clear); same 0.10 first trail → floor +0.55%.
+#   1m dual lock:
+#     (1) +0.50% → trail 0.10% → floor +0.40%  (same as other TFs while under +0.65%)
+#     (2) +0.65%+ → fee-pack lock; trail 0.10% → floor +0.55%; then +0.20 steps / 0.20 trail
 PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.50"))
 PROFIT_LOCK_PCT_1M = float(os.environ.get("PROFIT_LOCK_PCT_1M", "0.65"))
 PROFIT_LOCK_STEP_PCT = float(os.environ.get("PROFIT_LOCK_STEP_PCT", "0.20"))
@@ -1564,7 +1566,7 @@ class AITradingAgent:
             "entry_pattern": ENTRY_PATTERN_NAME,
             # Path SL + profit lock/trail state (auto):
             #   SL --- → −0.5%; SL -+-+ → −0.7%
-            #   Profit: +0.50% lock (trail 0.10→floor 0.40); above +0.20 steps trail 0.20
+            #   Profit: +0.50% lock (trail 0.10→floor 0.40); 1m also +0.65→floor 0.55 then +0.20
             "path_last_gross_pct": 0.0,
             "path_adverse_streak": 0,
             "path_favorable_streak": 0,
@@ -1573,19 +1575,14 @@ class AITradingAgent:
             "path_continuous_dump": False,
             "path_continuous_run": False,
             "profit_lock": False,
-            "profit_lock_level": None,  # ratchet: 0.50 → 0.70 → 0.90 …
+            "profit_lock_level": None,  # ratchet: 0.50 → (1m: 0.65) → +0.20 …
             "loss_protect": False,
             "loss_adverse_extreme_gross": None,  # worst trough after protect (most negative)
             "loss_recovery_peak_gross": None,    # best recovery after trough
             "loss_adverse_extreme_price": None,
             "loss_recovery_peak_price": None,
             "path_sl_pct": LOSS_PROTECT_PCT,
-            "path_tp_pct": (
-                PROFIT_LOCK_PCT_1M
-                if str(timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")).lower()
-                == "1m"
-                else PROFIT_LOCK_PCT
-            ),
+            "path_tp_pct": PROFIT_LOCK_PCT,
         }
         self.trades.append(trade)
         self.set_pair_mark(trade_pair, filled_price)
@@ -1876,7 +1873,7 @@ class AITradingAgent:
         # Never widen permitted risk for choppy — UI SL stays at protect level
         trade["path_sl_pct"] = LOSS_PROTECT_PCT
 
-        # Profit step-lock UI (1m first lock higher for fee-clear)
+        # Profit step-lock UI (1m: 0.50 then fee-pack 0.65+)
         lock_start = self._profit_lock_start_pct(trade)
         if gross_pct >= lock_start:
             self._ratchet_profit_lock_level(trade, gross_pct)
@@ -1938,31 +1935,59 @@ class AITradingAgent:
                 trade["tp_price"] = tp
 
     def _profit_lock_start_pct(self, trade: dict | None = None) -> float:
-        """First profit-lock level: 1m uses higher fee-clear floor; other TFs unchanged."""
-        tf = str((trade or {}).get("timeframe_key") or "").strip().lower()
-        if tf == "1m":
-            return float(PROFIT_LOCK_PCT_1M)
+        """First profit-lock level (+0.50%) for all TFs including 1m."""
         return float(PROFIT_LOCK_PCT)
 
+    def _is_1m_trade(self, trade: dict | None = None) -> bool:
+        return str((trade or {}).get("timeframe_key") or "").strip().lower() == "1m"
+
     def _profit_giveback_for_lock(self, lock_lvl: float, trade: dict | None = None) -> float:
-        """First lock: 0.10% giveback. Higher locks: 0.20%."""
+        """Giveback band for the active lock level.
+
+        Default / 1m under fee-pack: first lock (+0.50) → 0.10% giveback (floor +0.40).
+        1m fee-pack lock (+0.65): also 0.10% giveback (floor +0.55).
+        Higher stepped locks (+0.85…): 0.20% giveback.
+        """
+        lvl = float(lock_lvl)
+        if self._is_1m_trade(trade):
+            fee_lock = float(PROFIT_LOCK_PCT_1M)
+            # Both 0.50 and 0.65 use the tight first trail on 1m.
+            if lvl <= fee_lock + 1e-9:
+                return float(PROFIT_TRAIL_FIRST_GIVEBACK_PCT)
+            return float(PROFIT_TRAIL_GIVEBACK_PCT)
         start = self._profit_lock_start_pct(trade)
-        if float(lock_lvl) <= float(start) + 1e-9:
+        if lvl <= float(start) + 1e-9:
             return float(PROFIT_TRAIL_FIRST_GIVEBACK_PCT)
         return float(PROFIT_TRAIL_GIVEBACK_PCT)
 
     def _ratchet_profit_lock_level(self, trade: dict, gross_pct: float) -> float:
-        """Step profit locks from TF first-lock → +step → … (never move lock backward)."""
+        """Step profit locks; never move lock backward.
+
+        Other TFs: 0.50 → 0.70 → 0.90 …
+        1m dual:   0.50 (while < 0.65) → 0.65 → 0.85 → 1.05 …
+        """
         trade["profit_lock"] = True
         start = self._profit_lock_start_pct(trade)
         step = float(PROFIT_LOCK_STEP_PCT)
         if step <= 0:
             step = 0.20
-        # Highest step level reached that is <= current gross
-        n = int((float(gross_pct) - start + 1e-12) // step)
-        if n < 0:
-            n = 0
-        level = start + n * step
+        g = float(gross_pct)
+
+        if self._is_1m_trade(trade):
+            fee_lock = float(PROFIT_LOCK_PCT_1M)
+            if g + 1e-12 >= fee_lock:
+                n = int((g - fee_lock + 1e-12) // step)
+                if n < 0:
+                    n = 0
+                level = fee_lock + n * step
+            else:
+                level = start  # +0.50 while still under fee-pack lock
+        else:
+            n = int((g - start + 1e-12) // step)
+            if n < 0:
+                n = 0
+            level = start + n * step
+
         prev = trade.get("profit_lock_level")
         if prev is None or level > float(prev) + 1e-9:
             trade["profit_lock_level"] = float(level)
@@ -2039,14 +2064,14 @@ class AITradingAgent:
         """Single path-exit engine: stepped profit locks + best-recovery trail (no parallel engine).
 
         Priority on every mark: (1) EMERGENCY −0.70% (2) PROFIT STEP-LOCK/EXIT (3) LOSS LOCK/RECOVERY.
-        Profit: +0.50% first lock (giveback 0.10% → floor +0.40%); then +0.70/+0.90…
-              with giveback 0.20%; EXIT when lock − current ≥ giveback for that lock.
+        Profit: +0.50% first lock (giveback 0.10% → floor +0.40%); then stepped locks.
+        1m dual: +0.50→floor +0.40 while under +0.65; at/above +0.65 fee-pack lock
+              (giveback 0.10% → floor +0.55%); then +0.85/+1.05… with giveback 0.20%.
         Loss: −0.50% → LOCK (hold); track best_recovery (never moves backward);
               EXIT when best_recovery − current ≥ 0.20%;
               if gross recovers to −0.20% or better → CLEAR lock (re-arm later at −0.50%);
               emergency −0.70%.
         LONG/SHORT symmetric on gross %. Fees stay out of the trigger.
-        1m trades use a higher first profit lock (PROFIT_LOCK_PCT_1M) so winners clear RT fees.
         """
         trade.pop("_exit_fill_mark", None)
         entry = float(trade.get("entry") or 0)
@@ -2086,7 +2111,7 @@ class AITradingAgent:
                 f"floor=−{LOSS_EMERGENCY_PCT:g}% mark={mark:.6f} entry={entry:.6f}"
             )
 
-        # 2) Profit step-locks (1m starts higher for fee-clear)
+        # 2) Profit step-locks (1m: 0.50 then fee-pack 0.65+)
         if gross_pct >= lock_start:
             self._ratchet_profit_lock_level(trade, gross_pct)
 
@@ -2097,11 +2122,18 @@ class AITradingAgent:
             if lock_giveback >= giveback_need - 1e-9:
                 fill_at = lock_lvl - giveback_need
                 _arm_paper_fill(fill_at)
+                fee_note = ""
+                if self._is_1m_trade(trade):
+                    fee_note = (
+                        f" 1m dual: +{PROFIT_LOCK_PCT:g}→+{PROFIT_LOCK_PCT - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g} "
+                        f"then +{PROFIT_LOCK_PCT_1M:g}→+{PROFIT_LOCK_PCT_1M - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g};"
+                    )
                 return (
                     f"PROFIT_LOCK_EXIT | {side} upper_lock={lock_lvl:.3f}% now={gross_pct:.3f}% "
                     f"giveback={lock_giveback:.3f}%≥{giveback_need:g}% "
                     f"(first@{lock_start:g}% trail {PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}% "
-                    f"→ floor +{lock_start - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%; "
+                    f"→ floor +{lock_start - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%;"
+                    f"{fee_note} "
                     f"above trail {PROFIT_TRAIL_GIVEBACK_PCT:g}%) "
                     f"mark={mark:.6f} entry={entry:.6f}"
                 )
@@ -3073,6 +3105,7 @@ def agent_policy_summary() -> str:
         "CANDLESTICK BRAIN + path exit | "
         f"profit LOCK +{PROFIT_LOCK_PCT:g}% trail−{PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}% "
         f"(floor +{PROFIT_LOCK_PCT - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%); "
+        f"1m also +{PROFIT_LOCK_PCT_1M:g}%→floor +{PROFIT_LOCK_PCT_1M - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%; "
         f"above steps +{PROFIT_LOCK_STEP_PCT:g} trail−{PROFIT_TRAIL_GIVEBACK_PCT:g}% | "
         f"loss PROTECT −{LOSS_PROTECT_PCT:g}% then recovery−{LOSS_RECOVERY_RETRACE_PCT:g}% "
         f"(clear lock @−{LOSS_LOCK_CLEAR_PCT:g}%+, emerg −{LOSS_EMERGENCY_PCT:g}%) | "
@@ -3396,11 +3429,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             tp_price = round(float(brain_tp), price_decimals_for_mark(mark_px))
             exit_label = f"brain SL={sl_price} TP={tp_price}"
         else:
-            lock_pct = (
-                PROFIT_LOCK_PCT_1M
-                if (timeframe_key or "").strip().lower() == "1m"
-                else PROFIT_LOCK_PCT
-            )
+            lock_pct = PROFIT_LOCK_PCT
             sl_price, tp_price = agent._fixed_exit_prices(
                 float(mark_px), side, loss_pct=LOSS_PROTECT_PCT, profit_pct=lock_pct
             )

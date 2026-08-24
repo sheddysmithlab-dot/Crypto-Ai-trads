@@ -7,7 +7,7 @@ const SECTIONS = [
       'Brain patterns + structure traps + order-flow trap (1M exec / 5M bias) → AI BUY/SELL/HOLD.',
       'Pattern scan uses the last closed candle; trade fires at the next candle open. First detect per pair is skipped.',
       'Size by TF capital %: 1m 1.5% · 5m 7% · 15m 10% · 1h 15% · 1D 20%.',
-      '1m fee pack: OF≥85, profit lock +0.65%, max 3 concurrent per chart, 5-bar spacing, fee-budget hold.',
+      '1m fee pack: OF≥85, dual profit lock +0.50→+0.40 then +0.65→+0.55, max 3 concurrent per chart, 5-bar spacing, fee-budget hold.',
     ],
   },
   {
@@ -21,9 +21,9 @@ const SECTIONS = [
   {
     title: 'Take-profit (per trade)',
     items: [
-      'Continuous run +++ (clean climb) → hold past +0.50%, book at +0.70%.',
-      'Choppy path -+-+ (dip while in profit) → book at +0.50%.',
-      'Hard ceiling always +0.70%.',
+      '1m dual lock: +0.50%→exit floor +0.40%; if run continues, +0.65%→floor +0.55%; then +0.20 steps.',
+      'Other TFs: +0.50% lock → floor +0.40%; then +0.20 steps / 0.20 trail.',
+      'Hard ceiling not fixed — stepped locks keep trailing while trend runs.',
     ],
   },
   {
