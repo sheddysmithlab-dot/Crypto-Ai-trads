@@ -59,7 +59,7 @@ export default function Header({
               : tfMovePct.toFixed(2)
         }%`
       : '--';
-  const tfMoveTitle = `24h High/Low → avg % · ${formatTfMoveLabel(chartTimeframe, tfMoveLabel)}`;
+  const tfMoveTitle = `Lookback High/Low → avg % · ${formatTfMoveLabel(chartTimeframe, tfMoveLabel)}`;
 
   return (
     <header className="bg-lightCard dark:bg-darkCard shadow-md px-3 py-2 flex justify-between items-center sticky top-0 z-50 shrink-0 border-b border-gray-200 dark:border-gray-800 gap-2">

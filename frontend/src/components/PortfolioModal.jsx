@@ -149,7 +149,7 @@ export default function PortfolioModal({
               <span className="text-gray-400 font-normal">--</span>
             )}
           </StatCell>
-          <StatCell label={`Market ${chartTimeframe}`} tip={`24h High/Low range → avg % for ${chartTimeframe} (${tfMoveTitle}).`}>
+          <StatCell label={`Market ${chartTimeframe}`} tip={`Lookback High/Low → avg % for ${chartTimeframe} (${tfMoveTitle}).`}>
             <span
               className={tfMovePct == null ? 'text-gray-400' : tfMoveUp ? 'text-green-500' : 'text-red-500'}
               >

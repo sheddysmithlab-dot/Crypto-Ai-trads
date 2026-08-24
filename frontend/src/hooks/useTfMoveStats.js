@@ -4,19 +4,24 @@ import { authFetch } from '../config/api';
 const REFRESH_MS = 30000;
 
 const WINDOW_LABELS = {
-  '1hr': '1hr move',
-  '2hr': '2hr move',
-  '1Day': '1Day move',
-  '7Day': '7Day move',
+  '1h avg': '1h avg',
+  '4h avg': '4h avg',
+  '10h avg': '10h avg',
   '24h avg': '24h avg',
+  '7d avg': '7d avg',
+  // legacy keys
+  '1hr': '1h avg',
+  '2hr': '2hr move',
+  '1Day': '24h avg',
+  '7Day': '7d avg',
 };
 
 export function formatTfMoveLabel(timeframe, windowLabel) {
-  const win = WINDOW_LABELS[windowLabel] || windowLabel || '24h avg';
+  const win = WINDOW_LABELS[windowLabel] || windowLabel || 'avg';
   return `${timeframe || '1M'} · ${win}`;
 }
 
-/** 24h High/Low → avg % move for active TF bar (always magnitude ≥ 0). */
+/** Lookback High/Low → avg % for active TF bar (1h/4h/10h/24h/7d). */
 export function useTfMoveStats(pairLabel, timeframe) {
   const [stats, setStats] = useState({
     avgPct: null,
@@ -51,7 +56,7 @@ export function useTfMoveStats(pairLabel, timeframe) {
           avgPct: displayPct,
           totalPct: displayPct,
           displayPct,
-          windowLabel: data.window_label || '24h avg',
+          windowLabel: data.window_label || null,
           candleCount: Number(data.candle_count) || 0,
         });
       } catch (err) {

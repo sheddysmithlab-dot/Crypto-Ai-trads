@@ -158,7 +158,7 @@ export default function ChartPanel({
           className={`font-black normal-case tracking-normal ${
             tfMovePct == null ? 'text-gray-400' : tfMoveUp ? 'text-green-500' : 'text-red-500'
           }`}
-          title={`24h High/Low → avg % for ${timeframe} · ${formatTfMoveLabel(timeframe, tfMoveLabel)}`}
+          title={`Lookback High/Low → avg % for ${timeframe} · ${formatTfMoveLabel(timeframe, tfMoveLabel)}`}
         >
           {tfMovePct != null
             ? `${tfMoveUp ? '+' : ''}${
