@@ -1439,14 +1439,10 @@ class AITradingAgent:
                 print(f"[PILLAR 3: AI AGENT] {self.last_open_skip_reason}.")
                 return None
 
-        # AI Agent Instructions modal: cap stacked positions at max_concurrent_trades.
-        # 1m fee pack: also hard-cap concurrent opens.
-        max_open = effective_max_concurrent_trades(self)
-        if len(self.trades) >= max_open:
-            self.last_open_skip_reason = (
-                f"Max concurrent trades ({max_open}) reached — "
-                f"new entry skipped on {trade_pair}"
-            )
+        # AI Agent Instructions: global max_concurrent; 1m also caps per pair/chart.
+        blocked = concurrent_entry_blocked(self, trade_pair)
+        if blocked:
+            self.last_open_skip_reason = f"{blocked} — new entry skipped on {trade_pair}"
             notifications.push(self.last_open_skip_reason + ".", "info")
             return None
 
@@ -2779,7 +2775,7 @@ PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
 # 1m only: last auto fire candle open-time per pair (blocks fires after a gap).
 LAST_AUTO_FIRE_CANDLE_MS: dict[str, int] = {}
 ONE_M_MIN_BARS_BETWEEN_FIRES = 5  # fire on N → next fire earliest N+5 (was 3)
-ONE_M_MAX_CONCURRENT = 3  # hard cap while chart TF is 1m (fee control)
+ONE_M_MAX_CONCURRENT = 3  # hard cap PER PAIR while chart TF is 1m (fee control)
 # Hold new 1m entries when broker fees eat the session book.
 ONE_M_FEE_BUDGET_RATIO = 0.45  # fees ≥ 45% of positive gross → hold
 ONE_M_FEE_HOLD_MIN_CLOSED = 3  # need at least this many round-trips
@@ -3110,13 +3106,42 @@ def price_decimals_for_mark(price: float) -> int:
     return 8
 
 
+def count_open_trades_for_pair(agent, pair: str) -> int:
+    want = (pair or "").strip().upper()
+    if not want:
+        return 0
+    return sum(
+        1
+        for t in (getattr(agent, "trades", None) or [])
+        if (t.get("pair") or "").strip().upper() == want
+    )
+
+
 def effective_max_concurrent_trades(agent) -> int:
-    """User max_concurrent, with a hard 1m fee-pack cap."""
-    base = max(1, int(getattr(agent, "max_concurrent_trades", 1) or 1))
-    tf = str(SECONDS_TO_TIMEFRAME_KEY.get(getattr(agent, "timeframe_seconds", 60), "1m")).strip().lower()
+    """Global user max (AI Instructions). 1m per-pair cap is separate — see concurrent_entry_blocked."""
+    return max(1, int(getattr(agent, "max_concurrent_trades", 1) or 1))
+
+
+def concurrent_entry_blocked(agent, pair: str) -> str | None:
+    """Skip reason if a new entry would exceed global and/or 1m-per-chart caps; else None.
+
+    1m fee pack: max ONE_M_MAX_CONCURRENT open trades **per pair/chart**, not globally.
+    Other TFs: only the user global max_concurrent_trades applies.
+    """
+    max_open = effective_max_concurrent_trades(agent)
+    if len(getattr(agent, "trades", None) or []) >= max_open:
+        return f"Max concurrent trades ({max_open}) reached"
+    tf = str(
+        SECONDS_TO_TIMEFRAME_KEY.get(getattr(agent, "timeframe_seconds", 60), "1m")
+    ).strip().lower()
     if tf == "1m":
-        return min(base, ONE_M_MAX_CONCURRENT)
-    return base
+        n = count_open_trades_for_pair(agent, pair)
+        if n >= ONE_M_MAX_CONCURRENT:
+            return (
+                f"Max concurrent on {pair} ({ONE_M_MAX_CONCURRENT}/chart) reached "
+                f"({n} open on this pair)"
+            )
+    return None
 
 
 def auto_trade_capital_pct_for_agent(agent) -> float:
@@ -3326,11 +3351,11 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         # just because an opposite signal fired). Opposite side may still open if capacity allows.
         # agent.close_opposite_positions_for_flip(side, pair, pattern=detect.get("pattern"))
 
-        if len(agent.trades) >= effective_max_concurrent_trades(agent):
+        blocked = concurrent_entry_blocked(agent, pair)
+        if blocked:
             return await _skip_pending(
                 pending,
-                f"Max concurrent trades ({effective_max_concurrent_trades(agent)}) reached "
-                f"({len(agent.trades)} open; 1m cap {ONE_M_MAX_CONCURRENT})",
+                blocked,
                 fire_candle_ms=fire_candle_ms,
             )
         if agent.daily_target_reached:
@@ -3667,7 +3692,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             return False
 
     # Soft capacity checks at queue time (re-checked at fire).
-    if len(agent.trades) >= effective_max_concurrent_trades(agent):
+    blocked = concurrent_entry_blocked(agent, pair)
+    if blocked:
         _push_pattern_neon(
             pair=pair,
             candle_time_ms=close_time,
@@ -3675,7 +3701,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             side=side,
             action=detect.get("action"),
             pattern=detect.get("pattern"),
-            reason="Max concurrent trades reached",
+            reason=blocked if len(blocked) <= 48 else "Max concurrent on this chart",
         )
         return False
     if agent.daily_target_reached:
