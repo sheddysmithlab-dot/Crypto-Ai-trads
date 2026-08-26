@@ -2,7 +2,7 @@
 
 Stored under backend/data/ (Docker volume). Cleared only when the user
 explicitly calls settings reset / remove — never on browser close or redeploy.
-Secrets are never logged or returned to the frontend.
+Secrets are never logged. The UI only receives masked previews (not raw keys).
 """
 from __future__ import annotations
 

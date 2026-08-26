@@ -18,6 +18,16 @@ function LabelWithInfo({ children, tip }) {
   );
 }
 
+/** Value to POST: empty keeps the saved secret; never re-save a display mask. */
+function secretPayload(value, savedMask, dirty) {
+  const v = String(value || '').trim();
+  if (!dirty) return '';
+  if (!v) return '';
+  if (savedMask && v === savedMask) return '';
+  if (v.includes('•')) return '';
+  return v;
+}
+
 export default function SettingsModal({ open, onClose, onLiveTradingConnected }) {
   const [bybitKey, setBybitKey] = useState('');
   const [bybitSecret, setBybitSecret] = useState('');
@@ -26,8 +36,29 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
   const [aiKey, setAiKey] = useState('');
   const [aiModel, setAiModel] = useState('glm-4.5-flash');
   const [aiBaseUrl, setAiBaseUrl] = useState('https://api.z.ai/api/paas/v4');
+  const [bybitKeyMask, setBybitKeyMask] = useState('');
+  const [bybitSecretMask, setBybitSecretMask] = useState('');
+  const [aiKeyMask, setAiKeyMask] = useState('');
+  const [bybitKeyDirty, setBybitKeyDirty] = useState(false);
+  const [bybitSecretDirty, setBybitSecretDirty] = useState(false);
+  const [aiKeyDirty, setAiKeyDirty] = useState(false);
   const [banner, setBanner] = useState({ tone: 'neutral', message: 'Loading settings status...' });
   const [busy, setBusy] = useState({ save: false, testBybit: false, testAi: false, reset: false });
+
+  function applyMaskedFields(data) {
+    const keyMask = data.bybit_api_key_masked || '';
+    const secretMask = data.bybit_api_secret_masked || '';
+    const aiMask = data.ai_api_key_masked || '';
+    setBybitKeyMask(keyMask);
+    setBybitSecretMask(secretMask);
+    setAiKeyMask(aiMask);
+    setBybitKey(keyMask);
+    setBybitSecret(secretMask);
+    setAiKey(aiMask);
+    setBybitKeyDirty(false);
+    setBybitSecretDirty(false);
+    setAiKeyDirty(false);
+  }
 
   async function refreshStatus() {
     try {
@@ -43,13 +74,14 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
 
       setBanner({
         tone: 'neutral',
-        message: `${bybitLabel} | ${aiLabel}. Keys stay on VPS until you press Reset — never shown here again.`,
+        message: `${bybitLabel} | ${aiLabel}. Fields stay filled (masked) until you press Remove keys.`,
       });
 
       setBybitEnv(data.bybit_environment || 'mainnet');
       setAiProvider(data.ai_provider || 'z-ai');
       setAiModel(data.ai_model || 'glm-4.5-flash');
       setAiBaseUrl(data.ai_base_url || 'https://api.z.ai/api/paas/v4');
+      applyMaskedFields(data);
     } catch {
       setBanner({ tone: 'error', message: 'Could not load settings status. Please try again.' });
     }
@@ -61,36 +93,42 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
       setBybitKey('');
       setBybitSecret('');
       setAiKey('');
+      setBybitKeyMask('');
+      setBybitSecretMask('');
+      setAiKeyMask('');
+      setBybitKeyDirty(false);
+      setBybitSecretDirty(false);
+      setAiKeyDirty(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   if (!open) return null;
 
+  function buildSavePayload() {
+    return {
+      bybit_api_key: secretPayload(bybitKey, bybitKeyMask, bybitKeyDirty),
+      bybit_api_secret: secretPayload(bybitSecret, bybitSecretMask, bybitSecretDirty),
+      bybit_environment: bybitEnv,
+      ai_provider: aiProvider,
+      ai_api_key: secretPayload(aiKey, aiKeyMask, aiKeyDirty),
+      ai_model: aiModel.trim(),
+      ai_base_url: aiBaseUrl.trim(),
+    };
+  }
+
   async function handleSave() {
     setBusy((b) => ({ ...b, save: true }));
     try {
-      const payload = {
-        bybit_api_key: bybitKey.trim(),
-        bybit_api_secret: bybitSecret.trim(),
-        bybit_environment: bybitEnv,
-        ai_provider: aiProvider,
-        ai_api_key: aiKey.trim(),
-        ai_model: aiModel.trim(),
-        ai_base_url: aiBaseUrl.trim(),
-      };
       const res = await authFetch('/settings/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(buildSavePayload()),
       });
       const data = await res.json();
 
       if (res.ok) {
         setBanner({ tone: 'success', message: data.message });
-        setBybitKey('');
-        setBybitSecret('');
-        setAiKey('');
         await refreshStatus();
       } else {
         setBanner({ tone: 'error', message: data.message || 'Failed to save settings.' });
@@ -108,15 +146,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
       const saveRes = await authFetch('/settings/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          bybit_api_key: bybitKey.trim(),
-          bybit_api_secret: bybitSecret.trim(),
-          bybit_environment: bybitEnv,
-          ai_provider: aiProvider,
-          ai_api_key: aiKey.trim(),
-          ai_model: aiModel.trim(),
-          ai_base_url: aiBaseUrl.trim(),
-        }),
+        body: JSON.stringify(buildSavePayload()),
       });
       if (!saveRes.ok) {
         const saveData = await saveRes.json().catch(() => ({}));
@@ -134,6 +164,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
         setBanner({ tone: 'success', message: `${data.message} ${connectData.message}` });
         onLiveTradingConnected?.();
       }
+      await refreshStatus();
     } catch {
       setBanner({ tone: 'error', message: 'Could not test Bybit. Please try again.' });
     } finally {
@@ -173,6 +204,12 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
       setAiKey('');
       setAiModel('glm-4.5-flash');
       setAiBaseUrl('https://api.z.ai/api/paas/v4');
+      setBybitKeyMask('');
+      setBybitSecretMask('');
+      setAiKeyMask('');
+      setBybitKeyDirty(false);
+      setBybitSecretDirty(false);
+      setAiKeyDirty(false);
       setBanner({ tone: 'info', message: data.message });
     } catch {
       setBanner({ tone: 'error', message: 'Could not reset settings. Please try again.' });
@@ -207,32 +244,50 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
           <div>
             <div className="mb-3 flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-blue-400">
               Bybit API
-              <InfoTip text="Required for live trading. Paste once, Save + Test Bybit. Keys stay on the VPS until you press Reset." />
+              <InfoTip text="Paste once, Save + Test. Fields stay filled (masked) after refresh until you press Remove keys." />
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <LabelWithInfo tip="Your Bybit public API key. Leave blank to keep the key already saved on the server.">
+                <LabelWithInfo tip="Saved key stays filled as a mask after refresh. Focus and type to replace it.">
                   API Key
                 </LabelWithInfo>
                 <input
                   type="password"
                   autoComplete="off"
-                  placeholder="Leave blank to keep saved key"
+                  placeholder={bybitKeyMask ? 'Saved on server' : 'Paste Bybit API key'}
                   value={bybitKey}
-                  onChange={(e) => setBybitKey(e.target.value)}
+                  onFocus={() => {
+                    if (!bybitKeyDirty && bybitKeyMask && bybitKey === bybitKeyMask) {
+                      setBybitKey('');
+                      setBybitKeyDirty(true);
+                    }
+                  }}
+                  onChange={(e) => {
+                    setBybitKeyDirty(true);
+                    setBybitKey(e.target.value);
+                  }}
                   className="w-full bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
                 />
               </div>
               <div>
-                <LabelWithInfo tip="Your Bybit secret key. Leave blank to keep the secret already saved on the server.">
+                <LabelWithInfo tip="Saved secret stays filled as a mask after refresh. Focus and type to replace it.">
                   API Secret
                 </LabelWithInfo>
                 <input
                   type="password"
                   autoComplete="off"
-                  placeholder="Leave blank to keep saved secret"
+                  placeholder={bybitSecretMask ? 'Saved on server' : 'Paste Bybit API secret'}
                   value={bybitSecret}
-                  onChange={(e) => setBybitSecret(e.target.value)}
+                  onFocus={() => {
+                    if (!bybitSecretDirty && bybitSecretMask && bybitSecret === bybitSecretMask) {
+                      setBybitSecret('');
+                      setBybitSecretDirty(true);
+                    }
+                  }}
+                  onChange={(e) => {
+                    setBybitSecretDirty(true);
+                    setBybitSecret(e.target.value);
+                  }}
                   className="w-full bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
                 />
               </div>
@@ -283,15 +338,24 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
                 </select>
               </div>
               <div>
-                <LabelWithInfo tip="Paste your AI provider API key. Leave blank to keep a key already saved.">
+                <LabelWithInfo tip="Saved AI key stays filled (masked) after refresh until Remove keys.">
                   AI API key
                 </LabelWithInfo>
                 <input
                   type="password"
                   autoComplete="off"
-                  placeholder="Paste AI API key"
+                  placeholder={aiKeyMask ? 'Saved on server' : 'Paste AI API key'}
                   value={aiKey}
-                  onChange={(e) => setAiKey(e.target.value)}
+                  onFocus={() => {
+                    if (!aiKeyDirty && aiKeyMask && aiKey === aiKeyMask) {
+                      setAiKey('');
+                      setAiKeyDirty(true);
+                    }
+                  }}
+                  onChange={(e) => {
+                    setAiKeyDirty(true);
+                    setAiKey(e.target.value);
+                  }}
                   className="w-full bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
                 />
               </div>

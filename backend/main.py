@@ -317,17 +317,38 @@ class SettingsStore:
     def is_ai_configured(self):
         return self.ai_provider != "none" and bool(self.ai_api_key)
 
+    @staticmethod
+    def _mask_key(value: str, *, show_tail: int = 4) -> str:
+        """Display-only mask — never return the full secret."""
+        raw = (value or "").strip()
+        if not raw:
+            return ""
+        if show_tail <= 0 or len(raw) <= show_tail:
+            return "•" * max(8, len(raw))
+        return ("•" * max(8, len(raw) - show_tail)) + raw[-show_tail:]
+
+    @staticmethod
+    def _mask_secret(value: str) -> str:
+        raw = (value or "").strip()
+        if not raw:
+            return ""
+        # No tail for secrets — just a filled-looking static mask.
+        return "•" * max(12, min(24, len(raw)))
+
     def status_dict(self):
-        # Deliberately excludes raw key/secret values
+        # Raw secrets never leave the server; masked previews keep the form looking filled.
         return {
             "bybit_configured": self.is_bybit_configured(),
             "bybit_environment": self.bybit_environment,
             "bybit_persisted": self.is_bybit_configured(),
+            "bybit_api_key_masked": self._mask_key(self.bybit_api_key) if self.bybit_api_key else "",
+            "bybit_api_secret_masked": self._mask_secret(self.bybit_api_secret) if self.bybit_api_secret else "",
             "live_trading_preferred": bool(self.live_trading_preferred),
             "ai_provider": self.ai_provider,
             "ai_model": self.ai_model,
             "ai_base_url": self.ai_base_url,
             "ai_configured": self.is_ai_configured(),
+            "ai_api_key_masked": self._mask_key(self.ai_api_key) if self.ai_api_key else "",
             "taapi_configured": is_taapi_configured(),
             "taapi_paused": TAAPI_PAUSED,
             "taapi_exchange": get_taapi_exchange(),
@@ -4253,11 +4274,13 @@ async def start_background_tasks():
             )
     except Exception as exc:
         print(f"[ENGINE RUNTIME] startup restore note: {exc}")
-    # Restore Bybit live mode if user previously connected (keys persist on disk).
+    # Restore Bybit LIVE mode if keys are on disk (keys = LIVE, no keys = PAPER).
     try:
-        if settings_store.is_bybit_configured() and settings_store.live_trading_preferred:
+        if settings_store.is_bybit_configured():
             bybit_api.mode = "LIVE_TRADING"
             bybit_api.connected = True
+            settings_store.live_trading_preferred = True
+            _persist_live_trading(True)
             print(
                 f"[SETTINGS] Restoring LIVE_TRADING "
                 f"({settings_store.bybit_environment}) from saved Bybit keys."
@@ -4267,11 +4290,8 @@ async def start_background_tasks():
                 "warning",
             )
             asyncio.create_task(bybit_api.fetch_real_balance())
-        elif settings_store.is_bybit_configured():
-            print(
-                f"[SETTINGS] Bybit keys on disk ({settings_store.bybit_environment}) — "
-                "paper mode until you Test/Connect again (or keys were saved without live)."
-            )
+        else:
+            print("[SETTINGS] No Bybit keys on disk — PAPER trading mode.")
     except Exception as exc:
         print(f"[SETTINGS] Bybit restore note: {exc}")
     asyncio.create_task(market_simulator())
@@ -5141,12 +5161,49 @@ async def save_settings(payload: SettingsPayload):
     # Log only that credentials were updated - never the raw values
     print(f"[SETTINGS] Bybit credentials {'updated' if payload.bybit_api_key else 'unchanged'} "
           f"(env={settings_store.bybit_environment}). AI provider set to '{settings_store.ai_provider}'.")
+
+    # AUTO-SWITCH: keys present → LIVE trading; keys absent → PAPER trading
+    if settings_store.is_bybit_configured():
+        if bybit_api.mode != "LIVE_TRADING":
+            bybit_api.connect_real_api()
+            equity = await bybit_api.fetch_real_balance()
+            if equity is not None:
+                agent.on_live_connected(equity)
+                return {
+                    "status": "success",
+                    "trading_mode": "LIVE_TRADING",
+                    "equity": equity,
+                    "message": (
+                        f"Keys saved → LIVE trading ACTIVE ({settings_store.bybit_environment}). "
+                        f"Balance: ${equity:,.2f}. Keys stay until you Remove them."
+                    ),
+                }
+            return {
+                "status": "success",
+                "trading_mode": "LIVE_TRADING",
+                "message": (
+                    "Keys saved → LIVE trading ACTIVE, but balance sync failed. "
+                    f"Error: {bybit_api.last_error or 'unknown'}. Keys stay until you Remove them."
+                ),
+            }
+        # Already LIVE — just refresh balance
+        equity = await bybit_api.fetch_real_balance()
+        return {
+            "status": "success",
+            "trading_mode": "LIVE_TRADING",
+            "equity": equity,
+            "message": (
+                f"Settings saved. LIVE trading ({settings_store.bybit_environment}). "
+                f"Balance: ${equity:,.2f}." if equity is not None else
+                "Settings saved. LIVE trading active (balance sync pending)."
+            ),
+        }
+    # No keys → PAPER
+    bybit_api.disconnect_real_api(reason="No Bybit keys saved")
     return {
         "status": "success",
-        "message": (
-            "Settings saved on server. Bybit keys stay until you press Reset — "
-            "browser close / redeploy will not remove them."
-        ),
+        "trading_mode": "PAPER_TRADING",
+        "message": "Settings saved. No Bybit keys → PAPER trading mode.",
     }
 
 @app.post("/settings/test-bybit")
@@ -5188,11 +5245,13 @@ async def test_ai_connection():
 @app.post("/settings/reset")
 async def reset_settings():
     settings_store.reset()
-    bybit_api.disconnect_real_api(reason="Settings reset")
-    print("[SETTINGS] All stored Bybit & AI settings have been reset (disk cleared).")
+    reset_bybit_executor_agent()
+    bybit_api.disconnect_real_api(reason="Settings reset — keys removed")
+    print("[SETTINGS] All stored Bybit & AI settings have been reset (disk cleared). PAPER trading mode.")
     return {
         "status": "success",
-        "message": "Saved Bybit/AI keys removed. Add them again anytime.",
+        "trading_mode": "PAPER_TRADING",
+        "message": "Bybit keys removed → PAPER trading mode. Add keys again anytime to go LIVE.",
     }
 
 # ==========================================
