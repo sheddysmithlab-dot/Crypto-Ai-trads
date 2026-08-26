@@ -94,6 +94,38 @@ class BybitAgent:
             self.last_error = str(exc)
             return None
 
+    def fetch_linear_open_positions(self) -> list[dict] | None:
+        """All open USDT-linear positions (size > 0). None on API failure."""
+        try:
+            resp = self.session.get_positions(category="linear", settleCoin="USDT")
+        except Exception as exc:
+            print(f"[BYBIT] list positions failed: {exc}")
+            self.last_error = str(exc)
+            return None
+        if not isinstance(resp, dict) or resp.get("retCode", 0) != 0:
+            print(f"[BYBIT] list positions error: {resp}")
+            self.last_error = (resp or {}).get("retMsg") if isinstance(resp, dict) else "positions error"
+            return None
+        out = []
+        for row in (resp.get("result") or {}).get("list") or []:
+            try:
+                size = float(row.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0.0
+            if size <= 0:
+                continue
+            out.append(
+                {
+                    "symbol": (row.get("symbol") or "").strip(),
+                    "side": (row.get("side") or "").strip(),  # Buy / Sell
+                    "size": size,
+                    "positionIdx": row.get("positionIdx"),
+                    "avgPrice": row.get("avgPrice"),
+                    "unrealisedPnl": row.get("unrealisedPnl"),
+                }
+            )
+        return out
+
     @staticmethod
     def _auto_price_decimals(price):
         """ Rough price-precision guess from magnitude alone - a stand-in for

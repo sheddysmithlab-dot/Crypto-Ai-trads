@@ -484,8 +484,10 @@ class BybitAPIWrapper:
         # Real Bybit account equity (USD), refreshed in the background while LIVE_TRADING.
         # None until the first successful fetch - callers fall back to paper capital until then.
         self.last_known_balance = None
+        self.last_known_available = None  # UNIFIED totalAvailableBalance when present
         self.last_error = None
         self._was_failing = False
+        self._last_fee_sync_ts = 0.0
 
     def connect_real_api(self):
         self.mode = "LIVE_TRADING"
@@ -639,9 +641,16 @@ class BybitAPIWrapper:
 
             account_list = data.get("result", {}).get("list", [])
             if account_list:
-                equity = float(account_list[0].get("totalEquity", 0))
+                acct0 = account_list[0]
+                equity = float(acct0.get("totalEquity", 0))
                 total_equity += equity
                 found_any = True
+                try:
+                    avail = acct0.get("totalAvailableBalance")
+                    if avail is not None and str(avail) != "":
+                        self.last_known_available = float(avail)
+                except (TypeError, ValueError):
+                    pass
 
             # --- FUNDING: /v5/asset/wallet-balance (different endpoint, per-coin) ---
             try:
@@ -673,6 +682,11 @@ class BybitAPIWrapper:
             self.last_error = None
             if self.mode == "LIVE_TRADING":
                 agent.current_capital = total_equity
+            # Sync live taker fee tier ( thrrottle ~5 min ) so broker-fee estimates match account.
+            try:
+                await self._sync_taker_fee_rate()
+            except Exception as fee_exc:
+                print(f"[BYBIT] fee-rate sync note: {fee_exc}")
             if self._was_failing:
                 notifications.push("Bybit connection restored - live balance is syncing again.", "success")
             self._was_failing = False
@@ -682,6 +696,44 @@ class BybitAPIWrapper:
             self.last_error = f"Bybit request failed: {exc}"
             self._note_failure()
             return None
+
+    async def _sync_taker_fee_rate(self, symbol: str = "BTCUSDT") -> None:
+        """Pull account linear taker fee from Bybit and store as percent (0.055 = 0.055%)."""
+        now = time.time()
+        if now - float(self._last_fee_sync_ts or 0) < 300:
+            return
+        if not settings_store.is_bybit_configured():
+            return
+        query_string = f"category=linear&symbol={symbol}"
+        headers = self._auth_headers(query_string)
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(
+                f"{self._base_url()}/v5/account/fee-rate?{query_string}",
+                headers=headers,
+            )
+        if resp.status_code != 200:
+            return
+        data = resp.json()
+        if data.get("retCode") != 0:
+            return
+        rows = (data.get("result") or {}).get("list") or []
+        if not rows:
+            return
+        raw = rows[0].get("takerFeeRate")
+        if raw is None or str(raw) == "":
+            return
+        # Bybit returns fraction e.g. "0.00055" → store as 0.055 (% points)
+        pct = float(raw) * 100.0
+        if pct <= 0 or pct > 1.0:
+            return
+        prev = float(self.taker_fee_pct)
+        self.taker_fee_pct = round(pct, 6)
+        self._last_fee_sync_ts = now
+        if abs(prev - self.taker_fee_pct) > 1e-6:
+            print(
+                f"[BYBIT] Live taker fee synced: {self.taker_fee_pct:g}% "
+                f"(was {prev:g}%) via {symbol}"
+            )
 
     def _note_failure(self):
         if not self._was_failing:
@@ -1222,6 +1274,7 @@ class AITradingAgent:
         exit_px = metrics.get("mark_price")
         if exit_px is None:
             exit_px = self.mark_price_for(trade.get("pair")) or trade.get("entry")
+        found = False
         for row in self.trade_history:
             if row["id"] == trade["id"]:
                 row["current"] = round(float(exit_px), price_decimals_for_mark(float(exit_px)))
@@ -1234,7 +1287,33 @@ class AITradingAgent:
                 row["status"] = "sold"
                 row["closed_reason"] = reason
                 row["closed_at"] = time.time()
+                found = True
                 break
+        if not found:
+            # Restored / orphaned open with no history row — still book the exit for UI.
+            self.trade_history.append({
+                "id": trade["id"],
+                "pair": trade.get("pair"),
+                "side": trade.get("side"),
+                "entry": trade.get("entry"),
+                "current": round(float(exit_px), price_decimals_for_mark(float(exit_px))),
+                "margin": trade.get("margin"),
+                "position_size": trade.get("position_size"),
+                "pnl": round(metrics["gross_pct"], 4),
+                "gross_pnl_pct": round(metrics["gross_pct"], 4),
+                "gross_pnl_usd": round(float(metrics.get("gross_usd") or 0), 2),
+                "net_pnl_usd": round(metrics["net_usd"], 2),
+                "entry_fee_usd": trade.get("entry_fee_usd") or 0,
+                "exit_fee_usd": round(metrics["exit_fee_usd"], 4),
+                "status": "sold",
+                "closed_reason": reason,
+                "closed_at": time.time(),
+                "source": trade.get("source", "auto"),
+                "protected": trade.get("source") == "manual",
+                "opened_at": trade.get("opened_at"),
+                "season_id": trade.get("season_id") or self.ai_season_id,
+                "exchange": trade.get("exchange"),
+            })
         try:
             trade_db.finalize_trade(
                 trade,
@@ -1373,11 +1452,73 @@ class AITradingAgent:
         )
 
     def get_available_capital(self):
-        """Free cash for the next 10% auto slot (paper ledger after open reserves)."""
+        """Free cash for the next auto slot. LIVE prefers Bybit availableBalance."""
         if bybit_api.mode == "LIVE_TRADING":
+            avail = bybit_api.last_known_available
+            if avail is not None and avail >= 0:
+                return max(0.0, float(avail))
             base = self.get_trading_capital_base()
             return max(0.0, float(base)) if base is not None else 0.0
         return max(0.0, float(self.current_capital))
+
+    def reconcile_live_positions(self) -> int:
+        """Drop local opens that no longer exist on Bybit (phantom / restart desync).
+
+        Returns number of local trades settled as already-flat.
+        """
+        if bybit_api.mode != "LIVE_TRADING" or not settings_store.is_bybit_configured():
+            return 0
+        if not self.trades:
+            return 0
+        executor = get_bybit_executor_agent()
+        if executor is None:
+            return 0
+        live_rows = executor.fetch_linear_open_positions()
+        if live_rows is None:
+            # API failure — do not wipe local book
+            return 0
+
+        live_keys = set()
+        for row in live_rows:
+            sym = (row.get("symbol") or "").upper()
+            side = (row.get("side") or "").strip()
+            if not sym or side not in ("Buy", "Sell"):
+                continue
+            live_keys.add((sym, "LONG" if side == "Buy" else "SHORT"))
+
+        settled = 0
+        still_open = []
+        for trade in list(self.trades):
+            if trade.get("exchange") == "paper":
+                still_open.append(trade)
+                continue
+            symbol = (trade.get("bybit_symbol") or get_bybit_symbol(trade.get("pair")) or "").upper()
+            side = (trade.get("side") or "").upper()
+            if not symbol or side not in ("LONG", "SHORT"):
+                still_open.append(trade)
+                continue
+            if (symbol, side) in live_keys:
+                still_open.append(trade)
+                continue
+            # Flat on exchange — finalize local book so OPEN POSITIONS / fees / capital match reality
+            m = self._trade_metrics(trade, for_close=True)
+            self._finalize_trade_history(
+                trade, m, "Bybit reconcile — position already flat on exchange"
+            )
+            settled += 1
+            print(
+                f"[RECONCILE] Cleared phantom #{trade.get('id')} {trade.get('pair')} "
+                f"{side} (not on Bybit)"
+            )
+            notifications.push(
+                f"Synced: #{trade.get('id')} {trade.get('pair')} already flat on Bybit — cleared from open list.",
+                "info",
+            )
+        if settled:
+            self.trades = still_open
+            self._sync_agent_trailing_lock_state()
+            self.persist_runtime(force=True)
+        return settled
 
     def get_trading_capital_base(self):
         """ Capital used for position sizing. LIVE -> Bybit equity; paper -> simulated ledger. """
@@ -1965,6 +2106,8 @@ class AITradingAgent:
                 )
             still_open.append(trade)
         self.trades = still_open
+        if closed_n:
+            self.persist_runtime(force=True)
         return closed_n
 
     def _fixed_exit_prices(
@@ -4256,10 +4399,16 @@ async def bybit_price_feed():
 
 
 async def bybit_balance_refresher():
-    """Keep bybit_api.last_known_balance fresh while LIVE_TRADING."""
+    """Keep LIVE equity + open-position book synced with Bybit every few seconds."""
     while True:
-        if bybit_api.mode == "LIVE_TRADING" and bybit_api.connected:
-            await bybit_api.fetch_real_balance()
+        try:
+            if bybit_api.mode == "LIVE_TRADING" and bybit_api.connected:
+                await bybit_api.fetch_real_balance()
+                n = agent.reconcile_live_positions()
+                if n:
+                    print(f"[RECONCILE] Settled {n} phantom local open(s) against Bybit.")
+        except Exception as exc:
+            print(f"[BYBIT] balance/reconcile loop note: {exc}")
         await asyncio.sleep(3)
 
 
@@ -4387,6 +4536,18 @@ async def start_background_tasks():
                 "warning",
             )
             asyncio.create_task(bybit_api.fetch_real_balance())
+
+            async def _startup_reconcile():
+                await asyncio.sleep(2.0)
+                try:
+                    await bybit_api.fetch_real_balance()
+                    n = agent.reconcile_live_positions()
+                    if n:
+                        print(f"[RECONCILE] Startup cleared {n} phantom open(s).")
+                except Exception as exc:
+                    print(f"[RECONCILE] startup note: {exc}")
+
+            asyncio.create_task(_startup_reconcile())
         else:
             # No keys → PAPER mode. Seed paper capital if not restored.
             bybit_api.mode = "PAPER_TRADING"
@@ -4786,6 +4947,7 @@ async def close_trade(payload: CloseTradePayload):
         }
     agent.trades = [t for t in agent.trades if t["id"] != payload.id]
     agent._sync_agent_trailing_lock_state()
+    agent.persist_runtime(force=True)
     return {"status": "success", "message": f"Position #{payload.id} closed at market price."}
 
 @app.post("/set-pair")
@@ -5412,11 +5574,13 @@ async def portfolio_feed(websocket: WebSocket):
             margin_in_use = sum(float(t.get("margin") or 0) for t in agent.trades)
 
             # Portfolio session counters: live during AI season / Hold-stop; frozen after Emergency.
+            # OPEN POSITIONS / TRADE VALUE always reflect the real local open book (all pairs),
+            # then Bybit reconcile keeps that book honest against the exchange.
             season_live = agent.ai_season_start_capital is not None and not agent.session_stats_frozen
             if season_live:
-                session_open = agent._session_open_trades()
-                trade_notional = sum(float(t.get("position_size") or 0) for t in session_open)
-                open_positions = len(session_open)
+                open_book = list(agent.trades)
+                trade_notional = sum(float(t.get("position_size") or 0) for t in open_book)
+                open_positions = len(open_book)
                 fee_book = agent.get_session_gross_and_fees_usd()
                 broker_fee = float(fee_book["broker_fee_usd"])
                 # Portfolio shows GROSS profit and fees separately (never net = profit − fees).
@@ -5431,8 +5595,14 @@ async def portfolio_feed(websocket: WebSocket):
                 exited_booked_usd = float(fee_book.get("closed_gross_usd") or 0)
             else:
                 snap = agent.session_stats_snapshot
-                trade_notional = float(snap.get("trade_notional") or 0)
-                open_positions = int(snap.get("open_positions") or 0)
+                # Even when season counters are frozen, never hide a still-open local trade.
+                open_book = list(agent.trades)
+                trade_notional = (
+                    sum(float(t.get("position_size") or 0) for t in open_book)
+                    if open_book
+                    else float(snap.get("trade_notional") or 0)
+                )
+                open_positions = len(open_book) if open_book else int(snap.get("open_positions") or 0)
                 broker_fee = float(snap.get("daily_broker_fee") or 0)
                 daily_profit = float(snap.get("daily_profit") or 0)
                 daily_profit_pct = float(snap.get("daily_profit_pct") or 0)
