@@ -156,11 +156,39 @@ def upsert_open_trade(trade: dict) -> None:
         print(f"[TRADE_DB] upsert_open_trade error: {exc}")
 
 
-def finalize_trade(trade: dict) -> None:
+def finalize_trade(
+    trade: dict,
+    *,
+    exit_price: float | None = None,
+    gross_pnl_pct: float | None = None,
+    net_pnl_usd: float | None = None,
+    exit_fee_usd: float | None = None,
+    exit_fee_pct: float | None = None,
+    closed_reason: str | None = None,
+    gross_pnl_usd: float | None = None,
+) -> None:
     if not _mysql_enabled():
         return
     try:
         import json as _json
+        row = dict(trade or {})
+        if exit_price is not None:
+            row["current"] = exit_price
+        if gross_pnl_pct is not None:
+            row["gross_pnl_pct"] = gross_pnl_pct
+            row["pnl"] = gross_pnl_pct
+        if net_pnl_usd is not None:
+            row["net_pnl_usd"] = net_pnl_usd
+        if exit_fee_usd is not None:
+            row["exit_fee_usd"] = exit_fee_usd
+        if exit_fee_pct is not None:
+            row["exit_fee_pct"] = exit_fee_pct
+        if closed_reason is not None:
+            row["closed_reason"] = closed_reason
+        if gross_pnl_usd is not None:
+            row["gross_pnl_usd"] = gross_pnl_usd
+        row["status"] = "sold"
+        row["closed_at"] = row.get("closed_at") or time.time()
         conn = _connect()
         with conn.cursor() as cur:
             cur.execute(
@@ -170,12 +198,14 @@ def finalize_trade(trade: dict) -> None:
                    WHERE id=%(id)s
                 """,
                 {
-                    "id": trade.get("id", 0),
-                    "pnl": trade.get("pnl", 0),
-                    "gross_pnl_pct": trade.get("gross_pnl_pct"),
-                    "closed_at": trade.get("closed_at") or time.time(),
-                    "data": _json.dumps({k: v for k, v in trade.items()
-                                         if k not in ("reason",)}, default=str),
+                    "id": row.get("id", 0),
+                    "pnl": row.get("pnl", 0),
+                    "gross_pnl_pct": row.get("gross_pnl_pct"),
+                    "closed_at": row.get("closed_at"),
+                    "data": _json.dumps(
+                        {k: v for k, v in row.items() if k not in ("reason",)},
+                        default=str,
+                    ),
                 },
             )
         conn.close()
