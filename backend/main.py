@@ -871,6 +871,7 @@ class AITradingAgent:
         self.risk_level_pct = 5.0
         self.max_concurrent_trades = MAX_CONCURRENT_TRADES_DEFAULT
         self.last_open_skip_reason: str | None = None
+        self.last_close_error: str | None = None
         # AI Agent Instructions modal: optional "Capital profit of the day" target.
         # 0.0 means disabled. Once the day's profit % crosses this, new entries are
         # halted (existing positions keep being managed by strict exit logic).
@@ -2363,25 +2364,38 @@ class AITradingAgent:
                 if pair == self.active_pair:
                     self.current_price = float(prev_mark)
         if trade_uses_bybit_executor(trade):
-            ok, err = bybit_close_trade(trade)
-            if not ok:
-                msg = err or "Unknown Bybit close error"
+            if not trade.get("bybit_symbol"):
+                trade["bybit_symbol"] = get_bybit_symbol(trade.get("pair", ""))
+            if not trade.get("bybit_symbol"):
+                # Live mode but this record was never wired to Bybit — settle locally.
                 notifications.push(
-                    f"Bybit close FAILED #{trade['id']} {trade['pair']}: {msg}",
-                    "error",
+                    f"Force-close #{trade['id']} settled locally (no Bybit symbol on trade).",
+                    "warning",
                 )
-                system_log.push(
-                    "bybit",
-                    f"Close failed #{trade['id']} {trade.get('bybit_symbol')}: {msg}",
-                    {"trade_id": trade["id"], "reason": reason},
-                )
-                return False
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(bybit_api.fetch_real_balance())
-            except RuntimeError:
-                pass
+                self.last_close_error = None
+            else:
+                ok, err = bybit_close_trade(trade)
+                if not ok:
+                    msg = err or "Unknown Bybit close error"
+                    self.last_close_error = msg
+                    notifications.push(
+                        f"Bybit close FAILED #{trade['id']} {trade['pair']}: {msg}",
+                        "error",
+                    )
+                    system_log.push(
+                        "bybit",
+                        f"Close failed #{trade['id']} {trade.get('bybit_symbol')}: {msg}",
+                        {"trade_id": trade["id"], "reason": reason},
+                    )
+                    return False
+                self.last_close_error = None
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(bybit_api.fetch_real_balance())
+                except RuntimeError:
+                    pass
         else:
+            self.last_close_error = None
             bybit_api.execute_market_close(
                 trade["pair"],
                 trade["side"],
@@ -4672,7 +4686,7 @@ async def manual_sell(payload: ManualSellPayload = ManualSellPayload()):
 
 @app.post("/close-trade")
 async def close_trade(payload: CloseTradePayload):
-    """ Force-closes a single stacked position on the active pair (trash icon action). """
+    """Force-closes one open position (trash icon). Trailing/profit lock never blocks this."""
     if not payload.confirmed:
         return {"status": "error", "message": "Force close requires explicit confirmation."}
     trade = next((t for t in agent.trades if t["id"] == payload.id), None)
@@ -4680,12 +4694,22 @@ async def close_trade(payload: CloseTradePayload):
         return {"status": "error", "message": "Trade not found or already closed."}
 
     m = agent._trade_metrics(trade)
+    # Manual force-close bypasses trail hold — close runs even while status is "locked".
     if not agent._close_single_trade(trade, m, "Manual force-close"):
+        detail = (getattr(agent, "last_close_error", None) or "").strip()
+        # Keep message short for alerts; full Bybit retMsg is in detail / notifications.
+        short = detail
+        if "retMsg=" in detail:
+            short = detail.split("retMsg=", 1)[1].split(" | ", 1)[0].strip()
+        elif len(detail) > 180:
+            short = detail[:177] + "..."
         return {
             "status": "error",
-            "message": "Could not close position on Bybit TESTNET — see notifications.",
+            "message": short or "Could not close position on Bybit — see notifications.",
+            "detail": detail or None,
         }
     agent.trades = [t for t in agent.trades if t["id"] != payload.id]
+    agent._sync_agent_trailing_lock_state()
     return {"status": "success", "message": f"Position #{payload.id} closed at market price."}
 
 @app.post("/set-pair")

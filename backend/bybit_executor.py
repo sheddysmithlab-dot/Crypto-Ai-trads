@@ -4,6 +4,7 @@ Orders are market-only for now — no exchange-side stopLoss/takeProfit. Positio
 management (exits, caps) is handled by the agent layer, not attached SL/TP.
 """
 import json
+import math
 import sys
 
 from pybit.unified_trading import HTTP
@@ -38,6 +39,30 @@ def _format_bybit_api_error(exc: Exception, *, action: str, symbol: str, qty, pa
     return (
         f"ORDER {action} {symbol} qty={qty} pattern={pattern or 'n/a'} | "
         + " | ".join(parts)
+    )
+
+
+def _qty_str(qty) -> str:
+    """Format qty for Bybit without scientific notation / float junk."""
+    try:
+        q = float(qty)
+    except (TypeError, ValueError):
+        return str(qty)
+    if not math.isfinite(q) or q <= 0:
+        return str(qty)
+    # Trim trailing zeros but keep enough precision for lot steps.
+    text = f"{q:.10f}".rstrip("0").rstrip(".")
+    return text if text else "0"
+
+
+def _is_already_flat_error(err: str | None) -> bool:
+    msg = (err or "").lower()
+    return (
+        "110017" in (err or "")
+        or "position is zero" in msg
+        or "position idx not exist" in msg
+        or "no position to close" in msg
+        or "current position is zero" in msg
     )
 
 
@@ -113,7 +138,7 @@ class BybitAgent:
                 symbol=symbol,
                 side=side,
                 orderType="Market",
-                qty=str(qty),
+                qty=_qty_str(qty),
             )
             ok, api_err = self._check_place_order_response(
                 resp, action=action, symbol=symbol, qty=qty, pattern=pattern
@@ -134,55 +159,155 @@ class BybitAgent:
             print(f"❌ ORDER FAILED: {err}")
             return False, err
 
+    def _fetch_open_position(self, symbol: str, side: str) -> tuple[str, dict | None]:
+        """Return (status, row). status is 'ok' or 'error'; row is None when flat."""
+        try:
+            resp = self.session.get_positions(category="linear", symbol=symbol)
+        except Exception as exc:
+            print(f"[BYBIT] get_positions failed {symbol}: {exc}")
+            return "error", None
+        if not isinstance(resp, dict) or resp.get("retCode", 0) != 0:
+            print(f"[BYBIT] get_positions error {symbol}: {resp}")
+            return "error", None
+        rows = (resp.get("result") or {}).get("list") or []
+        want_long = (side or "LONG").upper() == "LONG"
+        for row in rows:
+            try:
+                size = float(row.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0.0
+            if size <= 0:
+                continue
+            pos_side = (row.get("side") or "").strip()
+            if want_long and pos_side == "Buy":
+                return "ok", row
+            if (not want_long) and pos_side == "Sell":
+                return "ok", row
+        return "ok", None
+
     def close_position(self, trade: dict, qty: float | None = None) -> tuple[bool, str | None]:
         """Market reduce-only close for a tracked linear perpetual position.
 
-        Optional ``qty`` closes a partial size; defaults to full trade qty.
+        Resolves live size + positionIdx from Bybit when possible so hedge-mode
+        and lot-step mismatches do not block force-close.
         """
         symbol = trade.get("bybit_symbol")
-        close_qty = qty if qty is not None else trade.get("qty")
-        if not symbol or close_qty is None:
-            self.last_error = "Missing bybit_symbol or qty on trade record"
-            return False, self.last_error
-
         side = trade.get("side", "LONG")
         close_side = "Sell" if side == "LONG" else "Buy"
+        pattern = f"trade#{trade.get('id')}"
 
+        if not symbol:
+            self.last_error = "Missing bybit_symbol on trade record"
+            return False, self.last_error
+
+        status, live = self._fetch_open_position(symbol, side)
+        position_idx = None
+        close_qty = qty if qty is not None else trade.get("qty")
+
+        if status == "ok" and live is None:
+            print(f"⚠️ CLOSE SKIP (no live position) #{trade.get('id')} {symbol}")
+            self.last_error = None
+            return True, None
+
+        if live is not None:
+            try:
+                live_size = float(live.get("size") or 0)
+            except (TypeError, ValueError):
+                live_size = 0.0
+            if live_size > 0:
+                close_qty = live_size
+            raw_idx = live.get("positionIdx")
+            if raw_idx is not None:
+                try:
+                    position_idx = int(raw_idx)
+                except (TypeError, ValueError):
+                    position_idx = None
+
+        if close_qty is None:
+            self.last_error = "Missing qty on trade record and no live Bybit size"
+            return False, self.last_error
+
+        if position_idx is None:
+            # Prefer one-way (0); hedge accounts still succeed on the 1/2 retry.
+            idx_order = (0, 1 if side == "LONG" else 2)
+        else:
+            idx_order = (position_idx, 0) if position_idx != 0 else (0, 1 if side == "LONG" else 2)
+
+        seen = set()
+        for idx in idx_order:
+            if idx in seen:
+                continue
+            seen.add(idx)
+            ok, err = self._place_close_order(
+                symbol=symbol,
+                close_side=close_side,
+                close_qty=close_qty,
+                position_idx=idx,
+                pattern=pattern,
+                trade_id=trade.get("id"),
+                side=side,
+            )
+            if ok:
+                return True, None
+            if _is_already_flat_error(err):
+                print(f"⚠️ CLOSE TREATED FLAT #{trade.get('id')} {symbol}: {err}")
+                self.last_error = None
+                return True, None
+            msg_l = (err or "").lower()
+            if "position idx" in msg_l or "110025" in (err or "") or "10001" in (err or ""):
+                self.last_error = err
+                continue
+            self.last_error = err
+            print(f"❌ CLOSE FAILED #{trade.get('id')} {symbol}: {err}")
+            return False, err
+
+        print(f"❌ CLOSE FAILED #{trade.get('id')} {symbol}: {self.last_error}")
+        return False, self.last_error
+
+    def _place_close_order(
+        self,
+        *,
+        symbol: str,
+        close_side: str,
+        close_qty,
+        position_idx: int,
+        pattern: str,
+        trade_id,
+        side: str,
+    ) -> tuple[bool, str | None]:
+        qty_s = _qty_str(close_qty)
         try:
-            resp = self.session.place_order(
+            kwargs = dict(
                 category="linear",
                 symbol=symbol,
                 side=close_side,
                 orderType="Market",
-                qty=str(close_qty),
+                qty=qty_s,
                 reduceOnly=True,
+                positionIdx=int(position_idx),
             )
+            resp = self.session.place_order(**kwargs)
             ok, api_err = self._check_place_order_response(
                 resp,
                 action=f"CLOSE-{close_side}",
                 symbol=symbol,
-                qty=close_qty,
-                pattern=f"trade#{trade.get('id')}",
+                qty=qty_s,
+                pattern=pattern,
             )
-            if not ok:
-                self.last_error = api_err
-                print(f"❌ CLOSE FAILED #{trade.get('id')} {symbol}: {api_err}")
-                return False, api_err
-
-            self.last_error = None
-            print(
-                f"✅ CLOSE FIRED: {close_side} {symbol} | qty={close_qty} | "
-                f"trade #{trade.get('id')} ({side})"
-            )
-            return True, None
+            if ok:
+                self.last_error = None
+                print(
+                    f"✅ CLOSE FIRED: {close_side} {symbol} | qty={qty_s} | "
+                    f"idx={position_idx} | trade #{trade_id} ({side})"
+                )
+                return True, None
+            return False, api_err
         except Exception as exc:
             err = _format_bybit_api_error(
                 exc,
                 action=f"CLOSE-{close_side}",
                 symbol=symbol,
-                qty=close_qty,
-                pattern=f"trade#{trade.get('id')}",
+                qty=qty_s,
+                pattern=pattern,
             )
-            self.last_error = err
-            print(f"❌ CLOSE FAILED #{trade.get('id')} {symbol}: {err}")
             return False, err

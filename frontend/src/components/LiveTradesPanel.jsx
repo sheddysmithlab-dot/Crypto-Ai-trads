@@ -115,7 +115,12 @@ function StatusIcon({ trade }) {
     return <i className="fas fa-check-double text-white/80" title="Sold / booked"></i>;
   }
   if (trade.status === 'locked') {
-    return <i className="fas fa-lock text-blue-400" title="Trailing Lock Active"></i>;
+    return (
+      <i
+        className="fas fa-lock text-blue-400"
+        title="Trailing lock active — AI holds until exit floor. Trash still force-closes anytime."
+      ></i>
+    );
   }
   return winning ? (
     <i className="fas fa-check-circle text-green-500" title="In Profit"></i>
@@ -188,8 +193,17 @@ function TradeRowDesktop({ trade, onRequestClose, onSelectTrade }) {
           <StatusIcon trade={trade} />
           {!isSold && (
             <button
-              className="p-1 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded hover:bg-red-200 dark:hover:bg-red-900/50 transition opacity-0 group-hover:opacity-100"
-              title="Force Close (confirmation required)"
+              type="button"
+              className={`p-1 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded hover:bg-red-200 dark:hover:bg-red-900/50 transition ${
+                trade.status === 'locked'
+                  ? 'opacity-100 ring-1 ring-red-400/50'
+                  : 'opacity-100 sm:opacity-0 sm:group-hover:opacity-100'
+              }`}
+              title={
+                trade.status === 'locked'
+                  ? 'Force Close now (trailing lock does not block manual exit)'
+                  : 'Force Close (confirmation required)'
+              }
               onClick={(e) => {
                 e.stopPropagation();
                 onRequestClose(trade.id);
@@ -204,7 +218,7 @@ function TradeRowDesktop({ trade, onRequestClose, onSelectTrade }) {
   );
 }
 
-function TradeRowMobile({ trade, onSelectTrade }) {
+function TradeRowMobile({ trade, onSelectTrade, onRequestClose }) {
   const meta = getPairMeta(trade.pair);
   const isSold = trade.status === 'sold';
   const isProtected = trade.protected || trade.source === 'manual';
@@ -259,6 +273,19 @@ function TradeRowMobile({ trade, onSelectTrade }) {
       <div className="flex items-center gap-1.5">
         <span className={`font-bold font-mono ${pnlColor} text-xs`}>{formatMovePct(trade)}</span>
         <StatusIcon trade={trade} />
+        {!isSold && (
+          <button
+            type="button"
+            className="p-1.5 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded"
+            title="Force Close (confirmation required)"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRequestClose?.(trade.id);
+            }}
+          >
+            <i className="fas fa-trash text-[10px]"></i>
+          </button>
+        )}
       </div>
     </div>
   );
@@ -399,7 +426,12 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                 </div>
               ) : null}
               {active.map((trade) => (
-                <TradeRowMobile key={trade.id} trade={trade} onSelectTrade={onSelectTrade} />
+                <TradeRowMobile
+                  key={trade.id}
+                  trade={trade}
+                  onSelectTrade={onSelectTrade}
+                  onRequestClose={onRequestClose}
+                />
               ))}
               {activeAll.length > 0 ? (
                 <PaginationBar

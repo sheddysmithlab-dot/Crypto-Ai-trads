@@ -466,9 +466,18 @@ export default function App() {
     setExitConfirm({ open: false, type: null, tradeId: null });
     if (!tradeId) return;
     try {
-      await closeTrade(tradeId, true);
+      const data = await closeTrade(tradeId, true);
+      if (data?.status === 'error') {
+        const msg = data.message || 'Force close failed.';
+        pushActionLog(`Force close failed #${tradeId}: ${msg}`);
+        window.alert(msg);
+        return;
+      }
+      pushActionLog(data?.message || `Position #${tradeId} force-closed.`);
     } catch (err) {
       console.error('Force close failed:', err);
+      pushActionLog(`Force close failed #${tradeId} (network).`);
+      window.alert(err?.message || 'Force close failed (network).');
     }
   }
 
@@ -654,11 +663,15 @@ export default function App() {
   }
 
   const exitConfirmCopy = (() => {
-    if (exitConfirm.type === 'force-close') {
+    if exitConfirm.type === 'force-close') {
       const trade = trades.find((t) => t.id === exitConfirm.tradeId);
+      const lockedNote =
+        trade?.status === 'locked'
+          ? ' Trailing lock will be cleared — this exits immediately at market.'
+          : '';
       return {
         title: 'Force Close Position?',
-        message: `Close position #${exitConfirm.tradeId} now at market price?`,
+        message: `Close position #${exitConfirm.tradeId} now at market price?${lockedNote}`,
         detail: trade
           ? `${trade.pair} ${trade.side} @ $${trade.entry} | Current PnL: ${trade.pnl >= 0 ? '+' : ''}${trade.pnl?.toFixed(2)}%`
           : 'This action cannot be undone.',
