@@ -793,6 +793,9 @@ PROFIT_LOCK_PCT_1M = float(os.environ.get("PROFIT_LOCK_PCT_1M", "0.65"))
 PROFIT_LOCK_STEP_PCT = float(os.environ.get("PROFIT_LOCK_STEP_PCT", "0.20"))
 PROFIT_TRAIL_FIRST_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "0.10"))
 PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.20"))
+# Opposite-signal flip: only exit old auto trade when unrealized gross > this %;
+# at or below → keep old open and skip the new opposite fire (no tiny flip-exits).
+FLIP_EXIT_MIN_GROSS_PCT = float(os.environ.get("FLIP_EXIT_MIN_GROSS_PCT", "0.25"))
 # Protective stop-loss (gross %, LONG/SHORT symmetric) — no widen for choppy:
 #   −0.50% → LOSS LOCK (hold); track best_recovery (never moves backward);
 #   EXIT when recovery_drawdown = best_recovery − current ≥ 0.20%;
@@ -2441,13 +2444,71 @@ class AITradingAgent:
 
     def close_opposite_positions_for_flip(
         self, side: str, pair: str, *, pattern: str | None = None
-    ) -> int:
-        """Flip-exit disabled — exits only via path profit/loss (lock/trail/emergency).
+    ) -> str:
+        """Handle opposite auto positions when a new signal is about to fire.
 
-        Previously closed opposite side on reverse signal (caused −0.01%/−0.09% exits).
-        Kept as no-op so callers do not reopen that behavior accidentally.
+        Returns one of:
+          ``none``         — no opposite auto trade on this pair → fire new
+          ``flipped``      — all opposites had gross > FLIP_EXIT_MIN_GROSS_PCT,
+                             closed successfully → fire new
+          ``blocked``      — opposite exists with gross ≤ threshold → keep old,
+                             skip new fire
+          ``close_failed`` — tried to flip-close but exchange/local close failed
+                             → keep old, skip new fire
+
+        Path lock/trail/emergency exits are unchanged; this only runs on opposite
+        auto-entry fire. Manual positions are never touched.
         """
-        return 0
+        opposite = "SHORT" if side == "LONG" else "LONG"
+        opposites = [
+            t
+            for t in list(self.trades)
+            if t.get("source") == "auto"
+            and t.get("pair") == pair
+            and t.get("side") == opposite
+        ]
+        if not opposites:
+            return "none"
+
+        min_pct = float(FLIP_EXIT_MIN_GROSS_PCT)
+        scored: list[tuple[dict, dict, float]] = []
+        for trade in opposites:
+            metrics = self._trade_metrics(trade)
+            gross = float(metrics.get("gross_pct") or 0.0)
+            scored.append((trade, metrics, gross))
+
+        # Any opposite still ≤ threshold → do not exit, do not open opposite.
+        weak = [(t, g) for t, _, g in scored if g <= min_pct]
+        if weak:
+            detail = ", ".join(f"#{t.get('id')}@{g:.3f}%" for t, g in weak)
+            print(
+                f"[FLIP] BLOCKED new {side} on {pair}: opposite ≤{min_pct:g}% "
+                f"({detail}) — keeping old, skipping new fire"
+                + (f" | signal={pattern}" if pattern else "")
+            )
+            return "blocked"
+
+        closed_ids: list[int] = []
+        for trade, metrics, gross in scored:
+            reason = (
+                f"OPPOSITE_FLIP_EXIT | new {side} signal"
+                + (f" {pattern}" if pattern else "")
+                + f" | gross={gross:.3f}%>{min_pct:g}%"
+            )
+            if not self._close_single_trade(trade, metrics, reason):
+                print(
+                    f"[FLIP] Close FAILED #{trade.get('id')} {pair} {opposite} "
+                    f"(gross={gross:.3f}%) — skip new {side} fire"
+                )
+                return "close_failed"
+            closed_ids.append(int(trade.get("id") or 0))
+            print(f"[FLIP] Closed #{trade.get('id')} {opposite} {pair} @ {gross:.3f}% → {reason}")
+
+        if closed_ids:
+            closed_set = set(closed_ids)
+            self.trades = [t for t in self.trades if int(t.get("id") or 0) not in closed_set]
+            self.persist_runtime()
+        return "flipped"
 
     def same_side_auto_count(self, side: str, pair: str) -> int:
         return sum(
@@ -3605,9 +3666,24 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                     fire_candle_ms=fire_candle_ms,
                 )
 
-        # Flip-exit DISABLED: path profit/loss engine owns exits (no close at −0.01%/−0.09%
-        # just because an opposite signal fired). Opposite side may still open if capacity allows.
-        # agent.close_opposite_positions_for_flip(side, pair, pattern=detect.get("pattern"))
+        # Opposite flip (additive only): >0.25% gross → exit old + continue fire;
+        # ≤0.25% → keep old + skip new. Path lock/trail/emergency exits unchanged.
+        flip = agent.close_opposite_positions_for_flip(
+            side, pair, pattern=detect.get("pattern")
+        )
+        if flip == "blocked":
+            return await _skip_pending(
+                pending,
+                f"Opposite flip blocked: open opposite ≤{FLIP_EXIT_MIN_GROSS_PCT:g}% "
+                f"gross — kept old, skipped new {side}",
+                fire_candle_ms=fire_candle_ms,
+            )
+        if flip == "close_failed":
+            return await _skip_pending(
+                pending,
+                f"Opposite flip close failed — kept old, skipped new {side}",
+                fire_candle_ms=fire_candle_ms,
+            )
 
         blocked = concurrent_entry_blocked(agent, pair)
         if blocked:
