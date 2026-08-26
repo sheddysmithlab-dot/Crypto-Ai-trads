@@ -4535,10 +4535,19 @@ async def start_background_tasks():
                 f"Bybit keys restored — LIVE trading resumed ({settings_store.bybit_environment}).",
                 "warning",
             )
-            asyncio.create_task(bybit_api.fetch_real_balance())
+            # Await first equity sync so portfolio never flashes $0 after restart.
+            try:
+                equity = await bybit_api.fetch_real_balance()
+                if equity is not None:
+                    agent.current_capital = float(equity)
+                    if not agent.starting_capital:
+                        agent.starting_capital = float(equity)
+                    print(f"[SETTINGS] Live Bybit equity synced: ${equity:,.2f}")
+            except Exception as exc:
+                print(f"[SETTINGS] Initial Bybit equity sync note: {exc}")
 
             async def _startup_reconcile():
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)
                 try:
                     await bybit_api.fetch_real_balance()
                     n = agent.reconcile_live_positions()
