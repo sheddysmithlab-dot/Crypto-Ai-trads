@@ -130,6 +130,10 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
       if (res.ok) {
         setBanner({ tone: 'success', message: data.message });
         await refreshStatus();
+        // If backend says LIVE trading is now active, notify parent so UI updates
+        if (data.trading_mode === 'LIVE_TRADING') {
+          onLiveTradingConnected?.();
+        }
       } else {
         setBanner({ tone: 'error', message: data.message || 'Failed to save settings.' });
       }
