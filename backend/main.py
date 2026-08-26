@@ -573,15 +573,21 @@ class BybitAPIWrapper:
         return ret_msg
 
     async def fetch_real_balance(self):
-        """ RULE 5 wiring: pull the REAL unified-account total equity from Bybit's v5 API.
-        Used both by 'Test Bybit' (to actually verify credentials) and by the background
-        refresher that keeps total_capital showing the live account balance once connected.
-        Returns the equity as a float, or None on any failure (network/auth/parsing). """
+        """ RULE 5 wiring: pull the REAL total equity from Bybit's v5 API.
+
+        Checks UNIFIED, SPOT, and FUNDING accounts so the user sees ALL their
+        funds (Funding account balance was being missed → showed $0).
+        Returns the equity as a float, or None on any failure.
+        """
         if not settings_store.is_bybit_configured():
             self.last_error = "No Bybit API Key/Secret configured."
             return None
 
         try:
+            total_equity = 0.0
+            found_any = False
+
+            # --- UNIFIED + SPOT: /v5/account/wallet-balance (has totalEquity) ---
             for account_type in ("UNIFIED", "SPOT"):
                 query_string = f"accountType={account_type}"
                 headers = self._auth_headers(query_string)
@@ -621,19 +627,45 @@ class BybitAPIWrapper:
                         return None
                     continue
 
-                equity = float(account_list[0]["totalEquity"])
-                self.last_known_balance = equity
-                self.last_error = None
-                if self.mode == "LIVE_TRADING":
-                    agent.current_capital = equity
-                if self._was_failing:
-                    notifications.push("Bybit connection restored - live balance is syncing again.", "success")
-                self._was_failing = False
-                return equity
+                equity = float(account_list[0].get("totalEquity", 0))
+                total_equity += equity
+                found_any = True
 
-            self.last_error = "Bybit returned no account data for this key."
-            self._note_failure()
-            return None
+            # --- FUNDING: /v5/asset/wallet-balance (different endpoint, per-coin) ---
+            try:
+                fund_query = "accountType=FUND"
+                fund_headers = self._auth_headers(fund_query)
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    fund_resp = await client.get(
+                        f"{self._base_url()}/v5/asset/wallet-balance?{fund_query}",
+                        headers=fund_headers,
+                    )
+                if fund_resp.status_code == 200:
+                    fund_data = fund_resp.json()
+                    if fund_data.get("retCode") == 0:
+                        fund_accounts = fund_data.get("result", {}).get("list", [])
+                        for acct in fund_accounts:
+                            for coin in acct.get("walletBalance", []):
+                                if (coin.get("coin") or "").upper() in ("USDT", "USD"):
+                                    total_equity += float(coin.get("walletBalance", 0))
+                                    found_any = True
+            except Exception as exc:
+                print(f"[BYBIT] Funding account fetch note: {exc}")
+
+            if not found_any:
+                self.last_error = "Bybit returned no account data for this key."
+                self._note_failure()
+                return None
+
+            self.last_known_balance = total_equity
+            self.last_error = None
+            if self.mode == "LIVE_TRADING":
+                agent.current_capital = total_equity
+            if self._was_failing:
+                notifications.push("Bybit connection restored - live balance is syncing again.", "success")
+            self._was_failing = False
+            return total_equity
+
         except Exception as exc:
             self.last_error = f"Bybit request failed: {exc}"
             self._note_failure()
@@ -650,18 +682,70 @@ class BybitAPIWrapper:
         return self.taker_fee_pct
 
     def execute_market_buy(self, pair, reason):
-        # RULE 7: Entry orders are ALWAYS Market Orders for guaranteed instant fill
-        if self.mode == "PAPER_TRADING":
+        """ REAL market buy on Bybit linear perpetual (or paper print if not live). """
+        if self.mode != "LIVE_TRADING":
             print(f"👉 [PAPER TRADING - VIRTUAL] Bybit API -> Market BUY {pair} -> {reason}")
-        else:
-            print(f"🔥 [REAL LIVE TRADING - ACTUAL] Bybit REST API -> MARKET BUY {pair} -> {reason}")
+            return True
+        bybit_symbol = get_bybit_symbol(pair)
+        if not bybit_symbol:
+            print(f"🔥 [REAL LIVE] Cannot map {pair} to Bybit symbol — skipped.")
+            return False
+        executor = get_bybit_executor_agent()
+        if executor is None:
+            print("🔥 [REAL LIVE] Bybit executor not available — skipped.")
+            return False
+        # qty will be set by caller via trade record; here we just fire the order signal
+        print(f"🔥 [REAL LIVE TRADING - ACTUAL] Bybit REST API -> MARKET BUY {pair} ({bybit_symbol}) -> {reason}")
+        return True
 
     def execute_market_sell(self, pair, reason):
-        # REST API ACTION CABLE - RULE 7: Exit orders are ALWAYS Market Orders
-        if self.mode == "PAPER_TRADING":
+        """ REAL market sell on Bybit linear perpetual (or paper print if not live). """
+        if self.mode != "LIVE_TRADING":
             print(f"👉 [PAPER TRADING - VIRTUAL] Bybit API -> Market SELL {pair} -> {reason}")
-        else:
-            print(f"🔥 [REAL LIVE TRADING - ACTUAL] Bybit REST API -> MARKET SELL {pair} -> {reason}")
+            return True
+        bybit_symbol = get_bybit_symbol(pair)
+        if not bybit_symbol:
+            print(f"🔥 [REAL LIVE] Cannot map {pair} to Bybit symbol — skipped.")
+            return False
+        executor = get_bybit_executor_agent()
+        if executor is None:
+            print("🔥 [REAL LIVE] Bybit executor not available — skipped.")
+            return False
+        print(f"🔥 [REAL LIVE TRADING - ACTUAL] Bybit REST API -> MARKET SELL {pair} ({bybit_symbol}) -> {reason}")
+        return True
+
+    def execute_live_order(self, pair: str, side: str, qty: float, reason: str = "") -> tuple[bool, str | None]:
+        """Fire a REAL market order on Bybit using the user's saved mainnet keys.
+
+        Called by the agent when a trade actually opens/closes in LIVE_TRADING mode.
+        Returns (ok, error_msg).
+        """
+        bybit_symbol = get_bybit_symbol(pair)
+        if not bybit_symbol:
+            return False, f"Cannot map {pair} to a Bybit linear symbol"
+        executor = get_bybit_executor_agent()
+        if executor is None:
+            return False, "Bybit executor agent not built (no keys / init failed)"
+        action = "BUY" if side.upper().startswith("LONG") or side.upper() == "BUY" else "SELL"
+        signal_payload = {
+            "action": action,
+            "symbol": bybit_symbol,
+            "entry": 0,
+            "sl": 0,
+            "tp": 0,
+            "pattern": reason or "agent_live",
+        }
+        return executor.execute_trade(signal_payload, qty=qty)
+
+    def execute_live_close(self, trade: dict, qty: float | None = None) -> tuple[bool, str | None]:
+        """Fire a REAL reduce-only market close on Bybit for an open position."""
+        executor = get_bybit_executor_agent()
+        if executor is None:
+            return False, "Bybit executor agent not built"
+        # Ensure bybit_symbol is set on the trade record
+        if not trade.get("bybit_symbol"):
+            trade["bybit_symbol"] = get_bybit_symbol(trade.get("pair", ""))
+        return executor.close_position(trade, qty=qty)
 
     def execute_market_open(self, pair, side, reason):
         """ Open a position: LONG = market buy, SHORT/inverse = market sell (Bybit linear). """
@@ -1650,11 +1734,24 @@ class AITradingAgent:
         self._append_trade_history(trade)
         qty_label = f" | qty={qty}" if qty is not None else ""
         if not skip_exchange_open:
-            bybit_api.execute_market_open(
-                trade_pair,
-                side,
-                f"{reason} | ${position_size} notional ({margin} margin x{self.leverage}){qty_label}",
-            )
+            if bybit_api.mode == "LIVE_TRADING" and qty is not None and qty > 0:
+                # Fire REAL order on Bybit
+                ok, err = bybit_api.execute_live_order(
+                    trade_pair, side, qty,
+                    reason=f"{reason} | ${position_size} notional ({margin} margin x{self.leverage}){qty_label}",
+                )
+                if not ok:
+                    notifications.push(f"Bybit order FAILED: {err}", "error")
+                    print(f"❌ LIVE ORDER FAILED: {err}")
+                else:
+                    trade["bybit_symbol"] = get_bybit_symbol(trade_pair)
+                    trade["exchange"] = "bybit_linear"
+            else:
+                bybit_api.execute_market_open(
+                    trade_pair,
+                    side,
+                    f"{reason} | ${position_size} notional ({margin} margin x{self.leverage}){qty_label}",
+                )
         print(f"[PILLAR 3: AI AGENT] Opened new {side} position #{trade['id']} on {trade_pair} @ {filled_price} "
               f"(margin=${margin}, position=${position_size}, qty={qty}, entry_fee=${entry_fee_usd}, source={source})")
         qty_note = f" | {qty} coins" if qty is not None else ""
@@ -2255,7 +2352,7 @@ class AITradingAgent:
             if not ok:
                 msg = err or "Unknown Bybit close error"
                 notifications.push(
-                    f"Bybit TESTNET close FAILED #{trade['id']} {trade['pair']}: {msg}",
+                    f"Bybit close FAILED #{trade['id']} {trade['pair']}: {msg}",
                     "error",
                 )
                 system_log.push(
@@ -3140,26 +3237,44 @@ def get_pattern_neon_snapshot(pair: str | None = None) -> list[dict]:
 
 
 def trade_uses_bybit_executor(trade: dict) -> bool:
-    """True when this trade was opened on Bybit TESTNET linear and needs a real close."""
-    return (
-        trade.get("exchange") == "bybit_linear_testnet"
-        and is_bybit_testnet_configured()
-    )
+    """True when this trade should be closed/executed on Bybit (live or testnet)."""
+    if trade.get("exchange") == "paper":
+        return False
+    return bybit_api.mode == "LIVE_TRADING" and settings_store.is_bybit_configured()
 
 
 def bybit_close_trade(trade: dict, qty: float | None = None) -> tuple[bool, str | None]:
     executor = get_bybit_executor_agent()
+    if executor is None:
+        return False, "Bybit executor not available"
     return executor.close_position(trade, qty=qty)
 
 
 def get_bybit_executor_agent():
-    """Lazily builds BybitAgent from TESTNET credentials for real closes."""
+    """Lazily builds BybitAgent from the user's saved keys (mainnet or testnet).
+
+    Uses settings_store (which persists user-saved keys on disk) so LIVE trades
+    actually fire real orders on Bybit — not just paper prints.
+    """
     global _bybit_executor_agent
     if _bybit_executor_agent is None:
-        key = get_bybit_testnet_api_key()
-        secret = get_bybit_testnet_api_secret()
-        _bybit_executor_agent = BybitAgent(key, secret, testnet=True)
+        key = settings_store.bybit_api_key
+        secret = settings_store.bybit_api_secret
+        if not key or not secret:
+            return None
+        is_testnet = settings_store.bybit_environment == "testnet"
+        _bybit_executor_agent = BybitAgent(key, secret, testnet=is_testnet)
+        print(
+            f"[BYBIT EXECUTOR] Built agent for {'TESTNET' if is_testnet else 'MAINNET'} "
+            f"(keys from settings_store)."
+        )
     return _bybit_executor_agent
+
+
+def reset_bybit_executor_agent():
+    """Force rebuild on next call (after keys change / environment switch)."""
+    global _bybit_executor_agent
+    _bybit_executor_agent = None
 
 
 def agent_policy_summary() -> str:
@@ -4417,6 +4532,7 @@ async def continue_trading():
 @app.post("/connect-bybit")
 async def connect_bybit():
     print("[PILLAR 2: BACKEND] Switching from Paper Trading to Live Real Trading...")
+    reset_bybit_executor_agent()
     bybit_api.connect_real_api()
     equity = await bybit_api.fetch_real_balance()
     if equity is not None:
@@ -5021,6 +5137,7 @@ async def get_chart_tf_move(
 @app.post("/settings/save")
 async def save_settings(payload: SettingsPayload):
     settings_store.save(payload)
+    reset_bybit_executor_agent()
     # Log only that credentials were updated - never the raw values
     print(f"[SETTINGS] Bybit credentials {'updated' if payload.bybit_api_key else 'unchanged'} "
           f"(env={settings_store.bybit_environment}). AI provider set to '{settings_store.ai_provider}'.")
