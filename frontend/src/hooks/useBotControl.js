@@ -4,15 +4,41 @@ import { authFetch } from '../config/api';
 /**
  * Fresh AI Engine start/stop control.
  * Talks ONLY to /bot/start, /bot/stop, /bot/status — no old modal chain.
+ *
+ * Engine runs on the VPS independently of the browser. Closing the tab must
+ * never call /bot/stop — only explicit user stop actions do.
  */
 export function useBotControl({ serverIsActive = false } = {}) {
   const [isActive, setIsActive] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  // Mirror backend WS / portfolio flag when it arrives
+  // Seed from REST immediately so reopen does not flash "(Stopped)" before WS.
   useEffect(() => {
-    setIsActive(Boolean(serverIsActive));
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await authFetch('/bot/status');
+        if (!res.ok || cancelled) return;
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (typeof data.is_active === 'boolean') {
+          setIsActive(Boolean(data.is_active));
+        }
+      } catch {
+        /* WS / next poll will correct */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Mirror backend WS flag only after portfolio has reported a real boolean
+  // (initial null must not wipe a REST /bot/status seed).
+  useEffect(() => {
+    if (typeof serverIsActive !== 'boolean') return;
+    setIsActive(serverIsActive);
   }, [serverIsActive]);
 
   const start = useCallback(async ({ watchlistPairs = [] } = {}) => {

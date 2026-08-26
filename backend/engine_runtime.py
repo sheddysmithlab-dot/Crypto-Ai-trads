@@ -46,6 +46,7 @@ def dump_runtime(agent: Any) -> dict:
         "boot_ui_until": float(getattr(agent, "boot_ui_until", 0) or 0),
         "is_active": bool(getattr(agent, "is_active", False)),
         "session_hold_mode": bool(getattr(agent, "session_hold_mode", False)),
+        "one_m_fee_hold": bool(getattr(agent, "one_m_fee_hold", False)),
         "connectivity_frozen": bool(getattr(agent, "connectivity_frozen", False)),
         "freeze_reason": getattr(agent, "freeze_reason", None),
         "active_pair": getattr(agent, "active_pair", "BTC/USDT"),
@@ -108,6 +109,7 @@ def restore_runtime(agent: Any) -> dict:
         agent.trading_ready_at = 0.0
         agent.boot_ui_until = float(data.get("boot_ui_until") or 0)
         agent.session_hold_mode = bool(data.get("session_hold_mode"))
+        agent.one_m_fee_hold = bool(data.get("one_m_fee_hold"))
         # Never restore as frozen — force re-evaluate connectivity after boot
         agent.connectivity_frozen = False
         agent.freeze_reason = None

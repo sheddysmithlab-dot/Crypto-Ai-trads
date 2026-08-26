@@ -3980,7 +3980,7 @@ async def bybit_balance_refresher():
         await asyncio.sleep(3)
 
 
-KEEPALIVE_INTERVAL_SECONDS = 13 * 60
+KEEPALIVE_INTERVAL_SECONDS = 5 * 60
 
 
 async def _ping_health(client: httpx.AsyncClient, self_url: str) -> bool:
@@ -3994,21 +3994,32 @@ async def _ping_health(client: httpx.AsyncClient, self_url: str) -> bool:
 
 
 async def self_ping_keepalive():
-    self_url = os.environ.get("RENDER_EXTERNAL_URL")
+    """Keep process/proxy warm. Engine trading does NOT depend on any browser tab.
+
+    Prefer RENDER_EXTERNAL_URL (PaaS), else loopback on the container port.
+    """
+    self_url = (os.environ.get("RENDER_EXTERNAL_URL") or "").rstrip("/")
     if not self_url:
-        print("[KEEPALIVE] RENDER_EXTERNAL_URL not set (local/VPS) — keepalive disabled.")
-        return
+        port = (os.environ.get("PORT") or "8000").strip() or "8000"
+        self_url = f"http://127.0.0.1:{port}"
 
     interval = int(os.environ.get("KEEPALIVE_INTERVAL_SECONDS", str(KEEPALIVE_INTERVAL_SECONDS)))
     print(
         f"[KEEPALIVE] Pinging {self_url}/health every {interval // 60} minutes "
-        f"(read-only wake ping — bot/trades unchanged)."
+        f"(read-only — browser optional; engine keeps running headless)."
     )
     async with httpx.AsyncClient(timeout=15.0) as client:
         await _ping_health(client, self_url)
         while True:
             await asyncio.sleep(interval)
             await _ping_health(client, self_url)
+            if agent.is_active:
+                print(
+                    f"[HEADLESS] Engine ON · open={len(agent.trades)} · "
+                    f"scan={agent.get_scan_pairs()} · "
+                    f"fee_hold={bool(getattr(agent, 'one_m_fee_hold', False))} · "
+                    f"(no browser required)"
+                )
 
 
 async def auto_exit_watchdog():
@@ -4139,6 +4150,7 @@ async def bot_start():
     open_count = len(agent.trades)
     agent.clear_emergency_state()
     agent.daily_target_reached = False
+    agent.one_m_fee_hold = False
     agent.begin_ai_season()
     agent.is_active = True
     agent.connectivity_frozen = False
@@ -4146,6 +4158,10 @@ async def bot_start():
     agent._ai_fail_streak = 0
     agent._last_feed_ts = time.time()
     agent.begin_trading_warmup()
+    system_log.push_agent_chat(
+        "AI Engine ON — runs on VPS headless (browser optional). Close tab safely; trading continues until you press STOP.",
+        status="ok",
+    )
     # First pass: filter all mapped coins by MARKET avg% before any new fires.
     try:
         await apply_momentum_watchlist_refresh(reason="bot_start")
@@ -4222,7 +4238,7 @@ async def bot_start():
 
 @app.post("/bot/stop")
 async def bot_stop(payload: BotStopPayload | None = None):
-    """AI Engine STOP.
+    """AI Engine STOP — explicit user action only (browser close must NEVER call this).
 
     Body: ``{"mode": "hold"|"emergency"}``
       - hold: stop new entries; keep open trades (path SL / TP still auto-exit); portfolio keeps updating
@@ -4232,6 +4248,7 @@ async def bot_stop(payload: BotStopPayload | None = None):
     mode = str((payload.mode if payload else "hold") or "hold").strip().lower()
     if mode not in ("hold", "emergency"):
         mode = "hold"
+    print(f"[AI ENGINE] STOP requested mode={mode} (explicit API — not browser disconnect)")
 
     if not agent.is_active and not agent.trades and not agent.session_hold_mode:
         agent.is_active = False
@@ -4284,12 +4301,17 @@ async def bot_stop(payload: BotStopPayload | None = None):
 
 @app.get("/bot/status")
 async def bot_status():
-    """Lightweight poll for AI Engine active flag."""
+    """Lightweight poll for AI Engine active flag (use on page load — WS may lag)."""
     return {
         "status": "success",
         "is_active": bool(agent.is_active),
+        "session_hold_mode": bool(agent.session_hold_mode),
+        "one_m_fee_hold": bool(getattr(agent, "one_m_fee_hold", False)),
+        "connectivity_frozen": bool(agent.connectivity_frozen),
         "open_positions": len(agent.trades),
         "pair": agent.active_pair,
+        "watchlist": list(agent.watchlist or []),
+        "scan_pairs": agent.get_scan_pairs(),
     }
 
 

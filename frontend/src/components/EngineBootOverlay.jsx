@@ -254,7 +254,7 @@ export default function EngineBootOverlay({
           {cancelLoading ? 'Stopping…' : 'Cancel — Stop Engine'}
         </button>
         <span className="text-[10px] text-gray-400 font-medium">
-          Stops immediately · no confirmation
+          Confirm in popup · VPS keeps running if you only close the tab
         </span>
       </div>
     </div>

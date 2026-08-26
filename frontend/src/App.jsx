@@ -106,7 +106,7 @@ export default function App() {
     refreshPaperStatus();
   }, [refreshPaperStatus]);
 
-  const serverBotActive = Boolean(portfolio.isActive);
+  const serverBotActive = portfolio.isActive;
   const {
     isActive: effectiveBotActive,
     loading: botLoading,
@@ -176,15 +176,37 @@ export default function App() {
     persistLauncherSlots(launcherSlots);
   }, [launcherSlots]);
 
-  // On load: restore chips + re-sync backend watchlist (backend is in-memory).
+  // On load: restore chips. Prefer backend watchlist when engine already ON
+  // (browser reopen must not wipe VPS scan list with stale localStorage).
   useEffect(() => {
     let cancelled = false;
 
     async function hydrateLauncher() {
+      let engineOn = false;
+      try {
+        const st = await authFetch('/bot/status');
+        if (st.ok) {
+          const data = await st.json();
+          engineOn = Boolean(data.is_active);
+          if (!cancelled && engineOn && Array.isArray(data.watchlist) && data.watchlist.length) {
+            const slots = data.watchlist.slice(0, MAX_LAUNCHER_SLOTS).map((pair, i) => {
+              const symbol = String(pair).split('/')[0].toUpperCase();
+              return { id: `${symbol}-restored-${i}`, symbol, timeframe: '1M' };
+            });
+            setLauncherSlots(slots);
+            persistLauncherSlots(slots);
+            return;
+          }
+        }
+      } catch {
+        /* fall through to local hydrate */
+      }
+
       const saved = readSavedLauncherSlots();
       if (saved.length) {
         if (!cancelled) setLauncherSlots(saved);
-        await syncWatchlist(saved);
+        // Only push local → backend when engine is OFF (avoid clobbering live VPS list).
+        if (!engineOn) await syncWatchlist(saved);
         return;
       }
       try {
@@ -258,15 +280,10 @@ export default function App() {
       return;
     }
     if (effectiveBotActive) {
-      if (activeCount > 0) {
-        pushActionLog('AI Engine STOP — choose Hold or Emergency…');
-        setStopConfirmOpen(true);
-        return;
-      }
-      pushActionLog('AI Engine STOP…');
-      const ok = await stopBotEngine('hold');
-      pushActionLog(ok ? 'AI Engine OFF.' : 'AI Engine stop failed.');
-      debugLog(ok ? 'AI Engine stopped' : 'AI Engine stop failed');
+      // Always confirm — even with 0 open trades. Accidental STOP was halting
+      // the VPS scanner; browser close must never be confused with stop.
+      pushActionLog('AI Engine STOP — confirm Hold or Emergency…');
+      setStopConfirmOpen(true);
       return;
     }
     pushActionLog('AI Engine START requested. Opening instructions popup.');
@@ -326,9 +343,9 @@ export default function App() {
   }
 
   async function handleBootCancel() {
-    pushActionLog('Boot cancelled — stopping AI Engine (no confirmation)…');
-    const ok = await stopBotEngine('hold');
-    pushActionLog(ok ? 'AI Engine stopped from boot Cancel.' : 'Boot cancel stop failed.');
+    // Do not instant-stop — same confirm as main STOP (prevents fat-finger / tab close confusion).
+    pushActionLog('Boot Cancel — confirm to stop AI Engine (VPS keeps running until you confirm)…');
+    setStopConfirmOpen(true);
   }
 
   function handleConfirmContinue() {
@@ -779,6 +796,7 @@ export default function App() {
         sessionLoading={sessionLoading}
         connectivityFrozen={Boolean(portfolio.connectivityFrozen)}
         freezeReason={portfolio.freezeReason}
+        oneMFeeHold={Boolean(portfolio.oneMFeeHold)}
         uptime={uptime}
         lastUpdated={readouts.lastUpdated}
         onClick={handleControlClick}

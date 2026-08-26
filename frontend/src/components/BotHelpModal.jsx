@@ -3,6 +3,7 @@ const SECTIONS = [
     title: 'AI Engine',
     items: [
       'START AI ENGINE scans watchlist pairs on your chart TF (1m–1D).',
+      'Engine runs on the VPS — closing the browser does NOT stop trading. Only AI ENGINE STOP does.',
       'Momentum gate: only coins with MARKET avg% above TF floor (1M>0.03, 5M>0.05, 15M>0.15, 1H>0.35, 1D>5) auto-enter watchlist; re-scan every 7 candles.',
       'Brain patterns + structure traps + order-flow trap (1M exec / 5M bias) → AI BUY/SELL/HOLD.',
       'Pattern scan uses the last closed candle; trade fires at the next candle open. First detect per pair is skipped.',

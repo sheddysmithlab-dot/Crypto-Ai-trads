@@ -8,6 +8,7 @@ export default function ControlBar({
   sessionLoading = false,
   connectivityFrozen = false,
   freezeReason = null,
+  oneMFeeHold = false,
   uptime,
   lastUpdated,
   onClick,
@@ -32,9 +33,32 @@ export default function ControlBar({
   // Manual BUY/SELL stay usable on the main chart coin (even while AI/session runs).
   const locked = busy;
 
+  const statusTitle = connectivityFrozen
+    ? freezeReason === 'ai_provider_down'
+      ? 'AI provider down — new entries paused; open trades still managed'
+      : freezeReason === 'market_feed_stale'
+        ? 'Market feed stale — new entries paused; open trades still managed'
+        : 'Connectivity frozen — waiting to resume'
+    : oneMFeeHold && botIsActive
+      ? '1m fee budget hold — new entries paused; engine still ON on VPS'
+      : botIsActive
+        ? 'Engine ON on VPS — browser optional'
+        : undefined;
+
+  const statusLabel = connectivityFrozen
+    ? '(Frozen · waiting)'
+    : sessionEngineEnabled
+      ? botIsActive
+        ? '(Session · Trading)'
+        : '(Session · Waiting)'
+      : botIsActive
+        ? oneMFeeHold
+          ? '(Running · fee hold)'
+          : '(Running · VPS)'
+        : '(Stopped)';
+
   return (
     <div className="relative shrink-0 z-50 bg-lightCard dark:bg-darkCard border-t border-gray-300 dark:border-gray-800 px-2 sm:px-3 py-1.5 shadow-[0_-4px_16px_rgba(0,0,0,0.25)]">
-      {/* Main actions — compact height */}
       <div className="w-full max-w-4xl mx-auto flex items-stretch gap-1.5 sm:gap-2">
         <button
           type="button"
@@ -94,44 +118,27 @@ export default function ControlBar({
         </button>
       </div>
 
-      {/* Bottom strip: Session Engine locked to far-left corner */}
       <div className="mt-1 w-full flex items-center justify-between gap-2 min-h-[28px]">
         <div className="flex items-center gap-1.5 min-w-0">
           <SessionEngineFab enabled={sessionEngineEnabled} onClick={onOpenSessionModal} compact />
-          <InfoTip text="Timed momentum windows (IST). When ON, the main button becomes Stop Session Momentum Engine." />
+          <InfoTip text="Timed momentum windows (IST). When ON, the main button becomes Stop Session Momentum Engine. Main AI Engine keeps running on VPS even if you close the browser." />
           <span className="inline-flex items-center gap-1.5 text-[10px] sm:text-xs text-gray-500 dark:text-gray-400 font-medium ml-1 truncate">
             <i className="fas fa-hourglass-start text-blue-500 shrink-0" />
             <span className="hidden sm:inline-flex items-center gap-1 shrink-0">
-              Session <InfoTip text="How long this AI session has been running." />
+              Session <InfoTip text="How long this AI session has been running on the VPS (independent of browser)." />
             </span>
             <span className="text-gray-800 dark:text-gray-200 font-bold tabular-nums">{uptime.formatted}</span>
             <span
               className={`shrink-0 ${
-                connectivityFrozen
+                connectivityFrozen || oneMFeeHold
                   ? 'text-amber-500'
                   : sessionEngineEnabled || botIsActive
                     ? 'text-green-500'
                     : 'text-gray-500'
               }`}
-              title={
-                connectivityFrozen
-                  ? freezeReason === 'ai_provider_down'
-                    ? 'AI provider down — new entries paused; open trades still managed'
-                    : freezeReason === 'market_feed_stale'
-                      ? 'Market feed stale — new entries paused; open trades still managed'
-                      : 'Connectivity frozen — waiting to resume'
-                  : undefined
-              }
+              title={statusTitle}
             >
-              {connectivityFrozen
-                ? '(Frozen · waiting)'
-                : sessionEngineEnabled
-                  ? botIsActive
-                    ? '(Session · Trading)'
-                    : '(Session · Waiting)'
-                  : botIsActive
-                    ? '(Running)'
-                    : '(Stopped)'}
+              {statusLabel}
             </span>
           </span>
         </div>
