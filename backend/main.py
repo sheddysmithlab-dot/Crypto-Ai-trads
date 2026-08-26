@@ -3419,11 +3419,20 @@ def compute_auto_trade_plan(
     raw_qty = position_usd / entry_price
     qty = snap_qty_to_step(raw_qty, bybit_symbol)
     bumped_to_min_lot = False
+    # Balance-aware: never open a trade whose min lot exceeds 15% of available capital.
+    # Low balance → only cheap coins; higher balance unlocks more expensive coins.
+    max_lot_notional = float(available) * 0.15
     if qty is None or qty <= 0:
         lot = min_lot_qty(bybit_symbol)
         if lot is None:
             return None
         min_notional = lot * entry_price
+        if min_notional > max_lot_notional:
+            print(
+                f"[SIZE] Skip {trade_pair}: min lot ${min_notional:.2f} "
+                f"> 15% of balance ${available:.2f} (${max_lot_notional:.2f})"
+            )
+            return None
         leverage = max(float(getattr(agent, "leverage", 1) or 1), 1.0)
         margin_needed = min_notional / leverage
         if margin_needed > available * 0.95:
