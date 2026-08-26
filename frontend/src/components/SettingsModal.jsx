@@ -35,7 +35,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
       const data = await res.json();
 
       const bybitLabel = data.bybit_configured
-        ? `Bybit: connected (${data.bybit_environment})`
+        ? `Bybit: saved on server (${data.bybit_environment}${data.live_trading_preferred ? ', live' : ''})`
         : 'Bybit: not connected';
       const aiLabel = data.ai_configured
         ? `AI: ${data.ai_provider} (${data.ai_model || 'glm-4.5-flash'})`
@@ -43,7 +43,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
 
       setBanner({
         tone: 'neutral',
-        message: `${bybitLabel} | ${aiLabel}. Keys are saved securely and never shown here again.`,
+        message: `${bybitLabel} | ${aiLabel}. Keys stay on VPS until you press Reset — never shown here again.`,
       });
 
       setBybitEnv(data.bybit_environment || 'mainnet');
@@ -155,7 +155,13 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
   }
 
   async function handleReset() {
-    if (!confirm('Reset all saved API settings? This cannot be undone.')) return;
+    if (
+      !confirm(
+        'Remove saved Bybit API key & secret from the server?\n\nThis is the only way keys are deleted. Browser close does not remove them.',
+      )
+    ) {
+      return;
+    }
     setBusy((b) => ({ ...b, reset: true }));
     try {
       const res = await authFetch('/settings/reset', { method: 'POST' });
@@ -201,30 +207,30 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
           <div>
             <div className="mb-3 flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-blue-400">
               Bybit API
-              <InfoTip text="Required for live trading. Paste your Bybit API key and secret, pick Mainnet or Testnet, then Save and Test Bybit." />
+              <InfoTip text="Required for live trading. Paste once, Save + Test Bybit. Keys stay on the VPS until you press Reset." />
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <LabelWithInfo tip="Your Bybit public API key. Leave blank to keep the key already saved.">
+                <LabelWithInfo tip="Your Bybit public API key. Leave blank to keep the key already saved on the server.">
                   API Key
                 </LabelWithInfo>
                 <input
                   type="password"
                   autoComplete="off"
-                  placeholder="Bybit API key"
+                  placeholder="Leave blank to keep saved key"
                   value={bybitKey}
                   onChange={(e) => setBybitKey(e.target.value)}
                   className="w-full bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
                 />
               </div>
               <div>
-                <LabelWithInfo tip="Your Bybit secret key. Leave blank to keep the secret already saved.">
+                <LabelWithInfo tip="Your Bybit secret key. Leave blank to keep the secret already saved on the server.">
                   API Secret
                 </LabelWithInfo>
                 <input
                   type="password"
                   autoComplete="off"
-                  placeholder="API secret"
+                  placeholder="Leave blank to keep saved secret"
                   value={bybitSecret}
                   onChange={(e) => setBybitSecret(e.target.value)}
                   className="w-full bg-[#161A1E] border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
@@ -347,7 +353,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
               onClick={handleReset}
               disabled={busy.reset}
             >
-              Reset
+              {busy.reset ? 'Removing…' : 'Remove keys'}
             </button>
           </div>
         </div>

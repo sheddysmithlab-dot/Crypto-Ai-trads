@@ -46,6 +46,12 @@ from api_secrets import (
     is_zai_configured,
     TAAPI_PAUSED,
 )
+from settings_persist import (
+    load_credentials as _load_persisted_creds,
+    save_credentials as _save_persisted_creds,
+    clear_credentials as _clear_persisted_creds,
+    set_live_trading as _persist_live_trading,
+)
 from chart_24h import chart_24h_refresh_loop, chart_24h_store
 from chart_tf_move import fetch_tf_move
 from momentum_watchlist import (
@@ -202,19 +208,23 @@ class SettingsPayload(BaseModel):
     ai_base_url: str = ""
 
 class SettingsStore:
-    """ In-memory credential store for the local session.
-    Secrets are NEVER logged in plaintext and NEVER echoed back to the frontend.
-    Z.ai (GLM-4.5-Flash) is the permanent default AI provider — loaded from
-    ZAI_API_KEY in backend/.env or the host environment on every start/reset. """
+    """Credential store for Bybit & AI.
+
+    Secrets persist on disk under backend/data/api_credentials.json (Docker volume)
+    until the user explicitly Resets. Never logged or echoed to the frontend.
+    Z.ai defaults still load from ZAI_API_KEY env on every start.
+    """
     def __init__(self):
         self.bybit_api_key = ""
         self.bybit_api_secret = ""
         self.bybit_environment = "mainnet"
+        self.live_trading_preferred = False
         self.ai_provider = "z-ai"
         self.ai_api_key = ""
         self.ai_model = "glm-4.5-flash"
         self.ai_base_url = "https://api.z.ai/api/paas/v4"
         self._load_from_env()
+        self._load_from_disk()
 
     def _load_from_env(self):
         """ Apply permanent Z.ai defaults + any secrets from .env / Render env vars. """
@@ -243,6 +253,30 @@ class SettingsStore:
             print("[SETTINGS] Z.ai is the default AI provider — set ZAI_API_KEY to enable.")
         print("[SETTINGS] Entry engines: 1m/5m SCALP + 15m/1h/1D BIBLE.")
 
+    def _load_from_disk(self):
+        """Restore UI-saved keys (survive restart). Disk wins over empty; env can seed first."""
+        data = _load_persisted_creds()
+        if data.get("bybit_api_key"):
+            self.bybit_api_key = data["bybit_api_key"]
+        if data.get("bybit_api_secret"):
+            self.bybit_api_secret = data["bybit_api_secret"]
+        if data.get("bybit_environment") in ("mainnet", "testnet"):
+            self.bybit_environment = data["bybit_environment"]
+        self.live_trading_preferred = bool(data.get("live_trading"))
+        if data.get("ai_api_key"):
+            self.ai_api_key = data["ai_api_key"]
+        if data.get("ai_provider"):
+            self.ai_provider = data["ai_provider"]
+        if data.get("ai_model"):
+            self.ai_model = data["ai_model"]
+        if data.get("ai_base_url"):
+            self.ai_base_url = data["ai_base_url"].rstrip("/")
+        if self.is_bybit_configured():
+            print(
+                f"[SETTINGS] Bybit keys restored from disk "
+                f"(env={self.bybit_environment}, live_pref={self.live_trading_preferred})."
+            )
+
     def save(self, payload: SettingsPayload):
         # Only overwrite secret fields if the user actually typed a new value
         if payload.bybit_api_key:
@@ -261,9 +295,21 @@ class SettingsStore:
         elif not self.ai_base_url:
             self.ai_base_url = "https://api.z.ai/api/paas/v4"
 
+        _save_persisted_creds({
+            "bybit_api_key": self.bybit_api_key,
+            "bybit_api_secret": self.bybit_api_secret,
+            "bybit_environment": self.bybit_environment,
+            "live_trading": self.live_trading_preferred,
+            "ai_provider": self.ai_provider,
+            "ai_api_key": self.ai_api_key,
+            "ai_model": self.ai_model,
+            "ai_base_url": self.ai_base_url,
+        })
+
     def reset(self):
+        """User-initiated wipe — clears disk + memory (then re-applies env defaults)."""
+        _clear_persisted_creds()
         self.__init__()
-        # __init__ already re-applies Z.ai defaults + env secrets.
 
     def is_bybit_configured(self):
         return bool(self.bybit_api_key and self.bybit_api_secret)
@@ -276,6 +322,8 @@ class SettingsStore:
         return {
             "bybit_configured": self.is_bybit_configured(),
             "bybit_environment": self.bybit_environment,
+            "bybit_persisted": self.is_bybit_configured(),
+            "live_trading_preferred": bool(self.live_trading_preferred),
             "ai_provider": self.ai_provider,
             "ai_model": self.ai_model,
             "ai_base_url": self.ai_base_url,
@@ -422,6 +470,8 @@ class BybitAPIWrapper:
         self.mode = "LIVE_TRADING"
         self.connected = True
         self.last_known_balance = None
+        settings_store.live_trading_preferred = True
+        _persist_live_trading(True)
         print("[PILLAR 5: BYBIT] LIVE ACCOUNT CONNECTED. REAL TRADING ENABLED.")
         notifications.push("Bybit API Connected - Real Money Trading is now ACTIVE.", "warning")
         # Kick off an immediate balance read instead of waiting for the next background poll.
@@ -434,6 +484,10 @@ class BybitAPIWrapper:
         self.mode = "PAPER_TRADING"
         self.connected = False
         self.last_known_balance = None
+        settings_store.live_trading_preferred = False
+        # Only update disk if keys still exist (reset() already wiped the file).
+        if settings_store.is_bybit_configured():
+            _persist_live_trading(False)
 
     def _sign(self, timestamp, recv_window, query_string):
         payload = f"{timestamp}{settings_store.bybit_api_key}{recv_window}{query_string}"
@@ -4084,6 +4138,27 @@ async def start_background_tasks():
             )
     except Exception as exc:
         print(f"[ENGINE RUNTIME] startup restore note: {exc}")
+    # Restore Bybit live mode if user previously connected (keys persist on disk).
+    try:
+        if settings_store.is_bybit_configured() and settings_store.live_trading_preferred:
+            bybit_api.mode = "LIVE_TRADING"
+            bybit_api.connected = True
+            print(
+                f"[SETTINGS] Restoring LIVE_TRADING "
+                f"({settings_store.bybit_environment}) from saved Bybit keys."
+            )
+            notifications.push(
+                f"Bybit keys restored — LIVE trading resumed ({settings_store.bybit_environment}).",
+                "warning",
+            )
+            asyncio.create_task(bybit_api.fetch_real_balance())
+        elif settings_store.is_bybit_configured():
+            print(
+                f"[SETTINGS] Bybit keys on disk ({settings_store.bybit_environment}) — "
+                "paper mode until you Test/Connect again (or keys were saved without live)."
+            )
+    except Exception as exc:
+        print(f"[SETTINGS] Bybit restore note: {exc}")
     asyncio.create_task(market_simulator())
     asyncio.create_task(bybit_price_feed())
     asyncio.create_task(bybit_balance_refresher())
@@ -4949,7 +5024,13 @@ async def save_settings(payload: SettingsPayload):
     # Log only that credentials were updated - never the raw values
     print(f"[SETTINGS] Bybit credentials {'updated' if payload.bybit_api_key else 'unchanged'} "
           f"(env={settings_store.bybit_environment}). AI provider set to '{settings_store.ai_provider}'.")
-    return {"status": "success", "message": "Settings saved securely. Keys are stored locally and never displayed again."}
+    return {
+        "status": "success",
+        "message": (
+            "Settings saved on server. Bybit keys stay until you press Reset — "
+            "browser close / redeploy will not remove them."
+        ),
+    }
 
 @app.post("/settings/test-bybit")
 async def test_bybit_connection():
@@ -4991,8 +5072,11 @@ async def test_ai_connection():
 async def reset_settings():
     settings_store.reset()
     bybit_api.disconnect_real_api(reason="Settings reset")
-    print("[SETTINGS] All stored Bybit & AI settings have been reset.")
-    return {"status": "success", "message": "All settings have been reset to defaults."}
+    print("[SETTINGS] All stored Bybit & AI settings have been reset (disk cleared).")
+    return {
+        "status": "success",
+        "message": "Saved Bybit/AI keys removed. Add them again anytime.",
+    }
 
 # ==========================================
 # PILLAR 4: REAL-TIME DATA PIPELINES (WebSockets)
