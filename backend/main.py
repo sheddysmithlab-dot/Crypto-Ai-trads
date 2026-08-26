@@ -596,8 +596,9 @@ class BybitAPIWrapper:
     async def fetch_real_balance(self):
         """ RULE 5 wiring: pull the REAL total equity from Bybit's v5 API.
 
-        Checks UNIFIED, SPOT, and FUNDING accounts so the user sees ALL their
-        funds (Funding account balance was being missed → showed $0).
+        Checks UNIFIED (derivatives) + FUNDING (funding wallet) so the user sees
+        ALL their funds. SPOT is skipped — Bybit rejects it with
+        "accountType only support UNIFIED" when the key is UTA-only.
         Returns the equity as a float, or None on any failure.
         """
         if not settings_store.is_bybit_configured():
@@ -608,46 +609,36 @@ class BybitAPIWrapper:
             total_equity = 0.0
             found_any = False
 
-            # --- UNIFIED + SPOT: /v5/account/wallet-balance (has totalEquity) ---
-            for account_type in ("UNIFIED", "SPOT"):
-                query_string = f"accountType={account_type}"
-                headers = self._auth_headers(query_string)
-                async with httpx.AsyncClient(timeout=8.0) as client:
-                    resp = await client.get(
-                        f"{self._base_url()}/v5/account/wallet-balance?{query_string}",
-                        headers=headers,
-                    )
+            # --- UNIFIED: /v5/account/wallet-balance (has totalEquity) ---
+            query_string = "accountType=UNIFIED"
+            headers = self._auth_headers(query_string)
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.get(
+                    f"{self._base_url()}/v5/account/wallet-balance?{query_string}",
+                    headers=headers,
+                )
 
-                if resp.status_code == 401:
-                    self.last_error = "Invalid API key/secret (Bybit returned 401 Unauthorized)."
-                    self._note_failure()
-                    return None
-                if resp.status_code == 403:
-                    self.last_error = await self._format_http_error(403, resp)
-                    self._note_failure()
-                    return None
-                if resp.status_code != 200:
-                    self.last_error = await self._format_http_error(resp.status_code, resp)
-                    self._note_failure()
-                    return None
+            if resp.status_code == 401:
+                self.last_error = "Invalid API key/secret (Bybit returned 401 Unauthorized)."
+                self._note_failure()
+                return None
+            if resp.status_code == 403:
+                self.last_error = await self._format_http_error(403, resp)
+                self._note_failure()
+                return None
+            if resp.status_code != 200:
+                self.last_error = await self._format_http_error(resp.status_code, resp)
+                self._note_failure()
+                return None
 
-                data = resp.json()
-                if data.get("retCode") != 0:
-                    if account_type == "SPOT":
-                        outbound_ip = await self._get_outbound_ip()
-                        self.last_error = self._format_ret_error(data, outbound_ip)
-                        self._note_failure()
-                        return None
-                    continue
+            data = resp.json()
+            if data.get("retCode") != 0:
+                self.last_error = data.get("retMsg", "Bybit wallet-balance error")
+                self._note_failure()
+                return None
 
-                account_list = data.get("result", {}).get("list", [])
-                if not account_list:
-                    if account_type == "SPOT":
-                        self.last_error = "Bybit returned no account data for this key."
-                        self._note_failure()
-                        return None
-                    continue
-
+            account_list = data.get("result", {}).get("list", [])
+            if account_list:
                 equity = float(account_list[0].get("totalEquity", 0))
                 total_equity += equity
                 found_any = True
