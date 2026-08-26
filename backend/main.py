@@ -873,8 +873,8 @@ class AITradingAgent:
         self.emergency_awaiting_decision = False
 
         # Pre-start strategy config (AI Agent Instructions modal before START).
-        self.starting_capital = 100_000.0
-        self.current_capital = self.starting_capital
+        self.starting_capital = 0.0
+        self.current_capital = 0.0
         # Total capital risk % from modal -> max_concurrent_trades via round(risk_pct * 2).
         # Also: when session portfolio drop hits this %, auto Hold-stop (no new entries).
         self.risk_level_pct = 5.0
@@ -1387,9 +1387,11 @@ class AITradingAgent:
     def get_trading_capital_base(self):
         """ Capital used for position sizing. LIVE -> Bybit equity; paper -> simulated ledger. """
         if bybit_api.mode == "LIVE_TRADING":
-            if bybit_api.last_known_balance is None:
-                return None
-            return max(0.0, float(bybit_api.last_known_balance))
+            # ALWAYS use Bybit balance in LIVE mode — never fall back to paper capital.
+            bal = bybit_api.last_known_balance
+            if bal is not None and bal > 0:
+                return float(bal)
+            return 0.0  # LIVE but balance not fetched yet → 0, not paper
         return self.current_capital
 
     def on_live_connected(self, equity: float):
@@ -1412,12 +1414,13 @@ class AITradingAgent:
 
     def get_total_portfolio_value(self):
         """Equity = available cash + reserved in open trades + unrealized net P&L."""
+        if bybit_api.mode == "LIVE_TRADING":
+            # LIVE: always Bybit balance — never paper simulation
+            return float(bybit_api.last_known_balance or 0)
         reserved = sum(
             float(t.get("capital_reserved") or t.get("margin") or 0) for t in self.trades
         )
         unrealized = self.get_unrealized_net_usd()
-        if bybit_api.mode == "LIVE_TRADING" and bybit_api.last_known_balance is not None:
-            return bybit_api.last_known_balance
         return self.current_capital + reserved + unrealized
 
     def _live_insufficient_balance(self) -> bool:
@@ -4281,9 +4284,13 @@ async def start_background_tasks():
             bybit_api.connected = True
             settings_store.live_trading_preferred = True
             _persist_live_trading(True)
+            # Wipe paper capital — LIVE mode uses Bybit balance exclusively.
+            agent.current_capital = 0.0
+            agent.starting_capital = 0.0
             print(
                 f"[SETTINGS] Restoring LIVE_TRADING "
-                f"({settings_store.bybit_environment}) from saved Bybit keys."
+                f"({settings_store.bybit_environment}) from saved Bybit keys. "
+                f"Paper capital wiped — using Bybit balance only."
             )
             notifications.push(
                 f"Bybit keys restored — LIVE trading resumed ({settings_store.bybit_environment}).",
@@ -4291,7 +4298,15 @@ async def start_background_tasks():
             )
             asyncio.create_task(bybit_api.fetch_real_balance())
         else:
-            print("[SETTINGS] No Bybit keys on disk — PAPER trading mode.")
+            # No keys → PAPER mode. Seed paper capital if not restored.
+            bybit_api.mode = "PAPER_TRADING"
+            bybit_api.connected = False
+            if agent.current_capital <= 0:
+                agent.starting_capital = 100_000.0
+                agent.current_capital = agent.starting_capital
+                print("[SETTINGS] No Bybit keys — PAPER mode (capital seeded $100,000).")
+            else:
+                print("[SETTINGS] No Bybit keys — PAPER mode (restored capital).")
     except Exception as exc:
         print(f"[SETTINGS] Bybit restore note: {exc}")
     asyncio.create_task(market_simulator())
