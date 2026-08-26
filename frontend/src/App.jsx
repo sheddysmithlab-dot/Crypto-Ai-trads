@@ -663,7 +663,7 @@ export default function App() {
   }
 
   const exitConfirmCopy = (() => {
-    if exitConfirm.type === 'force-close') {
+    if (exitConfirm.type === 'force-close') {
       const trade = trades.find((t) => t.id === exitConfirm.tradeId);
       const lockedNote =
         trade?.status === 'locked'
