@@ -55,7 +55,6 @@ from settings_persist import (
 from chart_24h import chart_24h_refresh_loop, chart_24h_store
 from chart_tf_move import fetch_tf_move
 from momentum_watchlist import (
-    MOMENTUM_REFRESH_EVERY_N_CANDLES,
     build_momentum_watchlist,
 )
 import bybit_instruments
@@ -420,7 +419,7 @@ async def consult_ai_provider(context):
         f"PATTERN DETECTED → confirm {side} {pattern} / trap score {score_txt}. "
         f"Pair {pair} {timeframe}. "
         f"Analyze LONG/SHORT, trap/inverse/fake-breakout per policy. "
-        f"Reply YES only if confidence ≥ {thr}% (1m=78, 5m=70, else=65); else NO. "
+        f"Reply YES only if confidence ≥ {thr}% (overall ≥85 all TFs); else NO. "
         f"One word only: YES or NO."
     )
 
@@ -3830,57 +3829,27 @@ def _run_momentum_refresh_background(reason: str) -> None:
 async def maybe_refresh_momentum_every_n_candles(
     client: httpx.AsyncClient, timeframe_key: str
 ) -> None:
-    """Re-run momentum universe filter every N closed candles of active TF.
+    """Boot-only momentum universe filter.
 
-    The every-N refresh runs in the BACKGROUND so it never blocks the scan loop
-    (the universe re-score can take 30-120s when Bybit rate-limits). A guard
-    skips the trigger if a refresh is already running. Boot refresh stays inline
-    because the scan gate (momentum_gate_ready) is False until it completes, so
-    there is nothing to block anyway.
+    Periodic 7th-candle re-scan DISABLED — watchlist stays on the boot
+    (or manual start) universe so chart-swap churn / scan hangs stop.
+    Boot refresh stays inline until momentum_gate_ready flips True.
     """
     if not agent.is_active or agent.emergency_triggered:
         return
-    if not getattr(agent, "momentum_gate_ready", False):
-        await apply_momentum_watchlist_refresh(reason="boot")
-        # Seed candle cursor from active pair so the next refresh waits N bars
-        bybit_symbol = get_bybit_symbol(agent.active_pair)
-        if bybit_symbol:
-            try:
-                hist = await fetch_closed_candle_history(
-                    client, bybit_symbol, timeframe_key, limit=3
-                )
-                if hist:
-                    agent.last_momentum_candle_ms = int(hist[-1]["close_time"])
-            except Exception:
-                agent.last_momentum_candle_ms = int(time.time() * 1000)
-        return
-
+    if getattr(agent, "momentum_gate_ready", False):
+        return  # no every-N candle re-scan
+    await apply_momentum_watchlist_refresh(reason="boot")
     bybit_symbol = get_bybit_symbol(agent.active_pair)
-    if not bybit_symbol:
-        return
-    try:
-        hist = await fetch_closed_candle_history(
-            client, bybit_symbol, timeframe_key, limit=3
-        )
-    except Exception as exc:
-        print(f"[MOMENTUM] candle probe failed: {exc}")
-        return
-    if not hist:
-        return
-    close_time = int(hist[-1]["close_time"])
-    last = int(getattr(agent, "last_momentum_candle_ms", 0) or 0)
-    if last <= 0:
-        agent.last_momentum_candle_ms = close_time
-        return
-    interval_ms = _timeframe_interval_ms(timeframe_key)
-    if interval_ms <= 0:
-        return
-    bars = (close_time - last) // interval_ms
-    if bars < MOMENTUM_REFRESH_EVERY_N_CANDLES:
-        return
-    # Advance cursor NOW so repeated triggers don't stack while refresh runs.
-    agent.last_momentum_candle_ms = close_time
-    _run_momentum_refresh_background(f"every_{MOMENTUM_REFRESH_EVERY_N_CANDLES}_candles")
+    if bybit_symbol:
+        try:
+            hist = await fetch_closed_candle_history(
+                client, bybit_symbol, timeframe_key, limit=3
+            )
+            if hist:
+                agent.last_momentum_candle_ms = int(hist[-1]["close_time"])
+        except Exception:
+            agent.last_momentum_candle_ms = int(time.time() * 1000)
 
 
 def get_pattern_neon_snapshot(pair: str | None = None) -> list[dict]:
@@ -5349,7 +5318,7 @@ async def bot_start():
         "ai",
         f"AI Engine STARTED on {agent.active_pair} ({open_count} open preserved). "
         f"Momentum watchlist: {fire_n} pair(s) above {thr:g}% on {tf_key}. "
-        f"Refresh every {MOMENTUM_REFRESH_EVERY_N_CANDLES} candles.",
+        f"Periodic 7-candle re-scan OFF (boot watchlist holds).",
         {
             "open_positions": open_count,
             "timeframe_seconds": agent.timeframe_seconds,

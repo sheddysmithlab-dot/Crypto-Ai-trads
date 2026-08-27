@@ -24,7 +24,7 @@ MOMENTUM_MIN_AVG_PCT: dict[str, float] = {
     "1D": 5.0,
 }
 
-MOMENTUM_REFRESH_EVERY_N_CANDLES = 7
+MOMENTUM_REFRESH_EVERY_N_CANDLES = 7  # legacy constant; periodic re-scan disabled in main.py
 # Parallel kline fetches during universe score (burst only every N candles / boot).
 SCORE_CONCURRENCY = 10
 

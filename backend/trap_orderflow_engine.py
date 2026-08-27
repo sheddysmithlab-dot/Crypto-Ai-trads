@@ -26,14 +26,14 @@ THR_Z_TVOL = 1.0
 THR_FAKE_WICK = 0.30
 THR_BREAK_ATR = 0.10
 THR_BALANCED = 0.05
-THR_SCORE = 65.0  # default floor (15m / 1h / 1d)
-THR_SCORE_5M = 70.0  # 5m confidence floor
-THR_SCORE_1M = 78.0  # 1m only — confidence floor for fire (was 90, lowered to 78)
+THR_SCORE = 85.0  # overall trade confidence floor (all TFs)
+THR_SCORE_5M = 85.0  # 5m — same overall floor
+THR_SCORE_1M = 85.0  # 1m/30s — same overall floor
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
 
 # 1m fire allowlist — EXHAUSTION excluded (too many false shorts/longs).
-# REVERSAL_TRAP re-enabled on 1m (still subject to 1m≥78 floor + 5m-bias safety).
+# REVERSAL_TRAP re-enabled on 1m (still subject to overall ≥85 floor + 5m-bias safety).
 _1M_LONG_OK = ("SELL_TRAP", "ABSORPTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
 _1M_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
 _HTF_LONG_OK = ("SELL_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
@@ -41,7 +41,10 @@ _HTF_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVER
 
 
 def thr_score_for_tf(exec_tf: str | None) -> float:
-    """Pattern / OF confidence floor (0–100) before AI confirm + fire."""
+    """Pattern / OF confidence floor (0–100) before AI confirm + fire.
+
+    Overall policy: ≥85 on every timeframe (1m/5m/15m/1h/1D).
+    """
     tf = (exec_tf or "").strip().lower()
     if tf in ("1m", "30s"):
         return THR_SCORE_1M
@@ -605,7 +608,7 @@ def evaluate_trap_orderflow(
             setup_1 = None
 
     # 1m: never use EXHAUSTION as the primary setup (noise); pick next-best.
-    # REVERSAL_TRAP allowed on 1m (still gated by 1m≥78 floor + 5m-bias safety above).
+    # REVERSAL_TRAP allowed on 1m (still gated by overall ≥85 floor + 5m-bias safety above).
     if (exec_tf or "").strip().lower() in ("1m", "30s") and setup_1 and setup_1["name"] in (
         "EXHAUSTION",
     ):
