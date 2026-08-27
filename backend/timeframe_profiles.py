@@ -1,13 +1,15 @@
 """Per-chart-timeframe trading profile: win/lose display rates + capital risk %.
 
 UI chart TF buttons map here; backend auto-sizing uses capital_pct.
+
+1m and 5m share the same scalp strategy (entry/exit/confirm/OF/sizing %).
 """
 from __future__ import annotations
 
 # Keys match SECONDS_TO_TIMEFRAME_KEY / chart UI (1m, 5m, …).
 TIMEFRAME_PROFILES: dict[str, dict] = {
     "1m": {"win_rate": 30, "lose_rate": 70, "capital_pct": 1.5},
-    "5m": {"win_rate": 50, "lose_rate": 50, "capital_pct": 7.0},
+    "5m": {"win_rate": 30, "lose_rate": 70, "capital_pct": 1.5},  # same as 1m
     "15m": {"win_rate": 60, "lose_rate": 40, "capital_pct": 10.0},
     "1h": {"win_rate": 70, "lose_rate": 30, "capital_pct": 15.0},
     "1D": {"win_rate": 80, "lose_rate": 20, "capital_pct": 20.0},
@@ -19,6 +21,16 @@ TIMEFRAME_PROFILES: dict[str, dict] = {
 }
 
 _DEFAULT = {"win_rate": 50, "lose_rate": 50, "capital_pct": 7.0}
+
+# Shared scalp policy: 1m strategy applied to 5m (and 30s).
+SCALP_TFS = frozenset({"1m", "5m", "30s"})
+
+
+def is_scalp_tf(timeframe_key: str | None) -> bool:
+    key = str(timeframe_key or "").strip()
+    aliases = {"1M": "1m", "5M": "5m", "30S": "30s"}
+    key = aliases.get(key, key).lower()
+    return key in SCALP_TFS
 
 
 def get_timeframe_profile(timeframe_key: str) -> dict:

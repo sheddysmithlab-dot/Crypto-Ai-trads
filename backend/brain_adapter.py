@@ -515,28 +515,33 @@ def _run_orderflow_trap(
         return None
 
 
-def _gate_1m_of_score(action: str, of_trap: Optional[dict], timeframe_key: str) -> str:
-    """1m only: BUY/SELL only when matching OF side score ≥ setup floor (trap≥90 else≥75)."""
-    if _norm_tf(timeframe_key) != "1m":
+def _gate_scalp_of_score(action: str, of_trap: Optional[dict], timeframe_key: str) -> str:
+    """1m/5m: BUY/SELL only when matching OF side score ≥ setup floor (trap≥90 else≥75)."""
+    tf = _norm_tf(timeframe_key)
+    if tf not in ("1m", "5m", "30s"):
         return action
     if action not in ("BUY", "SELL"):
         return action
     pattern = (of_trap or {}).get("pattern")
-    thr = thr_score_for_setup("1m", pattern)
+    thr = thr_score_for_setup(tf, pattern)
     if not of_trap:
-        print(f"[AI-BRAIN] 1m gate: no OF result — HOLD (need score ≥ {thr:.0f})")
+        print(f"[AI-BRAIN] scalp gate: no OF result — HOLD (need score ≥ {thr:.0f})")
         return "HOLD"
     long_s = float(of_trap.get("long_score") or 0)
     short_s = float(of_trap.get("short_score") or 0)
     if action == "BUY":
         if long_s < thr:
-            print(f"[AI-BRAIN] 1m gate: BUY blocked LONG={long_s:.0f} < {thr:.0f}")
+            print(f"[AI-BRAIN] scalp gate: BUY blocked LONG={long_s:.0f} < {thr:.0f}")
             return "HOLD"
         return "BUY"
     if short_s < thr:
-        print(f"[AI-BRAIN] 1m gate: SELL blocked SHORT={short_s:.0f} < {thr:.0f}")
+        print(f"[AI-BRAIN] scalp gate: SELL blocked SHORT={short_s:.0f} < {thr:.0f}")
         return "HOLD"
     return "SELL"
+
+
+def _gate_1m_of_score(action: str, of_trap: Optional[dict], timeframe_key: str) -> str:
+    return _gate_scalp_of_score(action, of_trap, timeframe_key)
 
 
 def _fallback_action_from_brain_and_of(
@@ -554,12 +559,12 @@ def _fallback_action_from_brain_and_of(
             return "BUY"
         if sig == "SHORT" and short_s >= thr:
             return "SELL"
-        if tf == "1m":
-            # 1m: never fall through to brain pattern if OF score is below floor
+        if tf in ("1m", "5m", "30s"):
+            # Scalp: never fall through to brain pattern if OF score is below floor
             return "HOLD"
         if sig == "NO_TRADE":
             pass
-    if tf == "1m":
+    if tf in ("1m", "5m", "30s"):
         return "HOLD"
     brain_verdict = think.get("verdict", "HOLD")
     return brain_verdict if brain_verdict in ("BUY", "SELL") else "HOLD"
@@ -843,7 +848,12 @@ def strategy_system_blurb() -> str:
 
 
 def is_scalp_timeframe(timeframe_key: str | None) -> bool:
-    return False
+    """1m and 5m share the same scalp entry/exit/confirm policy."""
+    try:
+        from timeframe_profiles import is_scalp_tf
+        return is_scalp_tf(timeframe_key)
+    except Exception:
+        return str(timeframe_key or "").strip().lower() in ("1m", "5m", "30s")
 
 
 async def run_in_thread(candles, timeframe_key, **kw):

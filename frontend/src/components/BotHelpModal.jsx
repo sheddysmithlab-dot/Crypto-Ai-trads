@@ -7,9 +7,9 @@ const SECTIONS = [
       'Momentum gate: only coins with MARKET avg% above TF floor (1M>0.03, 5M>0.05, 15M>0.15, 1H>0.35, 1D>5) auto-enter watchlist; re-scan every 7 candles.',
       'HARD RULE: 7th-candle / watchlist refresh·replace·add·edit NEVER closes or hides related OPEN trades — they keep their own TP/SL until exit.',
       'Brain patterns + structure traps + order-flow trap (1M exec / 5M bias) → AI BUY/SELL/HOLD.',
-      'Pattern scan uses the last closed candle. On 1m: lock after AI confirm, then fire only when a later closed bar is green (LONG) or red (SHORT) — max 5 bars then skip; other pairs pause while locked. On 5m+: fire at next candle open. First detect per pair is skipped.',
-      'Size by TF capital %: 1m 1.5% · 5m 7% · 15m 10% · 1h 15% · 1D 20%.',
-      '1m fee pack: OF≥90, dual profit lock +0.50→+0.40 then +0.65→+0.55, max 3 open per chart (same-side stack OK), 5-bar spacing, fee-budget hold.',
+      'Pattern scan uses the last closed candle. On 1m and 5m (same scalp strategy): lock after AI confirm, then fire only when a later closed bar is green (LONG) or red (SHORT) — max 5 bars then skip; other pairs pause while locked. On 15m+: fire at next candle open. First detect per pair is skipped.',
+      'Size by TF capital %: 1m/5m 1.5% · 15m 10% · 1h 15% · 1D 20%.',
+      '1m/5m fee pack: OF≥75 (trap≥90), dual profit lock +0.50→+0.40 then +0.65→+0.55, max 3 open per chart (same-side stack OK), 5-bar spacing, fee-budget hold.',
     ],
   },
   {
@@ -23,8 +23,8 @@ const SECTIONS = [
   {
     title: 'Take-profit (per trade)',
     items: [
-      '1m dual lock: +0.50%→exit floor +0.40%; if run continues, +0.65%→floor +0.55%; then +0.20 steps.',
-      'Other TFs: +0.50% lock → floor +0.40%; then +0.20 steps / 0.20 trail.',
+      '1m/5m dual lock: +0.50%→exit floor +0.40%; if run continues, +0.65%→floor +0.55%; then +0.20 steps.',
+      'Other TFs (15m+): +0.50% lock → floor +0.40%; then +0.20 steps / 0.20 trail.',
       'Hard ceiling not fixed — stepped locks keep trailing while trend runs.',
     ],
   },

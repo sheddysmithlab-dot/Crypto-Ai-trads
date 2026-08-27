@@ -89,7 +89,7 @@ from pathlib import Path
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "DATA"
 
-from timeframe_profiles import capital_pct_fraction, get_timeframe_profile
+from timeframe_profiles import capital_pct_fraction, get_timeframe_profile, is_scalp_tf
 
 # Load backend/.env before any credential reads (cwd-safe path).
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -910,7 +910,7 @@ class AITradingAgent:
         "30s": float(os.environ.get("HARD_STOP_30S", "0.30")),
         "1m": float(os.environ.get("HARD_STOP_1M", "0.35")),
         "3m": float(os.environ.get("HARD_STOP_3M", "0.40")),
-        "5m": float(os.environ.get("HARD_STOP_5M", "0.40")),
+        "5m": float(os.environ.get("HARD_STOP_5M", "0.35")),  # same as 1m scalp
         "10m": float(os.environ.get("HARD_STOP_10M", "0.45")),
         "15m": float(os.environ.get("HARD_STOP_15M", "0.50")),
         "30m": float(os.environ.get("HARD_STOP_30M", "0.55")),
@@ -2362,8 +2362,13 @@ class AITradingAgent:
         """First profit-lock level (+0.50%) for all TFs including 1m."""
         return float(PROFIT_LOCK_PCT)
 
+    def _is_scalp_trade(self, trade: dict | None = None) -> bool:
+        """1m and 5m share the same scalp profit/entry policy."""
+        return is_scalp_tf((trade or {}).get("timeframe_key"))
+
     def _is_1m_trade(self, trade: dict | None = None) -> bool:
-        return str((trade or {}).get("timeframe_key") or "").strip().lower() == "1m"
+        # Back-compat alias — scalp policy covers 1m + 5m.
+        return self._is_scalp_trade(trade)
 
     def _profit_giveback_for_lock(self, lock_lvl: float, trade: dict | None = None) -> float:
         """Giveback band for the active lock level.
@@ -2579,7 +2584,7 @@ class AITradingAgent:
                 fee_note = ""
                 if self._is_1m_trade(trade):
                     fee_note = (
-                        f" 1m dual: +{PROFIT_LOCK_PCT:g}→+{PROFIT_LOCK_PCT - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g} "
+                        f" scalp dual: +{PROFIT_LOCK_PCT:g}→+{PROFIT_LOCK_PCT - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g} "
                         f"then +{PROFIT_LOCK_PCT_1M:g}→+{PROFIT_LOCK_PCT_1M - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g};"
                     )
                 return (
@@ -2812,7 +2817,7 @@ class AITradingAgent:
         tf = str(
             SECONDS_TO_TIMEFRAME_KEY.get(getattr(self, "timeframe_seconds", 60), "1m")
         ).strip().lower()
-        if tf == "1m":
+        if is_scalp_tf(tf):
             limit = max(limit, int(ONE_M_MAX_CONCURRENT))
         return self.same_side_auto_count(side, pair) < limit
 
@@ -3052,7 +3057,7 @@ class AITradingAgent:
             f"[AI ENGINE] Armed — trading READY now "
             f"(boot UI scan-driven, max {ENGINE_BOOT_MAX_SEC:g}s). "
             f"Momentum watchlist gate pending. "
-            f"Detect on closed candle → 1m: lock then green/red confirm (max {ONE_M_CONFIRM_MAX_BARS}); "
+            f"Detect on closed candle → 1m/5m: lock then green/red confirm (max {ONE_M_CONFIRM_MAX_BARS}); "
             f"other TFs: fire at next candle open. "
             f"First detect per pair is skipped."
         )
@@ -3179,7 +3184,7 @@ class AITradingAgent:
             return False
         if not self.trading_ready():
             return False
-        if self.one_m_fee_hold and self._chart_tf_key() == "1m":
+        if self.one_m_fee_hold and is_scalp_tf(self._chart_tf_key()):
             return False
         return bool(self.is_active)
 
@@ -3194,7 +3199,7 @@ class AITradingAgent:
         ratio). Also clears after a max hold window so entries can never stay
         paused forever.
         """
-        if self._chart_tf_key() != "1m":
+        if not is_scalp_tf(self._chart_tf_key()):
             return
         book = self.get_session_gross_and_fees_usd()
         closed = int(book.get("closed_count") or 0)
@@ -3978,7 +3983,7 @@ def concurrent_entry_blocked(agent, pair: str) -> str | None:
     open_n = len(getattr(agent, "trades", None) or [])
     user_max = effective_max_concurrent_trades(agent)
 
-    if tf == "1m":
+    if is_scalp_tf(tf):
         n = count_open_trades_for_pair(agent, pair)
         if n >= ONE_M_MAX_CONCURRENT:
             return (
@@ -4249,7 +4254,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
         # 1m only: no fire on candle 2/3 after a fire on candle 1 (next earliest = candle 4).
         tf_l = (timeframe_key or "").strip().lower()
-        if tf_l == "1m":
+        if is_scalp_tf(tf_l):
             earliest = agent.one_m_earliest_next_fire_ms(pair, interval_ms)
             if earliest is not None and fire_candle_ms < earliest:
                 return await _skip_pending(
@@ -4287,7 +4292,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             )
         if agent.daily_target_reached:
             return await _skip_pending(pending, "Daily profit target already reached", fire_candle_ms=fire_candle_ms)
-        if getattr(agent, "one_m_fee_hold", False) and (timeframe_key or "").strip().lower() == "1m":
+        if getattr(agent, "one_m_fee_hold", False) and is_scalp_tf(timeframe_key):
             return await _skip_pending(
                 pending,
                 "1m fee budget hold — new entries paused",
@@ -4368,11 +4373,11 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             )
 
         PENDING_ENTRY_SIGNALS.pop(pair, None)
-        if (timeframe_key or "").strip().lower() == "1m":
+        if is_scalp_tf(timeframe_key):
             LAST_AUTO_FIRE_CANDLE_MS[pair] = int(fire_candle_ms)
         fire_label = (
-            "1m body confirm"
-            if pending.get("mode") == "confirm_1m"
+            "scalp body confirm"
+            if pending.get("mode") in ("confirm_1m", "confirm_scalp")
             else "next-candle open"
         )
         _push_pattern_neon(
@@ -4423,7 +4428,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     if (
         pending
         and pending.get("timeframe_key") == timeframe_key
-        and pending.get("mode") == "confirm_1m"
+        and pending.get("mode") in ("confirm_1m", "confirm_scalp")
     ):
         side = pending.get("side") or "LONG"
         detect = pending.get("detect") or {}
@@ -4600,7 +4605,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
     # Locked confirm on this pair → never run a fresh brain/AI detect underneath.
     existing_lock = PENDING_ENTRY_SIGNALS.get(pair)
-    if existing_lock and existing_lock.get("mode") == "confirm_1m":
+    if existing_lock and existing_lock.get("mode") in ("confirm_1m", "confirm_scalp"):
         return False
 
     # --- 2) Scan only the latest CLOSED candle (forming bar already dropped) ---
@@ -4776,7 +4781,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return False
     if agent.daily_target_reached:
         return False
-    if getattr(agent, "one_m_fee_hold", False) and tf_l == "1m":
+    if getattr(agent, "one_m_fee_hold", False) and is_scalp_tf(tf_l):
         _push_pattern_neon(
             pair=pair,
             candle_time_ms=close_time,
@@ -4800,7 +4805,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return False
 
     detect = dict(detect)
-    use_confirm_1m = tf_l == "1m"
+    use_confirm_scalp = is_scalp_tf(tf_l)
     want = "green" if side == "LONG" else "red"
     PENDING_ENTRY_SIGNALS[pair] = {
         "detect": detect,
@@ -4810,7 +4815,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         "timeframe_key": timeframe_key,
         "detect_close": candle_close,
         "queued_at": time.time(),
-        "mode": "confirm_1m" if use_confirm_1m else "next_open",
+        "mode": "confirm_scalp" if use_confirm_scalp else "next_open",
         "confirm_bars_seen": 0,
         "last_confirm_candle_ms": close_time,
         "confirm_matched": False,
@@ -4824,7 +4829,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         pattern=detect.get("pattern"),
         reason=detect.get("reason"),
     )
-    if use_confirm_1m:
+    if use_confirm_scalp:
         _push_pattern_neon(
             pair=pair,
             candle_time_ms=fire_candle_ms,
@@ -4842,7 +4847,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 "pair": pair,
                 "detect_candle": close_time,
                 "pattern": detect.get("pattern"),
-                "mode": "confirm_1m",
+                "mode": "confirm_scalp",
                 "max_bars": ONE_M_CONFIRM_MAX_BARS,
             },
         )
@@ -4930,7 +4935,7 @@ async def auto_buy_loop():
                     # Feed-stale freeze: pause NEW detects only; keep managing open + pending fires.
                     frozen = bool(agent.connectivity_frozen) or (
                         getattr(agent, "one_m_fee_hold", False)
-                        and str(timeframe_key).lower() == "1m"
+                        and is_scalp_tf(timeframe_key)
                     )
                     fire_pairs = list(agent.get_scan_pairs())
                     pending_keys = [
@@ -4941,7 +4946,7 @@ async def auto_buy_loop():
                     confirm_locks = [
                         p
                         for p, pend in PENDING_ENTRY_SIGNALS.items()
-                        if pend.get("mode") == "confirm_1m"
+                        if pend.get("mode") in ("confirm_1m", "confirm_scalp")
                         and pend.get("timeframe_key") == timeframe_key
                     ]
                     # While a 1m pattern is locked for body confirm, pause all other pair scans.
