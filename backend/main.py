@@ -2986,7 +2986,7 @@ class AITradingAgent:
         return time.time() >= ready_at
 
     def warmup_remaining_sec(self) -> float:
-        """Boot overlay remaining — ends when scan ready (after min intro) or max timeout."""
+        """Boot overlay remaining — closes shortly after scan ready (or max timeout)."""
         started = float(getattr(self, "boot_started_at", 0) or 0)
         until = float(getattr(self, "boot_ui_until", 0) or 0)
         if until <= 0 and started <= 0:
@@ -2998,8 +2998,8 @@ class AITradingAgent:
         now = time.time()
         hard_left = max(0.0, until - now) if until > 0 else 0.0
         if getattr(self, "momentum_gate_ready", False):
-            # Keep intro video visible at least ENGINE_BOOT_INTRO_SEC, then close.
-            min_until = (started or now) + float(ENGINE_BOOT_INTRO_SEC)
+            # Brief 2s "READY" flash then close (was 10s — felt stuck).
+            min_until = (started or now) + 2.0
             return max(0.0, min_until - now)
         return hard_left
 
