@@ -55,20 +55,22 @@ export default function EngineBootOverlay({
       return undefined;
     }
     if (!momentumGateReady) {
-      setForceHide(false);
+      return undefined;
+    }
+    // Gate already ready (e.g. page refresh while engine running) → hide immediately
+    // unless server still reports boot remaining (fresh START READY flash).
+    if (remainingWs <= 0.05) {
+      setForceHide(true);
       return undefined;
     }
     const t = setTimeout(() => setForceHide(true), 1500);
     return () => clearTimeout(t);
-  }, [active, momentumGateReady]);
+  }, [active, momentumGateReady, remainingWs]);
 
-  // Hide when: cancelled, client timer fired, OR server remaining hit 0 after READY.
-  // While scanning (not ready), keep showing even if remaining glitches.
-  const show = Boolean(
-    active
-    && !forceHide
-    && (remainingWs > 0.05 || (!momentumGateReady && active)),
-  );
+  // ONLY show while server reports boot remaining > 0 (fresh START / mid-scan).
+  // Never use !momentumGateReady — on every browser refresh gate starts false
+  // and would flash SCAN/PREPARING even when the VPS engine is already warm.
+  const show = Boolean(active && !forceHide && remainingWs > 0.05);
 
   // Lock body scroll while boot overlay is up
   useEffect(() => {

@@ -44,6 +44,8 @@ def dump_runtime(agent: Any) -> dict:
         "saved_at": time.time(),
         "trading_ready_at": float(getattr(agent, "trading_ready_at", 0) or 0),
         "boot_ui_until": float(getattr(agent, "boot_ui_until", 0) or 0),
+        "momentum_gate_ready": bool(getattr(agent, "momentum_gate_ready", False)),
+        "momentum_fire_pairs": list(getattr(agent, "momentum_fire_pairs", None) or []),
         "is_active": bool(getattr(agent, "is_active", False)),
         "session_hold_mode": bool(getattr(agent, "session_hold_mode", False)),
         "one_m_fee_hold": bool(getattr(agent, "one_m_fee_hold", False)),
@@ -105,9 +107,8 @@ def restore_runtime(agent: Any) -> dict:
 
     try:
         agent.is_active = bool(data.get("is_active"))
-        # Resume mid-session: trading ready immediately; restore cosmetic boot UI if any.
+        # Resume mid-session: trading ready immediately; do NOT re-open boot overlay.
         agent.trading_ready_at = 0.0
-        agent.boot_ui_until = float(data.get("boot_ui_until") or 0)
         agent.session_hold_mode = bool(data.get("session_hold_mode"))
         agent.one_m_fee_hold = bool(data.get("one_m_fee_hold"))
         # Never restore as frozen — force re-evaluate connectivity after boot
@@ -120,10 +121,26 @@ def restore_runtime(agent: Any) -> dict:
             agent.active_pair = str(data["active_pair"])
         if isinstance(data.get("watchlist"), list):
             agent.watchlist = [str(p) for p in data["watchlist"] if p]
+        if isinstance(data.get("momentum_fire_pairs"), list):
+            agent.momentum_fire_pairs = [str(p) for p in data["momentum_fire_pairs"] if p]
         if data.get("timeframe_seconds"):
             agent.timeframe_seconds = int(data["timeframe_seconds"])
         if data.get("trade_seq") is not None:
             agent.trade_seq = max(int(agent.trade_seq or 0), int(data["trade_seq"] or 0))
+
+        # Boot overlay: never flash on browser refresh / container restore.
+        saved_until = float(data.get("boot_ui_until") or 0)
+        gate_ready = bool(data.get("momentum_gate_ready"))
+        if agent.is_active and (agent.watchlist or agent.momentum_fire_pairs or gate_ready):
+            agent.momentum_gate_ready = True
+            agent.boot_ui_until = 0.0
+        elif saved_until > time.time() and not gate_ready:
+            # Mid-boot crash — keep short remaining only
+            agent.boot_ui_until = saved_until
+            agent.momentum_gate_ready = False
+        else:
+            agent.boot_ui_until = 0.0
+            agent.momentum_gate_ready = gate_ready
 
         trades = data.get("trades") or []
         if isinstance(trades, list):

@@ -4933,6 +4933,7 @@ async def start_background_tasks():
     try:
         restored = restore_runtime(agent)
         if restored.get("restored"):
+            agent.persist_runtime(force=True)
             system_log.push(
                 "ai",
                 "Engine runtime restored after restart — continuing until user stops.",
@@ -6126,6 +6127,13 @@ async def portfolio_feed(websocket: WebSocket):
 
             tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
             scan = system_log.last_taapi_scan
+
+            # Heal stuck boot UI: engine already has a universe → never keep SCAN overlay open.
+            if agent.is_active and not bool(getattr(agent, "momentum_gate_ready", False)):
+                if agent.watchlist or getattr(agent, "momentum_fire_pairs", None):
+                    agent.momentum_gate_ready = True
+                    agent.boot_ui_until = 0.0
+                    agent.momentum_scan_stage = "ready"
             last_scan = scan if scan and scan.get("pair") == agent.active_pair else None
             # Stub overlay only — wrong kwargs used to crash /ws/portfolio every tick.
             try:
