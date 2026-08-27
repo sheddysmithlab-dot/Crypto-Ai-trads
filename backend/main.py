@@ -472,15 +472,22 @@ async def consult_ai_provider(context):
 # ==========================================
 # PILLAR 4 & 5: API & BYBIT EXECUTION GROUND
 # ==========================================
+# Bybit linear taker fee (percent points) + India GST on the fee line.
+# Trade history: Trading Fee 0.055% + GST 18% of fee → all-in ≈ 0.0649% of fill value.
+BYBIT_TAKER_FEE_PCT_DEFAULT = 0.055
+BYBIT_FEE_GST_MULT = float(os.environ.get("BYBIT_FEE_GST_MULT", "1.18"))
+
+
 class BybitAPIWrapper:
     """ API Data Cable & Execution Ground (Pillar 4 & 5) """
     def __init__(self):
         # DEFAULT: PAPER TRADING (As per Automation.txt)
         self.mode = "PAPER_TRADING"
         self.connected = False
-        # RULE 7: Taker fee tier, continuously "fetched" from Bybit (simulated here at
-        # Bybit USDT perpetual standard taker fee (0.055% per market fill).
-        self.taker_fee_pct = 0.055
+        # Base taker from Bybit fee-rate API (0.055 = 0.055%). P&L uses all-in via GST.
+        self.taker_fee_base_pct = BYBIT_TAKER_FEE_PCT_DEFAULT
+        # Compat alias — always all-in (base × GST). Prefer get_taker_fee_pct().
+        self.taker_fee_pct = round(self.taker_fee_base_pct * BYBIT_FEE_GST_MULT, 6)
 
         # Real Bybit account equity (USD), refreshed in the background while LIVE_TRADING.
         # None until the first successful fetch - callers fall back to paper capital until then.
@@ -699,7 +706,7 @@ class BybitAPIWrapper:
             return None
 
     async def _sync_taker_fee_rate(self, symbol: str = "BTCUSDT") -> None:
-        """Pull account linear taker fee from Bybit and store as percent (0.055 = 0.055%)."""
+        """Pull account linear taker fee from Bybit; store BASE %, P&L uses base×GST."""
         now = time.time()
         if now - float(self._last_fee_sync_ts or 0) < 300:
             return
@@ -723,17 +730,19 @@ class BybitAPIWrapper:
         raw = rows[0].get("takerFeeRate")
         if raw is None or str(raw) == "":
             return
-        # Bybit returns fraction e.g. "0.00055" → store as 0.055 (% points)
+        # Bybit returns fraction e.g. "0.00055" → store as 0.055 (% points) BASE only
         pct = float(raw) * 100.0
         if pct <= 0 or pct > 1.0:
             return
-        prev = float(self.taker_fee_pct)
-        self.taker_fee_pct = round(pct, 6)
+        prev_base = float(self.taker_fee_base_pct)
+        self.taker_fee_base_pct = round(pct, 6)
+        self.taker_fee_pct = self.get_taker_fee_pct()
         self._last_fee_sync_ts = now
-        if abs(prev - self.taker_fee_pct) > 1e-6:
+        if abs(prev_base - self.taker_fee_base_pct) > 1e-6:
             print(
-                f"[BYBIT] Live taker fee synced: {self.taker_fee_pct:g}% "
-                f"(was {prev:g}%) via {symbol}"
+                f"[BYBIT] Live taker fee synced: base {self.taker_fee_base_pct:g}% "
+                f"+ GST×{BYBIT_FEE_GST_MULT:g} → all-in {self.taker_fee_pct:g}% "
+                f"(was base {prev_base:g}%) via {symbol}"
             )
 
     def _note_failure(self):
@@ -742,9 +751,62 @@ class BybitAPIWrapper:
             notifications.push(f"Bybit balance unreachable ({self.last_error}). Showing last known value.", "error")
         self._was_failing = True
 
-    def get_taker_fee_pct(self):
-        """ RULE 6/7: Live taker fee tier used for all True Net Profit calculations. """
-        return self.taker_fee_pct
+    def get_taker_fee_base_pct(self) -> float:
+        """Bybit taker fee % before GST (e.g. 0.055)."""
+        return float(self.taker_fee_base_pct or BYBIT_TAKER_FEE_PCT_DEFAULT)
+
+    def get_taker_fee_pct(self) -> float:
+        """All-in taker fee % for True Net Profit: base × GST (default 0.055 × 1.18 ≈ 0.0649)."""
+        base = self.get_taker_fee_base_pct()
+        all_in = round(base * float(BYBIT_FEE_GST_MULT), 6)
+        self.taker_fee_pct = all_in
+        return all_in
+
+    def all_in_fee_usd(self, notional: float) -> float:
+        """Fee in USDT for a fill notional at all-in (base+GST) rate."""
+        return round(float(notional or 0) * (self.get_taker_fee_pct() / 100.0), 6)
+
+    def normalize_fee_usd(
+        self,
+        fee_usd: float | None,
+        fee_pct: float | None = None,
+        notional: float | None = None,
+    ) -> float:
+        """Upgrade pre-GST stored fees to all-in; never double-apply GST."""
+        fee = float(fee_usd or 0)
+        all_in = self.get_taker_fee_pct()
+        base = self.get_taker_fee_base_pct()
+        if fee <= 0 and notional is not None and float(notional) > 0:
+            return self.all_in_fee_usd(notional)
+        if fee <= 0:
+            return 0.0
+        if fee_pct is not None:
+            sp = float(fee_pct)
+            if sp >= all_in * 0.98:
+                return fee
+            if sp > 0 and sp <= base * 1.05:
+                return round(fee * BYBIT_FEE_GST_MULT, 6)
+        if notional is not None and float(notional) > 0:
+            expected_base = float(notional) * (base / 100.0)
+            expected_all = float(notional) * (all_in / 100.0)
+            if expected_base > 1e-12 and abs(fee - expected_base) / expected_base < 0.20:
+                return round(fee * BYBIT_FEE_GST_MULT, 6)
+            if expected_all > 1e-12 and abs(fee - expected_all) / expected_all < 0.20:
+                return fee
+        return fee
+
+    def fee_structure_dict(self) -> dict:
+        base = self.get_taker_fee_base_pct()
+        all_in = self.get_taker_fee_pct()
+        return {
+            "taker_fee_base_pct": base,
+            "gst_mult": float(BYBIT_FEE_GST_MULT),
+            "taker_fee_all_in_pct": all_in,
+            "note": (
+                f"Bybit taker {base:g}% + GST {(BYBIT_FEE_GST_MULT - 1) * 100:.0f}% "
+                f"on fee → all-in {all_in:g}% of fill value per side"
+            ),
+        }
 
     def execute_market_buy(self, pair, reason):
         """ REAL market buy on Bybit linear perpetual (or paper print if not live). """
@@ -1220,8 +1282,17 @@ class AITradingAgent:
         else:
             gross_pct = ((entry - mark) / entry) * 100
 
-        entry_fee_pct = float(t["entry_fee_pct"])
-        exit_fee_pct = bybit_api.get_taker_fee_pct() * (mark / entry)
+        entry_fee_pct = float(t.get("entry_fee_pct") or bybit_api.get_taker_fee_pct())
+        all_in_pct = bybit_api.get_taker_fee_pct()
+        # Upgrade legacy opens booked at base 0.055% (no GST) to all-in ~0.0649%.
+        if entry_fee_pct < all_in_pct * 0.98:
+            entry_fee_pct = all_in_pct
+        entry_fee_usd = bybit_api.normalize_fee_usd(
+            t.get("entry_fee_usd"),
+            t.get("entry_fee_pct"),
+            t.get("position_size"),
+        )
+        exit_fee_pct = all_in_pct * (mark / entry)
         if for_close:
             net_pct = gross_pct - entry_fee_pct - exit_fee_pct
         else:
@@ -1231,9 +1302,9 @@ class AITradingAgent:
         gross_usd = t["position_size"] * (gross_pct / 100)
         exit_fee_usd = t["position_size"] * (exit_fee_pct / 100) if for_close else 0.0
         if for_close:
-            net_usd = gross_usd - t["entry_fee_usd"] - exit_fee_usd
+            net_usd = gross_usd - entry_fee_usd - exit_fee_usd
         else:
-            net_usd = gross_usd - t["entry_fee_usd"]
+            net_usd = gross_usd - entry_fee_usd
 
         return {
             "gross_pct": gross_pct,
@@ -1243,6 +1314,7 @@ class AITradingAgent:
             "net_usd": net_usd,
             "entry_fee_pct": entry_fee_pct,
             "exit_fee_pct": exit_fee_pct if for_close else 0.0,
+            "entry_fee_usd": entry_fee_usd,
             "mark_price": mark,
         }
 
@@ -1372,19 +1444,17 @@ class AITradingAgent:
         """
         open_gross = 0.0
         open_fees = 0.0
-        fee_rate = float(bybit_api.get_taker_fee_pct() or 0.055) / 100.0
         sid = self.ai_season_id
         for t in self.trades:
             if sid is not None and t.get("season_id") != sid:
                 continue
             m_open = self._trade_metrics(t, for_close=False)
             open_gross += float(m_open["gross_usd"])
-            entry_fee = float(t.get("entry_fee_usd") or 0)
-            if entry_fee <= 0:
-                # Recover missing fee fields on older in-memory trades
-                entry_fee = round(float(t.get("position_size") or 0) * fee_rate, 4)
-            # Open = buy/open only — do not invent a sell fee yet.
-            open_fees += entry_fee
+            # Always all-in (base+GST) so Session Broker Fee matches Bybit Trade History.
+            open_fees += float(
+                m_open.get("entry_fee_usd")
+                or bybit_api.all_in_fee_usd(t.get("position_size"))
+            )
 
         closed_gross = 0.0
         closed_fees = 0.0
@@ -1395,10 +1465,22 @@ class AITradingAgent:
             if sid is not None and row.get("season_id") != sid:
                 continue
             closed_count += 1
-            entry_f = float(row.get("entry_fee_usd") or 0)
-            exit_f = float(row.get("exit_fee_usd") or 0)
-            if entry_f <= 0 and float(row.get("position_size") or 0) > 0:
-                entry_f = round(float(row.get("position_size") or 0) * fee_rate, 4)
+            notional = float(row.get("position_size") or 0)
+            entry_f = bybit_api.normalize_fee_usd(
+                row.get("entry_fee_usd"),
+                row.get("entry_fee_pct"),
+                notional,
+            )
+            exit_f = bybit_api.normalize_fee_usd(
+                row.get("exit_fee_usd"),
+                row.get("exit_fee_pct"),
+                notional,
+            )
+            if entry_f <= 0 and notional > 0:
+                entry_f = bybit_api.all_in_fee_usd(notional)
+            if exit_f <= 0 and notional > 0:
+                # Closed without exit fee recorded — estimate one all-in fill.
+                exit_f = bybit_api.all_in_fee_usd(notional)
             # Closed = buy + sell both happened → add both fees.
             closed_fees += entry_f + exit_f
             stored_gross = row.get("gross_pnl_usd")
@@ -1420,6 +1502,7 @@ class AITradingAgent:
             "open_fee_usd": open_fees,
             "closed_fee_usd": closed_fees,
             "closed_count": closed_count,
+            "fee_structure": bybit_api.fee_structure_dict(),
         }
 
     def _session_open_trades(self) -> list:
@@ -5564,6 +5647,7 @@ async def bot_status():
         "scan_pairs": agent.get_scan_pairs(),
         "timeframe_seconds": int(agent.timeframe_seconds or 60),
         "timeframe": tf_key,
+        "fee_structure": bybit_api.fee_structure_dict(),
     }
 
 
@@ -6484,6 +6568,7 @@ async def portfolio_feed(websocket: WebSocket):
                 "daily_profit_pct": round(daily_profit_pct, 2),
                 "daily_broker_fee": round(broker_fee, 4),
                 "daily_gross_profit": round(daily_gross, 2),
+                "fee_structure": bybit_api.fee_structure_dict(),
                 "exited_booked_usd": round(exited_booked_usd, 2),
                 "ai_season_profit": round(ai_season_profit, 2),
                 "ai_season_profit_pct": round(ai_season_profit_pct, 2),

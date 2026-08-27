@@ -33,6 +33,7 @@ export default function PortfolioModal({
   dailyProfit,
   dailyProfitPct,
   dailyBrokerFee = 0,
+  feeStructure = null,
   seasonProfit,
   seasonProfitPct,
   seasonProfitNet = 0,
@@ -113,13 +114,22 @@ export default function PortfolioModal({
           </StatCell>
           <StatCell
             label="Session Bybit Broker Fee"
-            tip="Open trades: entry (buy) fee only. Closed trades: entry + exit (sell) fees added."
+            tip={
+              feeStructure?.note
+                || "All-in Bybit fee = taker 0.055% × GST 1.18 ≈ 0.0649% of fill (open: entry only; closed: entry+exit)."
+            }
           >
             <span className="text-amber-400">{feeStr}</span>
+            {feeStructure?.taker_fee_all_in_pct != null && (
+              <div className="text-[10px] font-normal text-gray-400 mt-0.5">
+                {Number(feeStructure.taker_fee_base_pct).toFixed(3)}% + GST →{' '}
+                {Number(feeStructure.taker_fee_all_in_pct).toFixed(4)}% / side
+              </div>
+            )}
           </StatCell>
           <StatCell
             label="AI Season Profit"
-            tip="Gross = trade P&L before fees. Net = Gross minus Session Bybit Broker Fee."
+            tip="Gross = trade P&L before fees. Net = Gross minus Session Bybit Broker Fee (includes GST)."
           >
             <div className="flex flex-col gap-0.5 leading-snug">
               <span className={isSeasonGross ? 'text-green-500' : 'text-red-500'}>

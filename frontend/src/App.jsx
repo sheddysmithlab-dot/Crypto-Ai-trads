@@ -771,6 +771,7 @@ export default function App() {
         dailyProfit={dailyProfit}
         dailyProfitPct={dailyProfitPct}
         dailyBrokerFee={dailyBrokerFee}
+        feeStructure={portfolio.feeStructure}
         seasonProfit={seasonProfit}
         seasonProfitPct={seasonProfitPct}
         seasonProfitNet={seasonProfitNet}

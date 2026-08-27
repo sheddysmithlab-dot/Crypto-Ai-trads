@@ -11,6 +11,7 @@ export default function Header({
   dailyProfit,
   dailyProfitPct,
   dailyBrokerFee = 0,
+  feeStructure = null,
   seasonProfit,
   seasonProfitPct,
   seasonProfitNet = 0,
@@ -211,6 +212,7 @@ export default function Header({
         dailyProfit={dailyProfit}
         dailyProfitPct={dailyProfitPct}
         dailyBrokerFee={dailyBrokerFee}
+        feeStructure={feeStructure}
         seasonProfit={seasonProfit}
         seasonProfitPct={seasonProfitPct}
         seasonProfitNet={seasonProfitNet}

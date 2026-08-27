@@ -24,6 +24,7 @@ export function usePortfolio(setConnected) {
     connectivityFrozen: false,
     freezeReason: null,
     oneMFeeHold: false,
+    feeStructure: null,
     tradingReady: true,
     warmupRemainingSec: 0,
     warmupTotalSec: 60,
@@ -85,6 +86,9 @@ export function usePortfolio(setConnected) {
           connectivityFrozen: Boolean(data.connectivity_frozen),
           freezeReason: data.freeze_reason || null,
           oneMFeeHold: Boolean(data.one_m_fee_hold),
+          feeStructure: data.fee_structure && typeof data.fee_structure === 'object'
+            ? data.fee_structure
+            : null,
           tradingReady: data.trading_ready !== false,
           warmupRemainingSec: Number(data.warmup_remaining_sec) || 0,
           warmupTotalSec: Number(data.warmup_total_sec) || 60,
