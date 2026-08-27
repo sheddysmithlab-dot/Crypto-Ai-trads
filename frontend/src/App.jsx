@@ -35,7 +35,9 @@ import SystemLogModal from './components/SystemLogModal';
 import AgentChatStrip from './components/AgentChatStrip';
 import TradingStatementModal from './components/TradingStatementModal';
 import { MAX_LAUNCHER_SLOTS } from './components/TradeLauncherPopup';
+import { TRADING_PAIRS } from './data/pairs';
 
+const ORIGINAL_SYMBOLS = new Set(TRADING_PAIRS.map((p) => p.symbol));
 const LAUNCHER_SLOTS_KEY = 'ai_trading_bot_launcher_slots';
 
 function readSavedLauncherSlots() {
@@ -233,33 +235,72 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // While engine active: keep launcher chips in sync with momentum-filtered backend watchlist.
-  // Skip for a few seconds after a manual swap so the user's chart swap isn't overwritten
-  // by a stale WS tick before the backend processes /set-watchlist.
+  // While engine active: MERGE momentum watchlist coins into existing launcher chips.
+  // Original 20 stay; new momentum coins added; dropped momentum coins removed.
+  // Manual swap protected for 4s so user's chart swap isn't overwritten.
   const manualSwapAtRef = useRef(0);
   useEffect(() => {
     if (!effectiveBotActive) return;
     if (Date.now() - manualSwapAtRef.current < 4000) return;
     const pairs = Array.isArray(portfolio.watchlist) ? portfolio.watchlist : [];
     if (!pairs.length) return;
-    const next = pairs.slice(0, MAX_LAUNCHER_SLOTS).map((pair, i) => {
-      const symbol = String(pair).split('/')[0].toUpperCase();
-      const prev = launcherSlots.find((s) => s.symbol === symbol);
-      return {
-        id: prev?.id || `${symbol}-mom-${i}`,
-        symbol,
-        timeframe: prev?.timeframe || timeframe || '1M',
-      };
-    });
-    const same =
-      next.length === launcherSlots.length &&
-      next.every((s, i) => s.symbol === launcherSlots[i]?.symbol);
-    if (!same) {
-      setLauncherSlots(next);
+
+    const watchSymbols = new Set(
+      pairs.map((p) => String(p).split('/')[0].toUpperCase())
+    );
+
+    setLauncherSlots((prev) => {
+      // 1) Keep original 20 always (even if not in current momentum watchlist)
+      // 2) Keep momentum-added chips still in watchlist
+      // 3) Drop momentum-added chips no longer in watchlist
+      // 4) Add new watchlist coins not already docked
+      const kept = prev.filter((s) => {
+        const sym = String(s.symbol || '').toUpperCase();
+        return ORIGINAL_SYMBOLS.has(sym) || watchSymbols.has(sym);
+      });
+      const dockedSymbols = new Set(kept.map((s) => String(s.symbol || '').toUpperCase()));
+      const added = [];
+      for (const pair of pairs) {
+        const sym = String(pair).split('/')[0].toUpperCase();
+        if (!dockedSymbols.has(sym)) {
+          const prevSlot = prev.find((s) => String(s.symbol || '').toUpperCase() === sym);
+          added.push({
+            id: prevSlot?.id || `${sym}-mom-${kept.length + added.length}`,
+            symbol: sym,
+            timeframe: prevSlot?.timeframe || '1M',
+          });
+          dockedSymbols.add(sym);
+        }
+      }
+      const next = [...kept, ...added].slice(0, MAX_LAUNCHER_SLOTS);
+      const same =
+        next.length === prev.length &&
+        next.every((s, i) => s.symbol === prev[i]?.symbol);
+      if (same) return prev;
       persistLauncherSlots(next);
-    }
+      return next;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveBotActive, portfolio.watchlist, portfolio.momentumLastRefreshMs]);
+
+  // Engine OFF → restore launcher to original 20 (drop momentum-added chips).
+  useEffect(() => {
+    if (effectiveBotActive) return;
+    setLauncherSlots((prev) => {
+      const hasMomentum = prev.some(
+        (s) => !ORIGINAL_SYMBOLS.has(String(s.symbol || '').toUpperCase())
+      );
+      if (!hasMomentum) return prev;
+      const restored = TRADING_PAIRS.map((p, i) => ({
+        id: `${p.symbol}-orig-${i}`,
+        symbol: p.symbol,
+        timeframe: '1M',
+      }));
+      persistLauncherSlots(restored);
+      return restored;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveBotActive]);
 
   function pushActionLog(message) {
     setActionLogs((prev) => [

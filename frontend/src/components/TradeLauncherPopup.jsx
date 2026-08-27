@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { TRADING_PAIRS } from '../data/pairs';
 import LauncherBybitChart from './LauncherBybitChart';
 
-/** Cap = all mapped trading pairs (not a fixed 5). */
-export const MAX_LAUNCHER_SLOTS = TRADING_PAIRS.length;
+/** Cap = hardcoded 20 + room for momentum-added coins while engine runs. */
+export const MAX_LAUNCHER_SLOTS = TRADING_PAIRS.length + 40;
 
 const POPUP_POS_KEY = 'ai_trading_bot_launcher_popup_pos';
 const POPUP_W = 672; // ~42rem max width
