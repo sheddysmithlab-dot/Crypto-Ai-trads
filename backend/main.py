@@ -860,15 +860,15 @@ LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.50"))
 LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0.20"))
 LOSS_LOCK_CLEAR_PCT = float(os.environ.get("LOSS_LOCK_CLEAR_PCT", "0.20"))
 LOSS_EMERGENCY_PCT = float(os.environ.get("LOSS_EMERGENCY_PCT", "0.70"))
-# Small-coin loss policy: low entry price → wider floors + wick confirm + entry grace.
-# Tiers by entry USD: ≥$1 normal · <$1 (mid + micro) → 2× protect/emergency.
+# Small-coin loss multipliers (disabled: all coins use base −0.50% / −0.70%).
+# Kept for optional env re-enable without code change.
 SMALL_COIN_MID_USD = float(os.environ.get("SMALL_COIN_MID_USD", "1.0"))
 SMALL_COIN_MICRO_USD = float(os.environ.get("SMALL_COIN_MICRO_USD", "0.10"))
-SMALL_COIN_MID_MULT = float(os.environ.get("SMALL_COIN_MID_MULT", "2.0"))
-SMALL_COIN_MICRO_MULT = float(os.environ.get("SMALL_COIN_MICRO_MULT", "2.0"))
-SMALL_COIN_ENTRY_GRACE_SEC = float(os.environ.get("SMALL_COIN_ENTRY_GRACE_SEC", "3.0"))
-SMALL_COIN_WICK_TICKS = int(os.environ.get("SMALL_COIN_WICK_TICKS", "2"))
-SMALL_COIN_WICK_HOLD_SEC = float(os.environ.get("SMALL_COIN_WICK_HOLD_SEC", "1.0"))
+SMALL_COIN_MID_MULT = float(os.environ.get("SMALL_COIN_MID_MULT", "1.0"))
+SMALL_COIN_MICRO_MULT = float(os.environ.get("SMALL_COIN_MICRO_MULT", "1.0"))
+SMALL_COIN_ENTRY_GRACE_SEC = float(os.environ.get("SMALL_COIN_ENTRY_GRACE_SEC", "0"))
+SMALL_COIN_WICK_TICKS = int(os.environ.get("SMALL_COIN_WICK_TICKS", "0"))
+SMALL_COIN_WICK_HOLD_SEC = float(os.environ.get("SMALL_COIN_WICK_HOLD_SEC", "0"))
 # Legacy aliases
 PATH_TP_TIGHT_PCT = PROFIT_LOCK_PCT
 PATH_TP_WIDE_PCT = PROFIT_LOCK_PCT + PROFIT_TRAIL_GIVEBACK_PCT
@@ -2240,28 +2240,9 @@ class AITradingAgent:
     def _loss_policy_for_trade(self, trade: dict) -> tuple[float, float, bool, str]:
         """Return (protect_pct, emergency_pct, is_small_coin, tier_label).
 
-        Small coins (entry <$1) get 2× loss protect + emergency floors, plus wick
-        confirm and entry grace in ``_evaluate_fixed_pct_exit``. ≥$1 stays −0.50/−0.70.
+        All coins use the same floors (−0.50% protect / −0.70% emergency).
+        Small-coin wider SL + wick/grace is OFF (mult defaults 1.0, is_small False).
         """
-        entry = float(trade.get("entry") or 0)
-        if entry <= 0:
-            return LOSS_PROTECT_PCT, LOSS_EMERGENCY_PCT, False, "normal"
-        if entry < SMALL_COIN_MICRO_USD:
-            m = max(1.0, SMALL_COIN_MICRO_MULT)
-            return (
-                LOSS_PROTECT_PCT * m,
-                LOSS_EMERGENCY_PCT * m,
-                True,
-                f"micro(<${SMALL_COIN_MICRO_USD:g})×{m:g}",
-            )
-        if entry < SMALL_COIN_MID_USD:
-            m = max(1.0, SMALL_COIN_MID_MULT)
-            return (
-                LOSS_PROTECT_PCT * m,
-                LOSS_EMERGENCY_PCT * m,
-                True,
-                f"mid(<${SMALL_COIN_MID_USD:g})×{m:g}",
-            )
         return LOSS_PROTECT_PCT, LOSS_EMERGENCY_PCT, False, "normal"
 
     def _update_path_sl_state(self, trade: dict, gross_pct: float, mark: float | None = None) -> None:
@@ -2507,8 +2488,7 @@ class AITradingAgent:
         """Single path-exit engine: stepped profit locks + best-recovery trail (no parallel engine).
 
         Priority on every mark: (1) EMERGENCY floor (2) PROFIT STEP-LOCK/EXIT (3) LOSS LOCK/RECOVERY.
-        Base floors −0.50% / −0.70%. Small coins (entry <$1 / <$0.10) use 1.5× / 2× floors,
-        3s entry grace, and wick confirm (2 ticks or 1s below floor) before emergency exit.
+        Floors −0.50% protect / −0.70% emergency for all coins (small-coin 2× OFF).
         LONG/SHORT symmetric on gross %. Fees stay out of the trigger.
         """
         trade.pop("_exit_fill_mark", None)
@@ -2542,7 +2522,7 @@ class AITradingAgent:
             elif target_gross < 0 and gross_pct < target_gross - 1e-9:
                 trade["_exit_fill_mark"] = self._mark_from_gross_pct(entry, side, target_gross)
 
-        # 1) Absolute emergency floor (base −0.70%; small coins wider)
+        # 1) Absolute emergency floor (−0.70% all coins)
         if gross_pct <= -emergency_pct:
             now = time.time()
             opened_at = float(trade.get("opened_at") or 0)
