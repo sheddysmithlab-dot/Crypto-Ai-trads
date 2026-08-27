@@ -3750,6 +3750,49 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
     }
 
 
+_momentum_refresh_running = False
+_momentum_refresh_started_at = 0.0
+# Hard ceiling so a stuck refresh can never block the gate forever.
+MOMENTUM_REFRESH_TIMEOUT_SECONDS = float(
+    os.environ.get("MOMENTUM_REFRESH_TIMEOUT_SECONDS", "180")
+)
+
+
+def _run_momentum_refresh_background(reason: str) -> None:
+    """Fire apply_momentum_watchlist_refresh as a background task.
+
+    Never blocks auto_buy_loop. A guard skips the trigger if a refresh is already
+    running (or if it appears stuck past the timeout ceiling). The scan loop keeps
+    trading on the current fire_pairs while the new universe re-scores in parallel.
+    """
+    global _momentum_refresh_running, _momentum_refresh_started_at
+    if _momentum_refresh_running:
+        elapsed = time.time() - _momentum_refresh_started_at
+        if elapsed < MOMENTUM_REFRESH_TIMEOUT_SECONDS:
+            print(
+                f"[MOMENTUM] refresh already running ({elapsed:.0f}s) — skip '{reason}' trigger"
+            )
+            return
+        print(
+            f"[MOMENTUM] refresh stuck {elapsed:.0f}s > {MOMENTUM_REFRESH_TIMEOUT_SECONDS:.0f}s "
+            f"ceiling — forcing new '{reason}' refresh"
+        )
+
+    async def _runner():
+        global _momentum_refresh_running
+        try:
+            await apply_momentum_watchlist_refresh(reason=reason)
+        except Exception as exc:
+            print(f"[MOMENTUM] background refresh error: {exc}")
+        finally:
+            _momentum_refresh_running = False
+
+    _momentum_refresh_running = True
+    _momentum_refresh_started_at = time.time()
+    asyncio.create_task(_runner())
+    print(f"[MOMENTUM] background refresh dispatched ({reason}) — scan loop unblocked")
+
+
 async def maybe_refresh_momentum_every_n_candles(
     client: httpx.AsyncClient, timeframe_key: str
 ) -> None:
