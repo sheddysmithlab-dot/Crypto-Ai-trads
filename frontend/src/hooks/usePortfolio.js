@@ -26,7 +26,7 @@ export function usePortfolio(setConnected) {
     oneMFeeHold: false,
     tradingReady: true,
     warmupRemainingSec: 0,
-    warmupTotalSec: 20,
+    warmupTotalSec: 60,
     bootIntroSec: 10,
     bootAnalysisSec: 10,
     tradingMode: null,
@@ -40,6 +40,9 @@ export function usePortfolio(setConnected) {
     momentumFirePairs: [],
     momentumScores: [],
     momentumLastRefreshMs: 0,
+    momentumScanDone: 0,
+    momentumScanTotal: 0,
+    momentumScanStage: '',
   });
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
@@ -84,7 +87,7 @@ export function usePortfolio(setConnected) {
           oneMFeeHold: Boolean(data.one_m_fee_hold),
           tradingReady: data.trading_ready !== false,
           warmupRemainingSec: Number(data.warmup_remaining_sec) || 0,
-          warmupTotalSec: Number(data.warmup_total_sec) || 20,
+          warmupTotalSec: Number(data.warmup_total_sec) || 60,
           bootIntroSec: Number(data.boot_intro_sec) || 10,
           bootAnalysisSec: Number(data.boot_analysis_sec) || 10,
           tradingMode: data.trading_mode,
@@ -98,6 +101,9 @@ export function usePortfolio(setConnected) {
           momentumFirePairs: Array.isArray(data.momentum_fire_pairs) ? data.momentum_fire_pairs : [],
           momentumScores: Array.isArray(data.momentum_scores) ? data.momentum_scores : [],
           momentumLastRefreshMs: Number(data.momentum_last_refresh_ms) || 0,
+          momentumScanDone: Number(data.momentum_scan_done) || 0,
+          momentumScanTotal: Number(data.momentum_scan_total) || 0,
+          momentumScanStage: data.momentum_scan_stage || '',
         });
       };
 

@@ -828,6 +828,9 @@ export default function App() {
         momentumFirePairs={portfolio.momentumFirePairs}
         momentumScores={portfolio.momentumScores}
         momentumGateReady={portfolio.momentumGateReady}
+        momentumScanDone={portfolio.momentumScanDone}
+        momentumScanTotal={portfolio.momentumScanTotal}
+        momentumScanStage={portfolio.momentumScanStage}
         onCancel={handleBootCancel}
         cancelLoading={botLoading}
       />

@@ -58,6 +58,7 @@ from momentum_watchlist import (
     MOMENTUM_REFRESH_EVERY_N_CANDLES,
     build_momentum_watchlist,
 )
+import bybit_instruments
 from system_log import system_log
 from volume_spread_system import (
     MIN_CANDLES,
@@ -951,6 +952,9 @@ class AITradingAgent:
         self.momentum_threshold_pct = 0.0
         self.last_momentum_candle_ms = 0
         self.momentum_last_refresh_ms = 0
+        self.momentum_scan_done = 0
+        self.momentum_scan_total = 0
+        self.momentum_scan_stage = ""
         # Connectivity freeze: engine stays ON, but new fires pause until feed/AI recover.
         self.connectivity_frozen = False
         self.freeze_reason: str | None = None
@@ -958,9 +962,10 @@ class AITradingAgent:
         self._ai_skip_until = 0.0
         self._last_feed_ts = time.time()
         self._last_runtime_save = 0.0
-        # trading_ready_at: 0 = ready now. boot_ui_until drives overlay countdown only.
+        # trading_ready_at: 0 = ready now. boot_ui_* drives overlay only (scan-aware).
         self.trading_ready_at = 0.0
         self.boot_ui_until = 0.0
+        self.boot_started_at = 0.0
         self.session_stats_snapshot: dict = {
             "trade_notional": 0.0,
             "daily_profit": 0.0,
@@ -2950,16 +2955,23 @@ class AITradingAgent:
         self.persist_runtime()
 
     def begin_trading_warmup(self) -> None:
-        """Arm on Continue: scan + trade immediately; boot intro/countdown is UI-only."""
+        """Arm on Continue: scan + trade immediately; boot overlay follows momentum scan."""
         self.trading_ready_at = 0.0
-        self.boot_ui_until = time.time() + float(ENGINE_WARMUP_SEC)
+        now = time.time()
+        self.boot_started_at = now
+        # Safety max — overlay closes earlier when momentum_gate_ready + min intro elapsed.
+        self.boot_ui_until = now + float(ENGINE_BOOT_MAX_SEC)
         self.momentum_gate_ready = False
         self.momentum_fire_pairs = []
+        self.momentum_scan_done = 0
+        self.momentum_scan_total = 0
+        self.momentum_scan_stage = "starting"
         self.last_momentum_candle_ms = 0
         # Seed cursor on next scan so already-closed history is not traded as fresh detects.
         _reset_scan_candle_baseline()
         print(
-            f"[AI ENGINE] Armed — trading READY now (boot UI {ENGINE_WARMUP_SEC}s cosmetic). "
+            f"[AI ENGINE] Armed — trading READY now "
+            f"(boot UI scan-driven, max {ENGINE_BOOT_MAX_SEC:g}s). "
             f"Momentum watchlist gate pending. "
             f"Detect on closed candle → fire at next candle open. "
             f"First detect per pair is skipped."
@@ -2974,14 +2986,27 @@ class AITradingAgent:
         return time.time() >= ready_at
 
     def warmup_remaining_sec(self) -> float:
-        """Boot overlay countdown only — does not block entries."""
+        """Boot overlay remaining — ends when scan ready (after min intro) or max timeout."""
+        started = float(getattr(self, "boot_started_at", 0) or 0)
         until = float(getattr(self, "boot_ui_until", 0) or 0)
-        if until > 0:
-            return max(0.0, until - time.time())
-        ready_at = float(getattr(self, "trading_ready_at", 0) or 0)
-        if ready_at <= 0:
-            return 0.0
-        return max(0.0, ready_at - time.time())
+        if until <= 0 and started <= 0:
+            ready_at = float(getattr(self, "trading_ready_at", 0) or 0)
+            if ready_at <= 0:
+                return 0.0
+            return max(0.0, ready_at - time.time())
+
+        now = time.time()
+        hard_left = max(0.0, until - now) if until > 0 else 0.0
+        if getattr(self, "momentum_gate_ready", False):
+            # Keep intro video visible at least ENGINE_BOOT_INTRO_SEC, then close.
+            min_until = (started or now) + float(ENGINE_BOOT_INTRO_SEC)
+            return max(0.0, min_until - now)
+        return hard_left
+
+    def _on_momentum_scan_progress(self, done: int, total: int, stage: str) -> None:
+        self.momentum_scan_done = int(done)
+        self.momentum_scan_total = int(total)
+        self.momentum_scan_stage = str(stage or "")
 
     def persist_runtime(self, force: bool = False) -> None:
         """Checkpoint engine state so restart/outage does not wipe open book."""
@@ -3184,8 +3209,12 @@ BYBIT_QTY_STEP = {
 }
 
 def get_bybit_symbol(pair_label):
+    """Map BTC/USDT → BTCUSDT. Hardcoded map first, then live instruments cache."""
     symbol = (pair_label or "").split("/")[0]
-    return BYBIT_SYMBOL_MAP.get(symbol)
+    mapped = BYBIT_SYMBOL_MAP.get(symbol)
+    if mapped:
+        return mapped
+    return bybit_instruments.resolve_symbol(pair_label)
 
 
 async def _fetch_bybit_linear_ticker_price(client: httpx.AsyncClient, bybit_symbol: str) -> float | None:
@@ -3214,7 +3243,9 @@ def snap_qty_to_step(qty: float, bybit_symbol: str | None) -> float | None:
     """Floor qty to Bybit lot step so market orders are not rejected."""
     if qty is None or qty <= 0:
         return None
-    step = BYBIT_QTY_STEP.get(bybit_symbol) if bybit_symbol else None
+    step = bybit_instruments.qty_step(bybit_symbol)
+    if step is None:
+        step = BYBIT_QTY_STEP.get(bybit_symbol) if bybit_symbol else None
     if not step or step <= 0:
         return qty
     snapped = math.floor(qty / step + 1e-12) * step
@@ -3226,6 +3257,9 @@ def snap_qty_to_step(qty: float, bybit_symbol: str | None) -> float | None:
 
 
 def min_lot_qty(bybit_symbol: str | None) -> float | None:
+    lot = bybit_instruments.min_order_qty(bybit_symbol)
+    if lot is not None and lot > 0:
+        return float(lot)
     step = BYBIT_QTY_STEP.get(bybit_symbol) if bybit_symbol else None
     return float(step) if step and step > 0 else None
 
@@ -3266,8 +3300,9 @@ ONE_M_FEE_BUDGET_RATIO = 0.45  # fees ≥ 45% of positive gross → hold
 ONE_M_FEE_HOLD_MIN_CLOSED = 3  # need at least this many round-trips
 # Engine boot UI: intro + analysis overlay (cosmetic; trading starts on Continue).
 ENGINE_BOOT_INTRO_SEC = 10
-ENGINE_BOOT_ANALYSIS_SEC = 10
-ENGINE_WARMUP_SEC = ENGINE_BOOT_INTRO_SEC + ENGINE_BOOT_ANALYSIS_SEC  # 20s
+ENGINE_BOOT_ANALYSIS_SEC = 10  # legacy UI fallback; boot now ends on scan+min intro
+ENGINE_BOOT_MAX_SEC = float(os.environ.get("ENGINE_BOOT_MAX_SEC", "60"))
+ENGINE_WARMUP_SEC = ENGINE_BOOT_INTRO_SEC + ENGINE_BOOT_ANALYSIS_SEC  # legacy total label
 PATTERN_NEON_STAGES: list[dict] = []
 THREE_CANDLE_ENTRY = False
 # After arm: skip the first BUY/SELL detect once per pair (all charts).
@@ -3384,16 +3419,45 @@ def _reset_scan_candle_baseline() -> None:
 
 
 async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
-    """Score all mapped coins; rewrite watchlist to MARKET-avg% qualifiers."""
+    """Score liquid Bybit universe; rewrite watchlist to MARKET-avg% qualifiers.
+
+    Trade entry/exit policy unchanged — only which pairs enter the scan watchlist.
+    """
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     prev_fire = set(getattr(agent, "momentum_fire_pairs", None) or [])
     prev_watch = set(agent.watchlist or [])
 
+    agent.momentum_scan_stage = "instruments"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        await bybit_instruments.ensure_instruments(client)
+        agent.momentum_scan_stage = "liquid"
+        symbol_map = await bybit_instruments.build_liquid_symbol_map(
+            client,
+            fallback_map=BYBIT_SYMBOL_MAP,
+        )
+
+    avail = float(agent.get_available_capital() or 0)
+
+    def _lot_ok(coin: str, bybit_symbol: str) -> bool:
+        return bybit_instruments.lot_affordable(
+            bybit_symbol,
+            available_capital=avail if avail > 0 else 1e9,
+        )
+
+    async def _progress(done: int, total: int, stage: str) -> None:
+        agent._on_momentum_scan_progress(done, total, stage)
+
+    agent.momentum_scan_total = len(symbol_map)
+    agent.momentum_scan_done = 0
+    agent.momentum_scan_stage = "scoring"
+
     built = await build_momentum_watchlist(
-        symbol_map=BYBIT_SYMBOL_MAP,
+        symbol_map=symbol_map,
         engine_tf=tf_key,
         active_pair=agent.active_pair,
         max_pairs=int(getattr(agent, "MAX_WATCHLIST", 32) or 32),
+        progress_cb=_progress,
+        lot_ok=_lot_ok if avail > 0 else None,
     )
     thr = float(built["threshold"])
     new_watch = list(built["watchlist"])
@@ -3413,15 +3477,20 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
     agent.momentum_threshold_pct = thr
     agent.momentum_gate_ready = True
     agent.momentum_last_refresh_ms = int(time.time() * 1000)
+    agent.momentum_scan_stage = "ready"
+    agent.momentum_scan_done = int(built.get("scored") or len(scores))
+    agent.momentum_scan_total = int(built.get("scored") or len(scores))
+    # Close boot overlay after min intro once scan finishes.
+    if float(getattr(agent, "boot_started_at", 0) or 0) > 0:
+        min_until = float(agent.boot_started_at) + float(ENGINE_BOOT_INTRO_SEC)
+        agent.boot_ui_until = max(time.time(), min_until)
 
     dropped = prev_fire - set(new_fire)
     for pair in list(PENDING_ENTRY_SIGNALS.keys()):
         if pair in dropped or (new_fire and pair not in set(new_fire) and pair not in PENDING_ENTRY_SIGNALS):
-            # Drop pending for pairs no longer fire-eligible
             if pair not in set(new_fire):
                 PENDING_ENTRY_SIGNALS.pop(pair, None)
 
-    # Also clear pending for any pair not in new fire set
     for pair in list(PENDING_ENTRY_SIGNALS.keys()):
         if pair not in set(new_fire):
             PENDING_ENTRY_SIGNALS.pop(pair, None)
@@ -3432,6 +3501,7 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
 
     summary = (
         f"Momentum gate ({reason}) TF={tf_key} thr>{thr:g}% · "
+        f"scored={built.get('scored', len(scores))} "
         f"fire={len(new_fire)} watch={len(new_watch)} · "
         f"+{len(added)} -{len(removed)}"
     )
@@ -3457,20 +3527,28 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
                 "tf": tf_key,
                 "added": added,
                 "removed": removed,
-                "fire_count": len(new_fire),
+                "kept": kept,
+                "scored": built.get("scored"),
                 "reason": reason,
             },
         )
+        if added or removed:
+            notifications.push(
+                f"Momentum watchlist updated (+{len(added)} / −{len(removed)}).",
+                "info",
+            )
 
     return {
         "threshold": thr,
+        "watchlist": new_watch,
+        "qualified": new_fire,
+        "scores": scores,
+        "quiet": bool(built.get("quiet")),
+        "scored": built.get("scored"),
         "added": added,
         "removed": removed,
         "kept": kept,
-        "watchlist": new_watch,
         "fire_pairs": new_fire,
-        "scores": agent.momentum_scores,
-        "quiet": bool(built.get("quiet")),
         "prev_watch": sorted(prev_watch),
     }
 
@@ -4576,6 +4654,15 @@ async def start_background_tasks():
             )
     except Exception as exc:
         print(f"[ENGINE RUNTIME] startup restore note: {exc}")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            inst = await bybit_instruments.ensure_instruments(client)
+            print(
+                f"[INSTRUMENTS] Startup: ok={inst.get('ok')} "
+                f"count={inst.get('count')} cached={inst.get('cached')}"
+            )
+    except Exception as exc:
+        print(f"[INSTRUMENTS] startup note: {exc}")
     # Restore Bybit LIVE mode if keys are on disk (keys = LIVE, no keys = PAPER).
     try:
         if settings_store.is_bybit_configured():
@@ -5761,7 +5848,7 @@ async def portfolio_feed(websocket: WebSocket):
                 "freeze_reason": agent.freeze_reason,
                 "trading_ready": bool(agent.trading_ready()),
                 "warmup_remaining_sec": round(agent.warmup_remaining_sec(), 1),
-                "warmup_total_sec": ENGINE_WARMUP_SEC,
+                "warmup_total_sec": ENGINE_BOOT_MAX_SEC,
                 "boot_intro_sec": ENGINE_BOOT_INTRO_SEC,
                 "boot_analysis_sec": ENGINE_BOOT_ANALYSIS_SEC,
                 "one_m_fee_hold": bool(getattr(agent, "one_m_fee_hold", False)),
@@ -5770,6 +5857,9 @@ async def portfolio_feed(websocket: WebSocket):
                 "momentum_fire_pairs": list(getattr(agent, "momentum_fire_pairs", None) or []),
                 "momentum_scores": list(getattr(agent, "momentum_scores", None) or [])[:24],
                 "momentum_last_refresh_ms": int(getattr(agent, "momentum_last_refresh_ms", 0) or 0),
+                "momentum_scan_done": int(getattr(agent, "momentum_scan_done", 0) or 0),
+                "momentum_scan_total": int(getattr(agent, "momentum_scan_total", 0) or 0),
+                "momentum_scan_stage": str(getattr(agent, "momentum_scan_stage", "") or ""),
                 "portfolio_drop_pct": round(portfolio_drop, 2),
                 "is_active": agent.is_active,
                 "timeframe_seconds": agent.timeframe_seconds,

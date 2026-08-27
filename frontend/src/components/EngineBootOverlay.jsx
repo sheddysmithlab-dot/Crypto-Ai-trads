@@ -12,8 +12,8 @@ const RING_C = 2 * Math.PI * RING_R;
 
 /**
  * Full-screen boot sequence after AI Engine START:
- * 0–10s  intro MP4 (autoplay, muted)
- * 10–20s smooth neon countdown ring (continuous, no tick jumps)
+ * 0–introSec  intro MP4
+ * then scan progress ring (no fixed countdown number) until momentum gate ready
  * Blocks all background interaction; Cancel stops engine immediately (no confirm).
  */
 export default function EngineBootOverlay({
@@ -26,23 +26,25 @@ export default function EngineBootOverlay({
   momentumFirePairs = [],
   momentumScores = [],
   momentumGateReady = false,
+  momentumScanDone = 0,
+  momentumScanTotal = 0,
+  momentumScanStage = '',
   onCancel,
   cancelLoading = false,
 }) {
   const [videoOk, setVideoOk] = useState(true);
-  const [smoothLeft, setSmoothLeft] = useState(0);
   const [smoothProgress, setSmoothProgress] = useState(0);
   const videoRef = useRef(null);
-  const countdownEndRef = useRef(0);
-  const countdownDurRef = useRef(ANALYSIS_SEC);
 
   const remainingWs = Math.max(0, Number(warmupRemainingSec) || 0);
   const total = Math.max(1, Number(warmupTotalSec) || TOTAL_SEC);
   const intro = Math.max(1, Number(introSec) || INTRO_SEC);
-  const analysis = Math.max(1, Number(analysisSec) || ANALYSIS_SEC);
-  const inIntro = remainingWs > analysis + 0.05;
   const show = Boolean(active && remainingWs > 0.05);
+  const scanTotal = Math.max(0, Number(momentumScanTotal) || 0);
+  const scanDone = Math.max(0, Number(momentumScanDone) || 0);
+  const scanPct = scanTotal > 0 ? Math.min(1, scanDone / scanTotal) : (momentumGateReady ? 1 : 0);
   const elapsedIntro = Math.max(0, Math.min(intro, total - remainingWs));
+  const stillIntro = show && !momentumGateReady && elapsedIntro < intro - 0.2;
 
   // Lock body scroll while boot overlay is up
   useEffect(() => {
@@ -56,7 +58,7 @@ export default function EngineBootOverlay({
 
   // Start / restart intro video when intro phase is visible
   useEffect(() => {
-    if (!show || !inIntro || !videoOk) return undefined;
+    if (!show || !stillIntro || !videoOk) return undefined;
     const el = videoRef.current;
     if (!el) return undefined;
     el.muted = true;
@@ -74,41 +76,34 @@ export default function EngineBootOverlay({
         /* ignore */
       }
     };
-  }, [show, inIntro, videoOk]);
+  }, [show, stillIntro, videoOk]);
 
-  // Smooth continuous countdown (rAF) — no discrete tick jumps
+  // Smooth ring from scan progress
   useEffect(() => {
-    if (!show || inIntro) {
-      countdownEndRef.current = 0;
-      setSmoothLeft(analysis);
+    if (!show || stillIntro) {
       setSmoothProgress(0);
       return undefined;
     }
-    const left = Math.min(analysis, Math.max(0, remainingWs));
-    countdownDurRef.current = analysis;
-    countdownEndRef.current = performance.now() + left * 1000;
-
-    let raf = 0;
-    const frame = (now) => {
-      const end = countdownEndRef.current;
-      const dur = countdownDurRef.current;
-      const leftMs = Math.max(0, end - now);
-      const leftSec = leftMs / 1000;
-      const progress = dur > 0 ? 1 - leftSec / dur : 1;
-      setSmoothLeft(leftSec);
-      setSmoothProgress(Math.min(1, Math.max(0, progress)));
-      if (leftMs > 0) raf = requestAnimationFrame(frame);
-    };
-    raf = requestAnimationFrame(frame);
-    return () => cancelAnimationFrame(raf);
-    // Seed once when countdown phase starts (not on every WS tick).
-  }, [show, inIntro, analysis]); // remainingWs read only at phase enter
-
+    setSmoothProgress(scanPct);
+    return undefined;
+  }, [show, stillIntro, scanPct]);
 
   if (!show) return null;
 
   const offset = RING_C * (1 - smoothProgress);
-  const displaySec = Math.max(0, Math.ceil(smoothLeft));
+  const stage = String(momentumScanStage || '').toLowerCase();
+  const centerLabel = momentumGateReady
+    ? 'READY'
+    : stage === 'liquid' || stage === 'instruments'
+      ? 'LOAD'
+      : stage === 'scoring'
+        ? (scanTotal > 0 ? `${scanDone}/${scanTotal}` : 'SCAN')
+        : 'SCAN';
+  const centerSub = momentumGateReady
+    ? 'watchlist set'
+    : stage === 'scoring'
+      ? 'scoring'
+      : stage || 'preparing';
 
   return (
     <div
@@ -122,7 +117,7 @@ export default function EngineBootOverlay({
     >
       <div className="absolute inset-0 bg-black/70 backdrop-blur-[2px]" />
 
-      {inIntro ? (
+      {stillIntro ? (
         <div className="relative z-[201] w-[min(96vw,980px)] max-h-[78vh] rounded-xl overflow-hidden border border-cyan-400/50 shadow-[0_0_48px_rgba(59,158,255,0.45)] bg-black">
           {videoOk ? (
             <video
@@ -154,16 +149,15 @@ export default function EngineBootOverlay({
               />
             </div>
             <div className="mt-2 text-gray-200 text-[11px] font-mono">
-              Intro {Math.ceil(Math.max(0, remainingWs - analysis))}s · then countdown
+              Loading liquid market universe…
             </div>
           </div>
         </div>
       ) : (
         <div className="relative z-[201] flex flex-col items-center gap-4 px-4">
           <div className="text-orange-300 text-xs sm:text-sm font-black tracking-[0.2em] uppercase drop-shadow-[0_0_8px_rgba(255,138,31,0.8)]">
-            Analysis countdown
+            Market momentum scan
           </div>
-          {/* Round card — padding + overflow visible so neon glow is not clipped square */}
           <div
             className="relative rounded-full flex items-center justify-center overflow-visible bg-black/45 border border-cyan-400/35 shadow-[0_0_36px_rgba(59,158,255,0.35)]"
             style={{
@@ -205,20 +199,20 @@ export default function EngineBootOverlay({
                   }}
                 />
               </svg>
-              <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                <div className="text-5xl sm:text-6xl font-black tabular-nums text-white drop-shadow-[0_0_14px_rgba(59,158,255,0.9)]">
-                  {displaySec}
+              <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none px-3">
+                <div className="text-3xl sm:text-4xl font-black tabular-nums text-white drop-shadow-[0_0_14px_rgba(59,158,255,0.9)] text-center leading-none">
+                  {centerLabel}
                 </div>
-                <div className="text-[10px] sm:text-xs font-bold tracking-widest text-orange-300/90 uppercase mt-1">
-                  seconds
+                <div className="text-[10px] sm:text-xs font-bold tracking-widest text-orange-300/90 uppercase mt-2">
+                  {centerSub}
                 </div>
               </div>
             </div>
           </div>
           <div className="text-center text-gray-300 text-[11px] sm:text-xs max-w-sm leading-relaxed space-y-2">
             <p>
-              Engine trading live in background. Pattern detect → next candle open. First signal per
-              chart skipped.
+              Building live watchlist from Bybit liquid perps. Trade policy unchanged — only scan
+              universe expands.
             </p>
             {momentumGateReady ? (
               <p className="text-sky-300/90">
@@ -232,12 +226,16 @@ export default function EngineBootOverlay({
                   : ' — none (entries quiet)'}
               </p>
             ) : (
-              <p className="text-amber-300/80">Scoring MARKET avg% across all coins…</p>
+              <p className="text-amber-300/80">
+                {scanTotal > 0
+                  ? `Scoring MARKET avg% · ${scanDone}/${scanTotal}`
+                  : 'Fetching instruments & liquid tickers…'}
+              </p>
             )}
             {Array.isArray(momentumScores) && momentumScores.length > 0 ? (
               <p className="text-[10px] text-gray-500">
                 Passed{' '}
-                {momentumScores.filter((s) => s?.passed).length}/{momentumScores.length} coins
+                {momentumScores.filter((s) => s?.passed).length}/{momentumScores.length} scored
               </p>
             ) : null}
           </div>
