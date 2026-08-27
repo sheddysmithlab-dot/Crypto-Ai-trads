@@ -1028,7 +1028,11 @@ class AITradingAgent:
         return []
 
     def set_watchlist(self, pairs: list[str] | None) -> list[str]:
-        """Replace scan watchlist (launcher minimized coins). All mapped Bybit pairs allowed."""
+        """Replace scan watchlist (launcher minimized coins). All mapped Bybit pairs allowed.
+
+        HARD INSTRUCTION: changing the watchlist never closes/exits open trades.
+        Open-trade pairs are always re-pinned onto the list after rewrite.
+        """
         cleaned: list[str] = []
         seen: set[str] = set()
         for raw in pairs or []:
@@ -1048,6 +1052,15 @@ class AITradingAgent:
             cleaned.append(p)
             if len(cleaned) >= self.MAX_WATCHLIST:
                 break
+        # Pin open-trade pairs (may exceed MAX_WATCHLIST — never orphan opens).
+        for p in sorted({t.get("pair") for t in self.trades if t.get("pair")}):
+            label = (p or "").strip()
+            if not label or label in seen:
+                continue
+            if get_bybit_symbol(label) is None:
+                continue
+            cleaned.append(label)
+            seen.add(label)
         self.watchlist = cleaned
         print(f"[WATCHLIST] AI scan pairs → {cleaned or ['(none — using active chart pair)']}")
         return list(cleaned)
@@ -1824,14 +1837,23 @@ class AITradingAgent:
         # RULE 1: 1% margin, 100x leverage for manual; auto paper may pass a fixed notional.
         if position_size_usd is not None:
             position_size = round(float(position_size_usd), 2)
-            margin = round(position_size / self.leverage, 2)
+            lev = max(float(self.leverage or 1), 1.0)
+            # Keep finer margin precision — at 100x, $0.27 notional → $0.0027 margin,
+            # which rounds to $0.00 at 2dp and falsely tripped "Insufficient balance".
+            margin = round(position_size / lev, 6)
+            if position_size <= 0:
+                self.last_open_skip_reason = (
+                    "Position size is $0 after sizing — balance too low for this timeframe %"
+                )
+                notifications.push(self.last_open_skip_reason + ".", "error")
+                return None
         else:
             margin = round((capital_base if capital_base is not None else self.current_capital) * self.margin_pct, 2)
             position_size = round(margin * self.leverage, 2)
-        if margin <= 0 or position_size <= 0:
-            self.last_open_skip_reason = "Insufficient balance to open a position"
-            notifications.push(self.last_open_skip_reason + ".", "error")
-            return None
+            if margin <= 0 or position_size <= 0:
+                self.last_open_skip_reason = "Insufficient balance to open a position"
+                notifications.push(self.last_open_skip_reason + ".", "error")
+                return None
 
         # Paper ledger: reserve capital on open (auto = 10% notional slot; manual = margin).
         capital_reserved = round(position_size, 2) if source == "auto" and position_size_usd is not None else round(margin, 2)
@@ -3415,11 +3437,20 @@ def _reset_scan_candle_baseline() -> None:
 async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
     """Score liquid Bybit universe; rewrite watchlist to MARKET-avg% qualifiers.
 
-    Trade entry/exit policy unchanged — only which pairs enter the scan watchlist.
+    HARD INSTRUCTION (do not violate):
+      - 7th-candle / chart / watchlist refresh·replace·add·edit MUST NOT close,
+        exit, drop, or hide related OPEN trades.
+      - Only NEW-entry universe (fire list) changes; open positions keep path
+        TP/SL management via open_trade_pairs price feed until their own exit.
     """
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     prev_fire = set(getattr(agent, "momentum_fire_pairs", None) or [])
     prev_watch = set(agent.watchlist or [])
+    open_before = [
+        (int(t.get("id") or 0), str(t.get("pair") or ""), str(t.get("side") or ""))
+        for t in list(agent.trades or [])
+    ]
+    open_pairs = sorted({p for p in agent.open_trade_pairs() if p})
 
     agent.momentum_scan_stage = "instruments"
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -3458,18 +3489,39 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
         lot_ok=_lot_ok if avail > 0 else None,
     )
     thr = float(built["threshold"])
-    new_watch = list(built["watchlist"])
     new_fire = list(built["qualified"])
     scores = list(built["scores"])
+    # Fire = NEW-entry universe only. Open pairs are pinned onto watchlist so
+    # they stay visible/managed without forcing new entries if they fell off cut.
+    new_watch = list(new_fire)
 
-    # Start/boot: watchlist = fire only; chart resets to #1 fire pair.
+    # Start/boot: chart → #1 fire pair. Does NOT close any open trades.
     if reason in ("bot_start", "schedule_start", "boot") and new_fire:
-        new_watch = list(new_fire)
         first = new_fire[0]
         mark = float(agent.pair_prices.get(first) or agent.current_price or 0)
         agent.set_active_pair(first, mark)
 
+    pinned: list[str] = []
+    seen_w = set(new_watch)
+    for p in open_pairs:
+        if p not in seen_w:
+            new_watch.append(p)
+            pinned.append(p)
+            seen_w.add(p)
+
     agent.set_watchlist(new_watch)
+    # set_watchlist may truncate at MAX_WATCHLIST — force-pin opens back.
+    if open_pairs:
+        wl = list(agent.watchlist or [])
+        seen = set(wl)
+        for p in open_pairs:
+            if p not in seen:
+                wl.append(p)
+                seen.add(p)
+                if p not in pinned:
+                    pinned.append(p)
+        agent.watchlist = wl
+
     agent.momentum_fire_pairs = new_fire
     agent.momentum_scores = [
         {
@@ -3492,12 +3544,7 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
         agent.boot_ui_until = time.time() + 1.5
         print("[BOOT UI] Scan ready — overlay closes in 1.5s.")
 
-    dropped = prev_fire - set(new_fire)
-    for pair in list(PENDING_ENTRY_SIGNALS.keys()):
-        if pair in dropped or (new_fire and pair not in set(new_fire) and pair not in PENDING_ENTRY_SIGNALS):
-            if pair not in set(new_fire):
-                PENDING_ENTRY_SIGNALS.pop(pair, None)
-
+    # Drop unfilled pending signals only — NEVER close filled open trades here.
     for pair in list(PENDING_ENTRY_SIGNALS.keys()):
         if pair not in set(new_fire):
             PENDING_ENTRY_SIGNALS.pop(pair, None)
@@ -3506,28 +3553,42 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
     removed = sorted(prev_fire - set(new_fire))
     kept = sorted(set(new_fire) & prev_fire)
 
+    open_after = [
+        (int(t.get("id") or 0), str(t.get("pair") or ""), str(t.get("side") or ""))
+        for t in list(agent.trades or [])
+    ]
+    if open_after != open_before:
+        print(
+            "[MOMENTUM][GUARD] Open-trade book changed during watchlist refresh — "
+            f"before={open_before} after={open_after}. "
+            "Refresh path must never exit opens; investigate caller."
+        )
+
     summary = (
         f"Momentum gate ({reason}) TF={tf_key} thr>{thr:g}% · "
         f"scored={built.get('scored', len(scores))} "
-        f"fire={len(new_fire)} watch={len(new_watch)} · "
-        f"+{len(added)} -{len(removed)}"
+        f"fire={len(new_fire)} watch={len(agent.watchlist or [])} · "
+        f"+{len(added)} -{len(removed)} · "
+        f"open_pinned={len(pinned)} open_kept={len(open_pairs)}"
     )
     print(f"[MOMENTUM] {summary}")
     if built.get("quiet"):
         system_log.push_agent_chat(
             f"Momentum: no pairs above {thr:g}% on {tf_key} — new entries quiet "
-            f"(chart {agent.active_pair} docked only).",
+            f"(open trades kept; chart {agent.active_pair}).",
             status="no_match",
-            details={"threshold": thr, "tf": tf_key, "reason": reason},
+            details={"threshold": thr, "tf": tf_key, "reason": reason, "open_pairs": open_pairs},
         )
         notifications.push(
-            f"Momentum filter: no coins above {thr:g}% ({tf_key}). New entries paused.",
+            f"Momentum filter: no coins above {thr:g}% ({tf_key}). "
+            "New entries paused — open trades unchanged.",
             "warning",
         )
     else:
         system_log.push_agent_chat(
             f"Momentum watchlist · thr>{thr:g}% · "
-            f"{', '.join(new_fire[:8])}{'…' if len(new_fire) > 8 else ''}",
+            f"{', '.join(new_fire[:8])}{'…' if len(new_fire) > 8 else ''}"
+            + (f" · open pinned {len(open_pairs)}" if open_pairs else ""),
             status="match",
             details={
                 "threshold": thr,
@@ -3537,17 +3598,18 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
                 "kept": kept,
                 "scored": built.get("scored"),
                 "reason": reason,
+                "open_pairs_pinned": open_pairs,
             },
         )
         if added or removed:
             notifications.push(
-                f"Momentum watchlist updated (+{len(added)} / −{len(removed)}).",
+                f"Momentum watchlist updated (+{len(added)} / −{len(removed)}) — open trades unchanged.",
                 "info",
             )
 
     return {
         "threshold": thr,
-        "watchlist": new_watch,
+        "watchlist": list(agent.watchlist or []),
         "qualified": new_fire,
         "scores": scores,
         "quiet": bool(built.get("quiet")),
@@ -3557,6 +3619,7 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
         "kept": kept,
         "fire_pairs": new_fire,
         "prev_watch": sorted(prev_watch),
+        "open_pairs_pinned": open_pairs,
     }
 
 
@@ -3771,42 +3834,74 @@ def compute_auto_trade_plan(
         return None
     available = agent.get_available_capital()
     if available is None or available <= 0:
+        print(f"[SIZE] Skip {trade_pair}: available capital ${available}")
         return None
     mult = max(1.0, float(size_mult))
     cap_frac = auto_trade_capital_pct_for_agent(agent)
     position_usd = round(available * cap_frac * mult, 2)
     if position_usd <= 0:
+        print(
+            f"[SIZE] Skip {trade_pair}: TF% size rounds to $0 "
+            f"(avail=${available:.2f} × {cap_frac*100:g}%)"
+        )
         return None
     bybit_symbol = get_bybit_symbol(trade_pair)
     decimals = qty_decimals_for_price(entry_price)
     raw_qty = position_usd / entry_price
     qty = snap_qty_to_step(raw_qty, bybit_symbol)
     bumped_to_min_lot = False
-    # Balance-aware: never open a trade whose min lot exceeds 15% of available capital.
-    # Low balance → only cheap coins; higher balance unlocks more expensive coins.
+    # Balance-aware: never open a trade whose exchange minimum exceeds 15% of available.
     max_lot_notional = float(available) * 0.15
+    inst = bybit_instruments.get_instrument(bybit_symbol) or {}
+    min_notional_rule = float(inst.get("minNotionalValue") or 0) or 0.0
+    lot = min_lot_qty(bybit_symbol)
+    min_lot_notional = float(lot) * float(entry_price) if lot and lot > 0 else 0.0
+    exchange_min = max(min_notional_rule, min_lot_notional)
+
     if qty is None or qty <= 0:
-        lot = min_lot_qty(bybit_symbol)
         if lot is None:
+            print(f"[SIZE] Skip {trade_pair}: no lot size / qty step")
             return None
-        min_notional = lot * entry_price
+        min_notional = max(min_lot_notional, min_notional_rule)
         if min_notional > max_lot_notional:
             print(
-                f"[SIZE] Skip {trade_pair}: min lot ${min_notional:.2f} "
+                f"[SIZE] Skip {trade_pair}: exchange min ${min_notional:.2f} "
                 f"> 15% of balance ${available:.2f} (${max_lot_notional:.2f})"
             )
             return None
         leverage = max(float(getattr(agent, "leverage", 1) or 1), 1.0)
         margin_needed = min_notional / leverage
         if margin_needed > available * 0.95:
+            print(
+                f"[SIZE] Skip {trade_pair}: min margin ${margin_needed:.4f} "
+                f"> 95% available ${available:.2f}"
+            )
             return None
         qty = snap_qty_to_step(lot, bybit_symbol) or lot
         position_usd = round(qty * entry_price, 2)
+        if min_notional_rule > position_usd:
+            position_usd = round(min_notional_rule, 2)
+            qty = snap_qty_to_step(position_usd / entry_price, bybit_symbol) or qty
         bumped_to_min_lot = True
+    elif exchange_min > 0 and position_usd < exchange_min:
+        # Planned TF% size below Bybit minimum — bump only if within 15% budget.
+        if exchange_min > max_lot_notional:
+            print(
+                f"[SIZE] Skip {trade_pair}: need min ${exchange_min:.2f} "
+                f"but 15% budget is ${max_lot_notional:.2f} (avail=${available:.2f})"
+            )
+            return None
+        position_usd = round(exchange_min, 2)
+        qty = snap_qty_to_step(position_usd / entry_price, bybit_symbol)
+        if qty is None or qty <= 0:
+            print(f"[SIZE] Skip {trade_pair}: cannot size qty for min notional ${exchange_min:.2f}")
+            return None
+        bumped_to_min_lot = True
+
     if qty is None or qty <= 0:
         return None
     leverage = max(float(getattr(agent, "leverage", 1) or 1), 1.0)
-    margin = round(position_usd / leverage, 4)
+    margin = round(position_usd / leverage, 6)
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     profile = get_timeframe_profile(tf_key)
     return {
@@ -4009,7 +4104,12 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
         plan = compute_auto_trade_plan(agent, price=mark_px, pair=pair)
         if plan is None:
-            return await _skip_pending(pending, "Size plan failed (capital/lot)", fire_candle_ms=fire_candle_ms)
+            return await _skip_pending(
+                pending,
+                "Size plan failed — coin min lot/notional too large for available balance "
+                f"(${agent.get_available_capital():.2f})",
+                fire_candle_ms=fire_candle_ms,
+            )
 
         brain_sl = detect.get("sl")
         brain_tp = detect.get("tp")

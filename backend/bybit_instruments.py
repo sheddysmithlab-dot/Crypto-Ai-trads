@@ -311,16 +311,30 @@ def lot_affordable(
     last_price: float | None = None,
     max_frac: float | None = None,
 ) -> bool:
-    """True if min lot notional fits within max_frac of available capital."""
+    """True if exchange min order fits within max_frac of available capital.
+
+    Uses max(minLot×price, minNotionalValue). Missing price alone no longer
+    auto-passes — that let expensive TMX-like coins onto the fire list, then
+    fail at order time with a misleading 'Insufficient balance'.
+    """
     if available_capital is None or available_capital <= 0:
         return False
     sym = (bybit_symbol or "").upper()
     inst = get_instrument(sym) or {}
     lot = min_order_qty(sym) or qty_step(sym)
     px = last_price if last_price and last_price > 0 else _safe_float(inst.get("lastPrice"))
-    if lot is None or lot <= 0 or px is None or px <= 0:
-        return True  # don't block if unknown — trade sizer still gates later
-    notional = float(lot) * float(px)
+    min_notional_rule = _safe_float(inst.get("minNotionalValue")) or 0.0
+
+    notional = 0.0
+    if lot is not None and lot > 0 and px is not None and px > 0:
+        notional = float(lot) * float(px)
+    if min_notional_rule > 0:
+        notional = max(notional, float(min_notional_rule))
+
+    if notional <= 0:
+        # Unknown min size — keep out of momentum fire list (safer than admit-then-fail).
+        return False
+
     frac = float(max_frac if max_frac is not None else LOT_MAX_BALANCE_FRAC)
     return notional <= float(available_capital) * max(0.01, frac)
 

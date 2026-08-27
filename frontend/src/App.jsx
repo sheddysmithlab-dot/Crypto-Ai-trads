@@ -235,8 +235,8 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // While engine active: launcher chips = trade-allowance list only
-  // (momentum fire / watchlist capped by max_concurrent_trades). No original-20 merge.
+  // While engine active: launcher chips = trade-allowance fire list
+  // + any open-trade pairs (pinned — refresh must never hide related opens).
   // Manual swap protected for 4s so user's chart swap isn't overwritten.
   const manualSwapAtRef = useRef(0);
   const chartResetPendingRef = useRef(false);
@@ -245,7 +245,10 @@ export default function App() {
     if (Date.now() - manualSwapAtRef.current < 4000) return;
     const fire = Array.isArray(portfolio.momentumFirePairs) ? portfolio.momentumFirePairs : [];
     const watch = Array.isArray(portfolio.watchlist) ? portfolio.watchlist : [];
-    const pairs = fire.length ? fire : watch;
+    const openPairs = (trades || [])
+      .filter((t) => t && t.status !== 'sold' && t.pair)
+      .map((t) => String(t.pair));
+    const pairs = [...(fire.length ? fire : watch), ...openPairs];
     if (!pairs.length) return;
 
     setLauncherSlots((prev) => {
@@ -284,6 +287,7 @@ export default function App() {
     portfolio.watchlist,
     portfolio.momentumFirePairs,
     portfolio.momentumLastRefreshMs,
+    trades,
   ]);
 
   // Engine OFF → restore launcher to original 20 (drop momentum-added chips).

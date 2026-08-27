@@ -2,6 +2,10 @@
 
 Uses the same fetch_tf_move metric as the header MARKET readout.
 Scan/watchlist only — does not change trade entry/exit policy.
+
+HARD INSTRUCTION: refreshing / replacing / editing the watchlist (including every
+Nth candle) must NEVER close, exit, or drop related OPEN trades. Fire list only
+gates NEW entries; open positions keep path TP/SL until their own exit rules fire.
 """
 from __future__ import annotations
 

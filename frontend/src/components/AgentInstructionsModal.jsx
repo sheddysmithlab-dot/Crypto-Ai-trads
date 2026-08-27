@@ -9,6 +9,7 @@ import InfoTip from './InfoTip';
 //   trade capacity = round(capitalRisk * 2)     // 5% -> 10 fires
 // When session portfolio loss hits this %, backend auto Hold-stops (no new entries;
 // open trades exit on their own TP/SL).
+// HARD RULE: 7th-candle / watchlist refresh·replace·add·edit never closes related open trades.
 
 const BASE_CAPITAL_RISK = 5;
 const BASE_RISK = 50;
