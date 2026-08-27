@@ -28,7 +28,7 @@ MOMENTUM_MIN_AVG_PCT: dict[str, float] = {
 MOMENTUM_REFRESH_EVERY_N_CANDLES = 7  # legacy; candle re-scan disabled — use timer instead
 # Soft "engine universe restart": re-score liquid coins every N seconds while engine ON.
 # Open trades are NEVER closed — only the NEW-entry fire/watch list updates.
-MOMENTUM_REFRESH_EVERY_SECONDS = int(os.environ.get("MOMENTUM_REFRESH_EVERY_SECONDS", "600"))
+MOMENTUM_REFRESH_EVERY_SECONDS = int(os.environ.get("MOMENTUM_REFRESH_EVERY_SECONDS", "3600"))
 # Parallel kline fetches during universe score (burst only every N candles / boot).
 SCORE_CONCURRENCY = 10
 

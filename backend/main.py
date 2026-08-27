@@ -3822,7 +3822,7 @@ async def maybe_refresh_momentum_every_n_candles(
     """Boot-only momentum universe filter (inline until gate ready).
 
     Periodic candle re-scan DISABLED. While engine is ON, a separate
-    ``momentum_universe_timer_loop`` re-scores every 10 minutes in the
+    ``momentum_universe_timer_loop`` re-scores every hour in the
     background and adds new coins — open trades are always held/pinned.
     """
     if not agent.is_active or agent.emergency_triggered:
@@ -3843,7 +3843,7 @@ async def maybe_refresh_momentum_every_n_candles(
 
 
 async def momentum_universe_timer_loop():
-    """Every 10 min: soft universe restart (new coins) while holding open trades.
+    """Every 1h: soft universe restart (new coins) while holding open trades.
 
     Does NOT restart the Docker process or close positions — only re-runs the
     momentum watchlist/fire list in the background (same path as boot refresh).
@@ -3860,12 +3860,16 @@ async def momentum_universe_timer_loop():
                 continue
             if not getattr(agent, "momentum_gate_ready", False):
                 continue
+            # 1m/5m: hourly engine soft-restart already re-arms + rescans — skip duplicate.
+            tf = str(agent._chart_tf_key() or "").strip().lower()
+            if tf in ("1m", "5m"):
+                continue
             open_n = len(agent.trades or [])
             print(
-                f"[MOMENTUM] 10-min soft restart — re-scoring universe "
+                f"[MOMENTUM] {interval // 60}-min soft restart — re-scoring universe "
                 f"(holding {open_n} open trade(s))"
             )
-            _run_momentum_refresh_background("every_10_min")
+            _run_momentum_refresh_background(f"every_{interval // 60}_min")
         except Exception as exc:
             print(f"[MOMENTUM] timer loop note: {exc}")
             await asyncio.sleep(30)
@@ -5402,11 +5406,12 @@ async def bot_start():
     fire_n = len(getattr(agent, "momentum_fire_pairs", None) or [])
     thr = float(getattr(agent, "momentum_threshold_pct", 0) or 0)
     print(f"[AI ENGINE] START — {agent.active_pair} ({tf_key}) brain.py · momentum fire={fire_n} thr>{thr:g}%")
+    refresh_min = max(1, int(ENGINE_HOURLY_RESTART_SEC if is_scalp_tf(tf_key) else MOMENTUM_REFRESH_EVERY_SECONDS) // 60)
     system_log.push(
         "ai",
         f"AI Engine STARTED on {agent.active_pair} ({open_count} open preserved). "
         f"Momentum watchlist: {fire_n} pair(s) above {thr:g}% on {tf_key}. "
-        f"Soft universe restart every {max(60, int(MOMENTUM_REFRESH_EVERY_SECONDS)) // 60} min "
+        f"Soft universe restart every {refresh_min} min "
         f"(open trades held).",
         {
             "open_positions": open_count,
@@ -5414,6 +5419,7 @@ async def bot_start():
             "warmup_sec": ENGINE_WARMUP_SEC,
             "momentum_fire": fire_n,
             "momentum_threshold": thr,
+            "soft_restart_min": refresh_min,
         },
     )
     system_log.push_agent_chat(
