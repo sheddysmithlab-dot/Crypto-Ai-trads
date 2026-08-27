@@ -2,7 +2,6 @@ import { useState } from 'react';
 import PairSelectorDropdown from './PairSelectorDropdown';
 import TradeLauncherPopup from './TradeLauncherPopup';
 import { fmtNum } from '../data/pairs';
-import { formatTradeFireTime } from '../utils/time';
 import { TIMEFRAME_PROFILES, getTimeframeProfile } from '../data/timeframeProfiles';
 import { formatTfMoveLabel } from '../hooks/useTfMoveStats';
 
@@ -39,37 +38,6 @@ export default function ChartPanel({
           botIsActive={botIsActive}
         />
         <div className="flex flex-wrap justify-end items-center gap-2 text-xs font-semibold">
-          {readouts.tradeFireTooltip ? (
-            <div
-              className={`flex flex-col gap-0.5 px-2 py-1 rounded border text-[10px] font-bold uppercase tracking-wide max-w-[14rem] ${
-                readouts.tradeFireTooltip.stage === 'detected'
-                  ? 'border-cyan-400/60 bg-cyan-500/10 text-cyan-100'
-                  : readouts.tradeFireTooltip.stage === 'confirming'
-                    ? 'border-amber-400/60 bg-amber-500/10 text-amber-100'
-                    : readouts.tradeFireTooltip.stage === 'skipped'
-                      ? 'border-red-400/60 bg-red-500/10 text-red-100'
-                      : readouts.tradeFireTooltip.side === 'SHORT'
-                        ? 'border-orange-400/60 bg-orange-500/10 text-orange-100'
-                        : 'border-sky-400/60 bg-sky-500/10 text-sky-100'
-              }`}
-              title={readouts.tradeFireTooltip.reason || 'Pattern pipeline on candle'}
-            >
-              <span className="flex items-center gap-1">
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
-                {readouts.tradeFireTooltip.stageLabel || 'PATTERN'}
-                {readouts.tradeFireTooltip.side &&
-                !/LONG|SHORT/i.test(readouts.tradeFireTooltip.stageLabel || '')
-                  ? ` · ${readouts.tradeFireTooltip.side}`
-                  : ''}{' '}
-                · {readouts.tradeFireTooltip.pattern}
-              </span>
-              <span className="text-[9px] font-mono font-normal normal-case tracking-normal text-gray-400 truncate">
-                {formatTradeFireTime(
-                  readouts.tradeFireTooltip.opened_at || readouts.tradeFireTooltip.signal_candle_time,
-                )}
-              </span>
-            </div>
-          ) : null}
           {botIsActive && readouts.blueBoxStatus ? (
             <div
               className="flex items-center gap-1.5 px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-[10px] font-bold uppercase tracking-wide text-cyan-300"
