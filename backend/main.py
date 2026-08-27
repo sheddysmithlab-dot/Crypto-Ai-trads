@@ -861,10 +861,10 @@ LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0
 LOSS_LOCK_CLEAR_PCT = float(os.environ.get("LOSS_LOCK_CLEAR_PCT", "0.20"))
 LOSS_EMERGENCY_PCT = float(os.environ.get("LOSS_EMERGENCY_PCT", "0.70"))
 # Small-coin loss policy: low entry price → wider floors + wick confirm + entry grace.
-# Tiers by entry USD: ≥$1 normal · $0.10–$1 → 1.5× · <$0.10 → 2×.
+# Tiers by entry USD: ≥$1 normal · <$1 (mid + micro) → 2× protect/emergency.
 SMALL_COIN_MID_USD = float(os.environ.get("SMALL_COIN_MID_USD", "1.0"))
 SMALL_COIN_MICRO_USD = float(os.environ.get("SMALL_COIN_MICRO_USD", "0.10"))
-SMALL_COIN_MID_MULT = float(os.environ.get("SMALL_COIN_MID_MULT", "1.5"))
+SMALL_COIN_MID_MULT = float(os.environ.get("SMALL_COIN_MID_MULT", "2.0"))
 SMALL_COIN_MICRO_MULT = float(os.environ.get("SMALL_COIN_MICRO_MULT", "2.0"))
 SMALL_COIN_ENTRY_GRACE_SEC = float(os.environ.get("SMALL_COIN_ENTRY_GRACE_SEC", "3.0"))
 SMALL_COIN_WICK_TICKS = int(os.environ.get("SMALL_COIN_WICK_TICKS", "2"))
@@ -2239,8 +2239,8 @@ class AITradingAgent:
     def _loss_policy_for_trade(self, trade: dict) -> tuple[float, float, bool, str]:
         """Return (protect_pct, emergency_pct, is_small_coin, tier_label).
 
-        Small coins get wider loss floors (noise), wick confirm, and entry grace
-        in ``_evaluate_fixed_pct_exit`` — normal ≥$1 coins stay at base −0.50/−0.70.
+        Small coins (entry <$1) get 2× loss protect + emergency floors, plus wick
+        confirm and entry grace in ``_evaluate_fixed_pct_exit``. ≥$1 stays −0.50/−0.70.
         """
         entry = float(trade.get("entry") or 0)
         if entry <= 0:
@@ -3753,7 +3753,14 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
 async def maybe_refresh_momentum_every_n_candles(
     client: httpx.AsyncClient, timeframe_key: str
 ) -> None:
-    """Re-run momentum universe filter every N closed candles of active TF."""
+    """Re-run momentum universe filter every N closed candles of active TF.
+
+    The every-N refresh runs in the BACKGROUND so it never blocks the scan loop
+    (the universe re-score can take 30-120s when Bybit rate-limits). A guard
+    skips the trigger if a refresh is already running. Boot refresh stays inline
+    because the scan gate (momentum_gate_ready) is False until it completes, so
+    there is nothing to block anyway.
+    """
     if not agent.is_active or agent.emergency_triggered:
         return
     if not getattr(agent, "momentum_gate_ready", False):
@@ -3794,8 +3801,9 @@ async def maybe_refresh_momentum_every_n_candles(
     bars = (close_time - last) // interval_ms
     if bars < MOMENTUM_REFRESH_EVERY_N_CANDLES:
         return
-    await apply_momentum_watchlist_refresh(reason=f"every_{MOMENTUM_REFRESH_EVERY_N_CANDLES}_candles")
+    # Advance cursor NOW so repeated triggers don't stack while refresh runs.
     agent.last_momentum_candle_ms = close_time
+    _run_momentum_refresh_background(f"every_{MOMENTUM_REFRESH_EVERY_N_CANDLES}_candles")
 
 
 def get_pattern_neon_snapshot(pair: str | None = None) -> list[dict]:
