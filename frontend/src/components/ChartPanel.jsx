@@ -83,21 +83,6 @@ export default function ChartPanel({
               {readouts.blueBoxStatus}
             </div>
           ) : null}
-          <TradeLauncherPopup
-            slots={launcher?.slots || []}
-            editorOpen={Boolean(launcher?.editorOpen)}
-            editingId={launcher?.editingId || null}
-            onOpenNew={launcher?.onOpenNew}
-            onCloseEditor={launcher?.onCloseEditor}
-            onMinimizeToSlot={launcher?.onMinimizeToSlot}
-            onRestoreSlot={launcher?.onRestoreSlot}
-            onRemoveSlot={launcher?.onRemoveSlot}
-            onSwapWithMain={launcher?.onSwapWithMain}
-            pairs={pairSelector.pairs}
-            activeSymbol={pairSelector.activeSymbol}
-            timeframe={timeframe}
-            botIsActive={botIsActive}
-          />
           <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-gray-100 dark:bg-gray-800/80 text-[10px] font-mono text-gray-600 dark:text-gray-300 tabular-nums">
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" title="Live clock" />
             <span title="Live local time">{readouts.liveClock}</span>
@@ -132,6 +117,25 @@ export default function ChartPanel({
             );
           })}
         </div>
+      </div>
+
+      {/* Watchlist chips — full-width flexible strip (not piled in header corner) */}
+      <div className="px-3 py-2 border-b border-gray-200 dark:border-gray-800">
+        <TradeLauncherPopup
+          slots={launcher?.slots || []}
+          editorOpen={Boolean(launcher?.editorOpen)}
+          editingId={launcher?.editingId || null}
+          onOpenNew={launcher?.onOpenNew}
+          onCloseEditor={launcher?.onCloseEditor}
+          onMinimizeToSlot={launcher?.onMinimizeToSlot}
+          onRestoreSlot={launcher?.onRestoreSlot}
+          onRemoveSlot={launcher?.onRemoveSlot}
+          onSwapWithMain={launcher?.onSwapWithMain}
+          pairs={pairSelector.pairs}
+          activeSymbol={pairSelector.activeSymbol}
+          timeframe={timeframe}
+          botIsActive={botIsActive}
+        />
       </div>
 
       {/* TF profile strip — updates on hover/select */}

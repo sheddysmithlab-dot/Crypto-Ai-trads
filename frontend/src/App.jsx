@@ -239,6 +239,7 @@ export default function App() {
   // (momentum fire / watchlist capped by max_concurrent_trades). No original-20 merge.
   // Manual swap protected for 4s so user's chart swap isn't overwritten.
   const manualSwapAtRef = useRef(0);
+  const chartResetPendingRef = useRef(false);
   useEffect(() => {
     if (!effectiveBotActive) return;
     if (Date.now() - manualSwapAtRef.current < 4000) return;
@@ -268,6 +269,15 @@ export default function App() {
       persistLauncherSlots(next);
       return next;
     });
+
+    // After START scan: snap main chart to #1 fire coin once.
+    if (chartResetPendingRef.current && fire.length) {
+      chartResetPendingRef.current = false;
+      const firstSym = String(fire[0]).split('/')[0].toUpperCase();
+      if (firstSym && firstSym !== pairSelector.activeSymbol) {
+        pairSelector.selectPair(firstSym, { silent: true });
+      }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     effectiveBotActive,
@@ -424,10 +434,14 @@ export default function App() {
         return;
       }
       pushActionLog(`Agent config applied. max_concurrent_trades=${configData.max_concurrent_trades}`);
-      const pairs = launcherSlots.map((s) => `${s.symbol}/USDT`);
-      const ok = await startBotEngine({ watchlistPairs: pairs });
-      pushActionLog(ok ? 'AI Engine ON.' : 'AI Engine start failed.');
+      // Engine START: clear old launcher; fresh momentum scan rebuilds trade-allowance chips.
+      chartResetPendingRef.current = true;
+      setLauncherSlots([]);
+      persistLauncherSlots([]);
+      const ok = await startBotEngine({ watchlistPairs: [] });
+      pushActionLog(ok ? 'AI Engine ON — watchlist/chart reset for fresh scan.' : 'AI Engine start failed.');
       if (ok) refreshSessionEngine();
+      else chartResetPendingRef.current = false;
     } catch (err) {
       console.error('Failed to start AI Engine after Terms:', err);
       pushActionLog('AI Engine start failed (network).');

@@ -2963,6 +2963,8 @@ class AITradingAgent:
         self.boot_ui_until = now + float(ENGINE_BOOT_MAX_SEC)
         self.momentum_gate_ready = False
         self.momentum_fire_pairs = []
+        self.momentum_scores = []
+        self.watchlist = []  # reset — fresh scan rebuilds trade-allowance list
         self.momentum_scan_done = 0
         self.momentum_scan_total = 0
         self.momentum_scan_stage = "starting"
@@ -3446,7 +3448,8 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
     built = await build_momentum_watchlist(
         symbol_map=symbol_map,
         engine_tf=tf_key,
-        active_pair=agent.active_pair,
+        # Fresh start: do not dock previous chart pair into the new allowance list.
+        active_pair=None if reason in ("bot_start", "schedule_start", "boot") else agent.active_pair,
         max_pairs=min(
             int(getattr(agent, "max_concurrent_trades", 10) or 10),
             int(getattr(agent, "MAX_WATCHLIST", 32) or 32),
@@ -3458,6 +3461,13 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
     new_watch = list(built["watchlist"])
     new_fire = list(built["qualified"])
     scores = list(built["scores"])
+
+    # Start/boot: watchlist = fire only; chart resets to #1 fire pair.
+    if reason in ("bot_start", "schedule_start", "boot") and new_fire:
+        new_watch = list(new_fire)
+        first = new_fire[0]
+        mark = float(agent.pair_prices.get(first) or agent.current_price or 0)
+        agent.set_active_pair(first, mark)
 
     agent.set_watchlist(new_watch)
     agent.momentum_fire_pairs = new_fire

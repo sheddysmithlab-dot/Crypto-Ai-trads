@@ -180,7 +180,10 @@ export default function TradeLauncherPopup({
 
   return (
     <div
-      className={`flex flex-wrap items-center gap-1.5 shrink-0 max-w-[min(100%,52rem)] ${locked ? 'opacity-90' : ''}`}
+      className={`w-full grid gap-1.5 items-center ${locked ? 'opacity-90' : ''}`}
+      style={{
+        gridTemplateColumns: 'repeat(auto-fill, minmax(6.25rem, 1fr))',
+      }}
       title={locked ? 'AI running — click a chip to swap charts with main' : undefined}
     >
       {slots.map((slot) => {
@@ -193,7 +196,7 @@ export default function TradeLauncherPopup({
         // Main-chart chip highlight: match live activeSymbol (not pairs[0] BTC fallback).
         const isMainChip = String(slot.symbol || '').toUpperCase() === String(activeSymbol || '').toUpperCase();
         return (
-          <div key={slot.id} className="relative group flex items-center">
+          <div key={slot.id} className="relative group min-w-0">
             <button
               type="button"
               onClick={() => {
@@ -217,7 +220,7 @@ export default function TradeLauncherPopup({
                     ? `Edit ${slot.symbol}`
                     : `Click: swap with main (${activeSymbol || '?'}) · Double-click: edit ${slot.symbol}`
               }
-              className={`flex items-center gap-1.5 pl-1.5 pr-2 py-1 rounded-md border text-[11px] font-bold shadow-lg transition-colors ${
+              className={`w-full flex items-center justify-center gap-1 pl-1.5 pr-2 py-1.5 rounded-md border text-[11px] font-bold shadow-lg transition-colors ${
                 locked
                   ? isMainChip
                     ? 'border-white/90 bg-emerald-500/25 text-white ring-1 ring-white/40 cursor-default'
@@ -235,11 +238,11 @@ export default function TradeLauncherPopup({
               >
                 {meta.icon}
               </span>
-              <span>{slot.symbol}</span>
-              <span className="text-emerald-600">·</span>
-              <span>{timeframe || slot.timeframe || '1M'}</span>
+              <span className="truncate">{slot.symbol}</span>
+              <span className="text-emerald-600 shrink-0">·</span>
+              <span className="shrink-0">{timeframe || slot.timeframe || '1M'}</span>
               {botIsActive ? (
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
               ) : null}
             </button>
             {!locked ? (
@@ -250,7 +253,7 @@ export default function TradeLauncherPopup({
                   e.stopPropagation();
                   onRemoveSlot?.(slot.id);
                 }}
-                className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-black border border-emerald-500/60 text-emerald-400 text-[8px] leading-none opacity-0 group-hover:opacity-100 hover:text-red-400 hover:border-red-400"
+                className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-black border border-emerald-500/60 text-emerald-400 text-[8px] leading-none opacity-0 group-hover:opacity-100 hover:text-red-400 hover:border-red-400 z-10"
               >
                 ×
               </button>
@@ -275,7 +278,7 @@ export default function TradeLauncherPopup({
           else if (atCap) return;
           else onOpenNew?.();
         }}
-        className={`w-8 h-8 flex items-center justify-center rounded border-2 border-dashed transition-colors shrink-0 ${
+        className={`min-h-[2rem] w-full flex items-center justify-center rounded border-2 border-dashed transition-colors ${
           plusDisabled
             ? 'border-emerald-900 text-emerald-900 cursor-not-allowed'
             : 'border-emerald-500 text-emerald-400 hover:bg-emerald-500/15 hover:text-emerald-300'
