@@ -15,9 +15,9 @@ const SECTIONS = [
   {
     title: 'Stop-loss (per trade)',
     items: [
-      'Continuous dump --- (3 adverse ticks, no bounce) → exit at −0.50%.',
-      'Choppy path -+-+ (bounce in loss) → hold past 0.5%, exit at −0.70%.',
-      'Hard floor always −0.70%.',
+      'Continuous dump --- (3 adverse ticks, no bounce) → exit at −0.50% (small coins wider: <$1 → 1.5×, <$0.10 → 2×).',
+      'Choppy path -+-+ (bounce in loss) → hold past protect, exit on 0.20% recovery drawdown.',
+      'Hard floor −0.70% (small coins: 2× / 1.5× + 3s entry grace + wick confirm 2 ticks/1s).',
     ],
   },
   {
