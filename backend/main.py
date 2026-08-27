@@ -2986,22 +2986,14 @@ class AITradingAgent:
         return time.time() >= ready_at
 
     def warmup_remaining_sec(self) -> float:
-        """Boot overlay remaining — closes shortly after scan ready (or max timeout)."""
-        started = float(getattr(self, "boot_started_at", 0) or 0)
+        """Boot overlay remaining — closes when boot_ui_until elapses (scan sets short deadline)."""
         until = float(getattr(self, "boot_ui_until", 0) or 0)
-        if until <= 0 and started <= 0:
+        if until <= 0:
             ready_at = float(getattr(self, "trading_ready_at", 0) or 0)
             if ready_at <= 0:
                 return 0.0
             return max(0.0, ready_at - time.time())
-
-        now = time.time()
-        hard_left = max(0.0, until - now) if until > 0 else 0.0
-        if getattr(self, "momentum_gate_ready", False):
-            # Brief 2s "READY" flash then close (was 10s — felt stuck).
-            min_until = (started or now) + 2.0
-            return max(0.0, min_until - now)
-        return hard_left
+        return max(0.0, until - time.time())
 
     def _on_momentum_scan_progress(self, done: int, total: int, stage: str) -> None:
         self.momentum_scan_done = int(done)
@@ -3483,10 +3475,12 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
     agent.momentum_scan_stage = "ready"
     agent.momentum_scan_done = int(built.get("scored") or len(scores))
     agent.momentum_scan_total = int(built.get("scored") or len(scores))
-    # Close boot overlay after min intro once scan finishes.
-    if float(getattr(agent, "boot_started_at", 0) or 0) > 0:
-        min_until = float(agent.boot_started_at) + float(ENGINE_BOOT_INTRO_SEC)
-        agent.boot_ui_until = max(time.time(), min_until)
+    # First boot only: shorten overlay deadline so READY flashes ~1.5s then closes.
+    # Do NOT rewrite on later 7-candle refreshes (would re-open overlay).
+    until = float(getattr(agent, "boot_ui_until", 0) or 0)
+    if until > time.time():
+        agent.boot_ui_until = time.time() + 1.5
+        print("[BOOT UI] Scan ready — overlay closes in 1.5s.")
 
     dropped = prev_fire - set(new_fire)
     for pair in list(PENDING_ENTRY_SIGNALS.keys()):

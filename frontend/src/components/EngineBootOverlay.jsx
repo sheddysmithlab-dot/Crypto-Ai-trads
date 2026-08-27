@@ -39,14 +39,36 @@ export default function EngineBootOverlay({
   const remainingWs = Math.max(0, Number(warmupRemainingSec) || 0);
   const total = Math.max(1, Number(warmupTotalSec) || TOTAL_SEC);
   const intro = Math.max(1, Number(introSec) || INTRO_SEC);
-  const show = Boolean(active && remainingWs > 0.05);
   const scanTotal = Math.max(0, Number(momentumScanTotal) || 0);
   const scanDone = Math.max(0, Number(momentumScanDone) || 0);
   const scanPct = scanTotal > 0 ? Math.min(1, scanDone / scanTotal) : (momentumGateReady ? 1 : 0);
   const elapsedIntro = Math.max(0, Math.min(intro, total - remainingWs));
   const stage = String(momentumScanStage || '').toLowerCase();
   const scanInProgress = !momentumGateReady && stage && stage !== 'starting';
-  const stillIntro = show && !momentumGateReady && elapsedIntro < intro - 0.2 && !scanInProgress;
+  const stillIntro = !momentumGateReady && elapsedIntro < intro - 0.2 && !scanInProgress;
+
+  // Client-side force-close: once READY, hide after 1.5s even if WS remaining is stuck.
+  const [forceHide, setForceHide] = useState(false);
+  useEffect(() => {
+    if (!active) {
+      setForceHide(false);
+      return undefined;
+    }
+    if (!momentumGateReady) {
+      setForceHide(false);
+      return undefined;
+    }
+    const t = setTimeout(() => setForceHide(true), 1500);
+    return () => clearTimeout(t);
+  }, [active, momentumGateReady]);
+
+  // Hide when: cancelled, client timer fired, OR server remaining hit 0 after READY.
+  // While scanning (not ready), keep showing even if remaining glitches.
+  const show = Boolean(
+    active
+    && !forceHide
+    && (remainingWs > 0.05 || (!momentumGateReady && active)),
+  );
 
   // Lock body scroll while boot overlay is up
   useEffect(() => {
