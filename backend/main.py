@@ -3467,6 +3467,7 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
         return bybit_instruments.lot_affordable(
             bybit_symbol,
             available_capital=avail if avail > 0 else 1e9,
+            leverage=float(getattr(agent, "leverage", 100) or 100),
         )
 
     async def _progress(done: int, total: int, stage: str) -> None:
@@ -3836,72 +3837,74 @@ def compute_auto_trade_plan(
     if available is None or available <= 0:
         print(f"[SIZE] Skip {trade_pair}: available capital ${available}")
         return None
+    leverage = max(float(getattr(agent, "leverage", 1) or 1), 1.0)
     mult = max(1.0, float(size_mult))
     cap_frac = auto_trade_capital_pct_for_agent(agent)
-    position_usd = round(available * cap_frac * mult, 2)
-    if position_usd <= 0:
-        print(
-            f"[SIZE] Skip {trade_pair}: TF% size rounds to $0 "
-            f"(avail=${available:.2f} × {cap_frac*100:g}%)"
-        )
-        return None
+    # TF capital% is target notional; on small balances Bybit min (~$5) is higher —
+    # bump up to exchange min when the required MARGIN still fits available cash.
+    position_usd = round(float(available) * cap_frac * mult, 2)
     bybit_symbol = get_bybit_symbol(trade_pair)
     decimals = qty_decimals_for_price(entry_price)
-    raw_qty = position_usd / entry_price
-    qty = snap_qty_to_step(raw_qty, bybit_symbol)
-    bumped_to_min_lot = False
-    # Balance-aware: never open a trade whose exchange minimum exceeds 15% of available.
-    max_lot_notional = float(available) * 0.15
     inst = bybit_instruments.get_instrument(bybit_symbol) or {}
     min_notional_rule = float(inst.get("minNotionalValue") or 0) or 0.0
     lot = min_lot_qty(bybit_symbol)
     min_lot_notional = float(lot) * float(entry_price) if lot and lot > 0 else 0.0
     exchange_min = max(min_notional_rule, min_lot_notional)
+    max_margin = float(available) * 0.95
 
-    if qty is None or qty <= 0:
-        if lot is None:
-            print(f"[SIZE] Skip {trade_pair}: no lot size / qty step")
-            return None
-        min_notional = max(min_lot_notional, min_notional_rule)
-        if min_notional > max_lot_notional:
+    bumped_to_min_lot = False
+    if exchange_min > 0 and (position_usd <= 0 or position_usd < exchange_min):
+        margin_for_min = exchange_min / leverage
+        if margin_for_min > max_margin:
             print(
-                f"[SIZE] Skip {trade_pair}: exchange min ${min_notional:.2f} "
-                f"> 15% of balance ${available:.2f} (${max_lot_notional:.2f})"
+                f"[SIZE] Skip {trade_pair}: exchange min ${exchange_min:.2f} needs "
+                f"margin ${margin_for_min:.4f} > 95% available ${available:.2f}"
             )
             return None
-        leverage = max(float(getattr(agent, "leverage", 1) or 1), 1.0)
-        margin_needed = min_notional / leverage
-        if margin_needed > available * 0.95:
-            print(
-                f"[SIZE] Skip {trade_pair}: min margin ${margin_needed:.4f} "
-                f"> 95% available ${available:.2f}"
-            )
-            return None
+        position_usd = round(exchange_min, 2)
+        bumped_to_min_lot = True
+        print(
+            f"[SIZE] {trade_pair}: TF% ${available * cap_frac * mult:.2f} < min "
+            f"${exchange_min:.2f} — bump to min (margin ${margin_for_min:.4f})"
+        )
+
+    if position_usd <= 0:
+        print(
+            f"[SIZE] Skip {trade_pair}: size rounds to $0 "
+            f"(avail=${available:.2f} × {cap_frac * 100:g}%)"
+        )
+        return None
+
+    # Reject only when min order margin exceeds the TF-budget margin ceiling
+    # (15% of available as margin → notional can be 15%×leverage).
+    max_budget_margin = float(available) * 0.15
+    if exchange_min > 0 and (exchange_min / leverage) > max_budget_margin:
+        print(
+            f"[SIZE] Skip {trade_pair}: min margin ${exchange_min / leverage:.4f} "
+            f"> 15% budget margin ${max_budget_margin:.4f} (avail=${available:.2f})"
+        )
+        return None
+
+    qty = snap_qty_to_step(position_usd / entry_price, bybit_symbol)
+    if (qty is None or qty <= 0) and lot is not None and lot > 0:
         qty = snap_qty_to_step(lot, bybit_symbol) or lot
-        position_usd = round(qty * entry_price, 2)
+        position_usd = max(position_usd, round(float(qty) * float(entry_price), 2))
         if min_notional_rule > position_usd:
             position_usd = round(min_notional_rule, 2)
             qty = snap_qty_to_step(position_usd / entry_price, bybit_symbol) or qty
         bumped_to_min_lot = True
-    elif exchange_min > 0 and position_usd < exchange_min:
-        # Planned TF% size below Bybit minimum — bump only if within 15% budget.
-        if exchange_min > max_lot_notional:
-            print(
-                f"[SIZE] Skip {trade_pair}: need min ${exchange_min:.2f} "
-                f"but 15% budget is ${max_lot_notional:.2f} (avail=${available:.2f})"
-            )
-            return None
-        position_usd = round(exchange_min, 2)
-        qty = snap_qty_to_step(position_usd / entry_price, bybit_symbol)
-        if qty is None or qty <= 0:
-            print(f"[SIZE] Skip {trade_pair}: cannot size qty for min notional ${exchange_min:.2f}")
-            return None
-        bumped_to_min_lot = True
-
     if qty is None or qty <= 0:
+        print(f"[SIZE] Skip {trade_pair}: cannot compute qty at ${entry_price}")
         return None
-    leverage = max(float(getattr(agent, "leverage", 1) or 1), 1.0)
+
+    # Final margin sanity
     margin = round(position_usd / leverage, 6)
+    if margin > max_margin:
+        print(
+            f"[SIZE] Skip {trade_pair}: margin ${margin:.4f} > 95% available ${available:.2f}"
+        )
+        return None
+
     tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     profile = get_timeframe_profile(tf_key)
     return {

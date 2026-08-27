@@ -310,12 +310,12 @@ def lot_affordable(
     available_capital: float,
     last_price: float | None = None,
     max_frac: float | None = None,
+    leverage: float | None = None,
 ) -> bool:
-    """True if exchange min order fits within max_frac of available capital.
+    """True if exchange min order MARGIN fits within max_frac of available capital.
 
-    Uses max(minLot×price, minNotionalValue). Missing price alone no longer
-    auto-passes — that let expensive TMX-like coins onto the fire list, then
-    fail at order time with a misleading 'Insufficient balance'.
+    Linear perps lock margin = notional / leverage (not full notional). Comparing
+    raw notional to 15% of a small balance blocked EVERY coin (e.g. $5 min on $18).
     """
     if available_capital is None or available_capital <= 0:
         return False
@@ -335,8 +335,10 @@ def lot_affordable(
         # Unknown min size — keep out of momentum fire list (safer than admit-then-fail).
         return False
 
+    lev = max(float(leverage if leverage is not None else 100.0), 1.0)
+    margin_needed = notional / lev
     frac = float(max_frac if max_frac is not None else LOT_MAX_BALANCE_FRAC)
-    return notional <= float(available_capital) * max(0.01, frac)
+    return margin_needed <= float(available_capital) * max(0.01, frac)
 
 
 # Load disk cache at import so restarts keep symbols warm.
