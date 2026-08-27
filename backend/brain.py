@@ -2325,7 +2325,7 @@ class SmartStance:
 
 
 class SmartTradePolicy:
-    """The contrarian decision layer — traps override the crowd's breakout."""
+    """Soft 10th-man: standard pattern preferred; trap only without conflict or alone."""
 
     def __init__(self, candles: Sequence[Candle], timeframe: str = "1h",
                  higher_tf_trend: Optional[str] = None):
@@ -2340,33 +2340,59 @@ class SmartTradePolicy:
 
         latest_trap = traps[-1] if traps else None
         latest_sig = signals[-1] if signals else None
+        last_i = len(self.candles) - 1
+        fresh_trap = (
+            latest_trap is not None and latest_trap.index == last_i
+        )
+        recent_trap = (
+            latest_trap is not None and latest_trap.index >= last_i - 2
+        )
 
-        # A fresh trap on the latest bar is the highest-priority (10th-man) trade.
-        if latest_trap is not None and latest_trap.index == len(self.candles) - 1:
-            narrative = (
-                f"10th-man reverse: {latest_trap.smart_action}. "
-                f"While the crowd {latest_trap.crowd_action}, we take the opposite side."
-            )
-            return SmartStance(latest_trap.side, "trap", latest_trap, latest_sig, narrative)
-
-        if latest_trap is not None and latest_trap.index >= len(self.candles) - 3:
-            narrative = (
-                f"Recent {latest_trap.trap_type.replace('_', ' ')} detected — "
-                f"{latest_trap.smart_action}."
-            )
-            return SmartStance(latest_trap.side, "trap", latest_trap, latest_sig, narrative)
-
+        # Soft 10th-man: if a standard signal exists, prefer it.
+        # Trap may annotate / confluence when same side; never override opposite side.
         if latest_sig is not None:
-            narrative = f"No trap on the latest bars; following the standard {latest_sig.strategy} signal."
+            if recent_trap and latest_trap.side == latest_sig.side:
+                narrative = (
+                    f"Soft 10th-man confluence: {latest_trap.trap_type.replace('_', ' ')} "
+                    f"+ {latest_sig.strategy} both {latest_sig.side}."
+                )
+                return SmartStance(
+                    latest_sig.side, "signal", latest_trap, latest_sig, narrative
+                )
+            if recent_trap and latest_trap.side != latest_sig.side:
+                narrative = (
+                    f"Soft 10th-man: standard {latest_sig.strategy} preferred over "
+                    f"conflicting {latest_trap.trap_type.replace('_', ' ')} "
+                    f"(crowd fade demoted)."
+                )
+                return SmartStance(
+                    latest_sig.side, "signal", latest_trap, latest_sig, narrative
+                )
+            narrative = (
+                f"Following standard {latest_sig.strategy} signal (soft 10th-man)."
+            )
             return SmartStance(latest_sig.side, "signal", None, latest_sig, narrative)
 
+        # No standard signal — allow a fresh trap only (not a 3-bar lookback override).
+        if fresh_trap:
+            narrative = (
+                f"Soft 10th-man (no standard signal): {latest_trap.smart_action}. "
+                f"While the crowd {latest_trap.crowd_action}, we take the opposite side."
+            )
+            return SmartStance(latest_trap.side, "trap", latest_trap, None, narrative)
+
         if latest_trap is not None:
-            ago = len(self.candles) - 1 - latest_trap.index
-            narrative = (f"Last trap ({latest_trap.trap_type.replace('_', ' ')}) was {ago} bar(s) ago — "
-                         f"not fresh; standing aside.")
+            ago = last_i - latest_trap.index
+            narrative = (
+                f"Last trap ({latest_trap.trap_type.replace('_', ' ')}) was {ago} bar(s) ago — "
+                f"not fresh; standing aside (soft 10th-man)."
+            )
             return SmartStance("HOLD", "none", latest_trap, None, narrative)
 
-        return SmartStance("HOLD", "none", None, None, "No trap and no qualifying signal — stand aside.")
+        return SmartStance(
+            "HOLD", "none", None, None,
+            "No trap and no qualifying signal — stand aside.",
+        )
 
 
 def latest_trap(candles: Sequence[Candle], timeframe: str = "1h",

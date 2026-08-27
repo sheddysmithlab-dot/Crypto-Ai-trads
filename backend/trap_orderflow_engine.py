@@ -26,31 +26,50 @@ THR_Z_TVOL = 1.0
 THR_FAKE_WICK = 0.30
 THR_BREAK_ATR = 0.10
 THR_BALANCED = 0.05
-THR_SCORE = 85.0  # overall trade confidence floor (all TFs)
-THR_SCORE_5M = 85.0  # 5m — same overall floor
-THR_SCORE_1M = 85.0  # 1m/30s — same overall floor
+THR_SCORE = 75.0  # overall trade confidence floor (non-trap setups, all TFs)
+THR_SCORE_5M = 75.0
+THR_SCORE_1M = 75.0
+THR_SCORE_TRAP = 90.0  # named trap fires need a higher bar
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
 
-# 1m fire allowlist — EXHAUSTION excluded (too many false shorts/longs).
-# REVERSAL_TRAP re-enabled on 1m (still subject to overall ≥85 floor + 5m-bias safety).
-_1M_LONG_OK = ("SELL_TRAP", "ABSORPTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
-_1M_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
+# Named OF trap patterns — fire only when side score ≥ THR_SCORE_TRAP
+_TRAP_FIRE_PATTERNS = frozenset({
+    "BUY_TRAP",
+    "SELL_TRAP",
+    "REVERSAL_TRAP",
+    "EXHAUSTION",
+    "ABSORPTION",
+    "FAKE_BREAKOUT",
+})
+
+# 1m fire allowlist — REVERSAL_TRAP + EXHAUSTION blocked (false fades).
+_1M_LONG_OK = ("SELL_TRAP", "ABSORPTION", "FAKE_BREAKOUT")
+_1M_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "FAKE_BREAKOUT")
 _HTF_LONG_OK = ("SELL_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
 _HTF_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
 
 
 def thr_score_for_tf(exec_tf: str | None) -> float:
-    """Pattern / OF confidence floor (0–100) before AI confirm + fire.
-
-    Overall policy: ≥85 on every timeframe (1m/5m/15m/1h/1D).
-    """
+    """Base OF confidence floor (0–100) for non-trap / overall setups — ≥75 all TFs."""
     tf = (exec_tf or "").strip().lower()
     if tf in ("1m", "30s"):
         return THR_SCORE_1M
     if tf == "5m":
         return THR_SCORE_5M
     return THR_SCORE
+
+
+def thr_score_for_setup(exec_tf: str | None, pattern: str | None = None) -> float:
+    """Floor for a specific setup: traps ≥90, everything else ≥75."""
+    name = (pattern or "").strip().upper()
+    if name in _TRAP_FIRE_PATTERNS:
+        return float(THR_SCORE_TRAP)
+    return float(thr_score_for_tf(exec_tf))
+
+
+def is_trap_fire_pattern(pattern: str | None) -> bool:
+    return (pattern or "").strip().upper() in _TRAP_FIRE_PATTERNS
 
 
 @dataclass
@@ -607,12 +626,11 @@ def evaluate_trap_orderflow(
         elif setup_1["side"] == "LONG" and bias_5m == "bearish":
             setup_1 = None
 
-    # 1m: never use EXHAUSTION as the primary setup (noise); pick next-best.
-    # REVERSAL_TRAP allowed on 1m (still gated by overall ≥85 floor + 5m-bias safety above).
+    # 1m: never use REVERSAL_TRAP / EXHAUSTION as primary (noise); pick next-best.
     if (exec_tf or "").strip().lower() in ("1m", "30s") and setup_1 and setup_1["name"] in (
-        "EXHAUSTION",
+        "REVERSAL_TRAP", "EXHAUSTION",
     ):
-        rest = [p for p in pats_1 if p["name"] not in ("EXHAUSTION",)]
+        rest = [p for p in pats_1 if p["name"] not in ("REVERSAL_TRAP", "EXHAUSTION")]
         setup_1 = pick(rest)
 
     contradiction = (
@@ -630,8 +648,10 @@ def evaluate_trap_orderflow(
         else:
             short_score += 8
 
-    # NO TRADE gates
-    thr = thr_score_for_tf(exec_tf)
+    # NO TRADE gates — trap setups use ≥90, others ≥75
+    setup_name = (setup_1 or setup_5 or {}).get("name") if (setup_1 or setup_5) else None
+    thr = thr_score_for_setup(exec_tf, setup_name)
+    thr_base = thr_score_for_tf(exec_tf)
     strict_1m = (exec_tf or "").strip().lower() == "1m"
     bal_pressure = abs(m1["buyer_ratio"] - 0.50) < THR_BALANCED
     bal_volume = abs(m1["buy_ratio"] - 0.50) < THR_BALANCED
@@ -710,6 +730,18 @@ def evaluate_trap_orderflow(
             reason = "Forced directional choice - higher SHORT score (NO TRADE gates not met)"
             conf = min(1.0, short_score / 100.0)
 
+    # Named trap fires need ≥90 even if a softer base floor was used earlier.
+    if signal in ("LONG", "SHORT") and is_trap_fire_pattern(pattern):
+        side_sc = long_score if signal == "LONG" else short_score
+        trap_thr = float(THR_SCORE_TRAP)
+        if side_sc < trap_thr:
+            signal = "NO_TRADE"
+            reason = (
+                f"Trap {pattern} needs ≥{trap_thr:.0f} "
+                f"(have {side_sc:.0f}; overall floor {thr_base:.0f})"
+            )
+            conf = side_sc / 100.0
+
     return TrapOFResult(
         timeframe=exec_tf.upper(),
         pattern=pattern,
@@ -732,6 +764,8 @@ def evaluate_trap_orderflow(
             "volume_pressure": m1["volume_pressure"],
             "proxy": "ohlc_volume_split",
             "thr_score": thr,
+            "thr_base": thr_base,
+            "thr_trap": float(THR_SCORE_TRAP),
         },
     )
 

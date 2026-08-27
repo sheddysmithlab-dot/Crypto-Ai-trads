@@ -20,7 +20,12 @@ from typing import Any, Dict, List, Optional, Sequence
 import httpx
 
 import brain as _b
-from trap_orderflow_engine import evaluate_trap_orderflow, merge_with_structure_trap, thr_score_for_tf
+from trap_orderflow_engine import (
+    evaluate_trap_orderflow,
+    merge_with_structure_trap,
+    thr_score_for_setup,
+    thr_score_for_tf,
+)
 
 ENGINE_NAME = "ai_driven_brain_v2"
 ENTRY_PATTERN_NAME = "AI_BRAIN_V2"
@@ -81,7 +86,7 @@ _CONFIRM_SYSTEM = (
     "Analyze under agent candle-read policy: market structure, LONG vs SHORT, "
     "classic traps, inverse/fake-breakout/absorption/exhaustion, order-flow scores, confluence, R:R. "
     "Only reply YES if judged confidence meets the TF floor in the brief "
-    "(1m/5m/other ≥85%). Otherwise reply NO. "
+    "(overall ≥75%; named traps ≥90%). Otherwise reply NO. "
     "Reply with exactly one word: YES or NO. No other text."
 )
 
@@ -95,9 +100,9 @@ def _matching_side_score(of_trap: Optional[dict], action: str) -> float:
     return max(float(of_trap.get("long_score") or 0), float(of_trap.get("short_score") or 0))
 
 
-def _ai_yes_thr_for_tf(timeframe_key: str) -> float:
-    """AI may only YES at/above the overall confidence floor (≥85 all TFs)."""
-    return float(thr_score_for_tf(timeframe_key))
+def _ai_yes_thr_for_tf(timeframe_key: str, pattern: str | None = None) -> float:
+    """AI YES floor: named traps ≥90, otherwise overall ≥75."""
+    return float(thr_score_for_setup(timeframe_key, pattern))
 
 
 def _setup_meets_ai_confirm_threshold(
@@ -106,11 +111,12 @@ def _setup_meets_ai_confirm_threshold(
     timeframe_key: str,
     think: dict,
 ) -> bool:
-    """AI is called only when OF/agent confidence clears the TF YES floor (80/70/65)."""
+    """AI is called only when OF confidence clears the setup YES floor."""
     if action not in ("BUY", "SELL"):
         return False
     tf = _norm_tf(timeframe_key)
-    thr = _ai_yes_thr_for_tf(tf)
+    pattern = (of_trap or {}).get("pattern")
+    thr = _ai_yes_thr_for_tf(tf, pattern)
     of_score = _matching_side_score(of_trap, action)
     if of_score >= thr:
         return True
@@ -162,6 +168,7 @@ def _build_confirm_user_prompt(
     thr = _ai_yes_thr_for_tf(tf)
     tf_cfg = _b.TIMEFRAMES.get(tf, _b.TIMEFRAMES["1h"])
     pattern, trap_score = _setup_label_and_score(think, of_trap, action)
+    thr = _ai_yes_thr_for_tf(tf, pattern)
     ms = think.get("structure")
     sig = think.get("signal")
     trap = think.get("trap")
@@ -173,7 +180,7 @@ def _build_confirm_user_prompt(
         f"PATTERN DETECTED → confirm {side} {pattern}.",
         f"Pair={pair} TF={timeframe} ({tf_cfg.label}).",
         f"HARD RULE: reply YES only if confidence ≥ {thr:.0f}% on this TF "
-        f"(overall ≥85 all TFs). Otherwise NO.",
+        f"(overall ≥75; named traps ≥90). Otherwise NO.",
         "",
         "ANALYZE (policy):",
         "- LONG vs SHORT quality vs market structure",
@@ -324,7 +331,7 @@ async def _confirm_setup_with_ai(
             print(f"[AI-CONFIRM] '{provider}' → NO  (raw: {raw!r}) — skip trade.")
             return False
         if token.startswith("YES"):
-            thr = _ai_yes_thr_for_tf(timeframe)
+            thr = _ai_yes_thr_for_tf(timeframe, (of_trap or {}).get("pattern"))
             side_score = _matching_side_score(of_trap, action)
             if side_score < thr:
                 print(
@@ -509,12 +516,13 @@ def _run_orderflow_trap(
 
 
 def _gate_1m_of_score(action: str, of_trap: Optional[dict], timeframe_key: str) -> str:
-    """1m only: BUY/SELL only when matching OF side score ≥ floor (85). Blocks brain/AI bypass."""
+    """1m only: BUY/SELL only when matching OF side score ≥ setup floor (trap≥90 else≥75)."""
     if _norm_tf(timeframe_key) != "1m":
         return action
     if action not in ("BUY", "SELL"):
         return action
-    thr = thr_score_for_tf("1m")
+    pattern = (of_trap or {}).get("pattern")
+    thr = thr_score_for_setup("1m", pattern)
     if not of_trap:
         print(f"[AI-BRAIN] 1m gate: no OF result — HOLD (need score ≥ {thr:.0f})")
         return "HOLD"
@@ -535,8 +543,9 @@ def _fallback_action_from_brain_and_of(
     think: dict, of_trap: Optional[dict], timeframe_key: str = "1m"
 ) -> str:
     """When AI unavailable: prefer strong order-flow trap, else brain verdict."""
-    thr = thr_score_for_tf(_norm_tf(timeframe_key))
     tf = _norm_tf(timeframe_key)
+    pattern = (of_trap or {}).get("pattern") if of_trap else None
+    thr = thr_score_for_setup(tf, pattern)
     if of_trap:
         sig = of_trap.get("final_signal")
         long_s = float(of_trap.get("long_score") or 0)
@@ -629,7 +638,7 @@ async def evaluate_live_entry_async(
     if setup_action in ("BUY", "SELL") and settings is not None:
         # AI only on candles that already clear agent confidence / OF TF floor.
         if not _setup_meets_ai_confirm_threshold(setup_action, of_trap, timeframe_key, think):
-            thr = thr_score_for_tf(tf)
+            thr = thr_score_for_setup(tf, (of_trap or {}).get("pattern"))
             side_sc = _matching_side_score(of_trap, setup_action)
             print(
                 f"[AI-CONFIRM] Skip call {pair} {timeframe_key}: "
@@ -796,8 +805,8 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
             "(NO=skip, unreachable=fail-open); next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
-            f"Order-flow conf floor: {thr_score_for_tf(tf)}% "
-            f"(overall ≥85 all TFs; AI YES only at/above floor). "
+            f"Order-flow conf floor: overall ≥75% / named traps ≥90% "
+            f"(AI YES only at/above setup floor). "
             f"{tf_cfg.note}"
         ),
         "timeframes": list(_b.TIMEFRAMES.keys()),
@@ -829,7 +838,7 @@ def strategy_system_blurb() -> str:
         "   fake breakout, reversal trap (effort vs result; volume & buyer/seller pressure).\n"
         "3) Combined analysis → AI API (GLM/OpenAI) → BUY / SELL / HOLD.\n"
         "4) Next-candle fire + path SL/TP 0.5%/0.7% + opposite-side flip-exit.\n"
-        "5) If AI offline: strong OF trap (score≥85) or brain.py verdict as fallback.\n"
+        "5) If AI offline: strong OF setup (overall≥75 / trap≥90) or brain.py verdict as fallback.\n"
     )
 
 
