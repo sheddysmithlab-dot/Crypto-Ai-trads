@@ -5166,6 +5166,24 @@ async def get_watchlist():
         "active_pair": agent.active_pair,
     }
 
+@app.get("/markets")
+async def get_markets():
+    """Return dynamic Bybit instruments symbol map for frontend chart resolution.
+
+    Merges hardcoded BYBIT_SYMBOL_MAP with the live instruments cache so new
+    watchlist coins (TAC, BLESS, …) resolve to correct Bybit symbols.
+    """
+    dyn = bybit_instruments.symbol_map_for_momentum()
+    merged = dict(BYBIT_SYMBOL_MAP)
+    for coin, sym in (dyn or {}).items():
+        if coin not in merged:
+            merged[coin] = sym
+    return {
+        "status": "success",
+        "symbol_map": merged,
+        "count": len(merged),
+    }
+
 class SetTimeframePayload(BaseModel):
     seconds: int
 

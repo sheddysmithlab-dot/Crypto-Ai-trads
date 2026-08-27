@@ -46,13 +46,27 @@ export const BYBIT_SYMBOL_MAP = {
   XAUT: 'XAUTUSDT',
 };
 
+// Dynamic map fetched from backend /markets (Bybit instruments cache).
+// Covers 700+ liquid linear perps so new watchlist coins resolve correctly.
+let _dynamicSymbolMap = {};
+let _dynamicMapLoaded = false;
+
+export function setDynamicSymbolMap(map) {
+  _dynamicSymbolMap = map || {};
+  _dynamicMapLoaded = true;
+}
+
+export function isDynamicMapLoaded() {
+  return _dynamicMapLoaded;
+}
+
 export function pairLabelForSymbol(symbol) {
   return `${symbol}/USDT`;
 }
 
 export function getBybitSymbol(pairLabel) {
   const symbol = (pairLabel || '').split('/')[0];
-  return BYBIT_SYMBOL_MAP[symbol] || null;
+  return BYBIT_SYMBOL_MAP[symbol] || _dynamicSymbolMap[symbol] || `${symbol}USDT`;
 }
 
 export function getPairMeta(pair) {

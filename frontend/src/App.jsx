@@ -234,8 +234,12 @@ export default function App() {
   }, []);
 
   // While engine active: keep launcher chips in sync with momentum-filtered backend watchlist.
+  // Skip for a few seconds after a manual swap so the user's chart swap isn't overwritten
+  // by a stale WS tick before the backend processes /set-watchlist.
+  const manualSwapAtRef = useRef(0);
   useEffect(() => {
     if (!effectiveBotActive) return;
+    if (Date.now() - manualSwapAtRef.current < 4000) return;
     const pairs = Array.isArray(portfolio.watchlist) ? portfolio.watchlist : [];
     if (!pairs.length) return;
     const next = pairs.slice(0, MAX_LAUNCHER_SLOTS).map((pair, i) => {
@@ -562,6 +566,7 @@ export default function App() {
     setLauncherSlots(nextSlots);
     setLauncherEditorOpen(false);
     setLauncherEditingId(null);
+    manualSwapAtRef.current = Date.now();
     syncWatchlist(nextSlots);
     pushActionLog(`Chart swap: ${incoming}/USDT → main, ${mainSym}/USDT → dock`);
   }

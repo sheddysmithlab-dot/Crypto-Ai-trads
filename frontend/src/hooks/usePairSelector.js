@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { authFetch } from '../config/api';
 import { debugLog } from '../config/debug';
-import { TRADING_PAIRS, getBybitSymbol, pairLabelForSymbol } from '../data/pairs';
+import {
+  TRADING_PAIRS,
+  getBybitSymbol,
+  pairLabelForSymbol,
+  setDynamicSymbolMap,
+} from '../data/pairs';
 
 const ACTIVE_SYMBOL_KEY = 'ai_trading_bot_active_symbol';
 
@@ -14,7 +19,7 @@ function normalizeSymbol(symbol) {
 function readStoredSymbol() {
   try {
     const saved = normalizeSymbol(localStorage.getItem(ACTIVE_SYMBOL_KEY));
-    if (saved && TRADING_PAIRS.some((p) => p.symbol === saved)) return saved;
+    if (saved) return saved;
   } catch {
     /* storage blocked */
   }
@@ -46,10 +51,29 @@ export function usePairSelector() {
   const [activeSymbol, setActiveSymbol] = useState(readStoredSymbol);
   const [syncing, setSyncing] = useState(false);
 
+  // Fetch dynamic instruments map from backend so new watchlist coins resolve.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await authFetch('/markets');
+        const data = await res.json().catch(() => ({}));
+        if (!cancelled && data?.status === 'success' && data.symbol_map) {
+          setDynamicSymbolMap(data.symbol_map);
+          debugLog(`[MARKETS] Loaded ${Object.keys(data.symbol_map).length} dynamic symbols`);
+        }
+      } catch (err) {
+        console.warn('[MARKETS] fetch failed:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const activePair =
     pairs.find((p) => p.symbol === activeSymbol) ||
-    pairs.find((p) => p.symbol === 'BTC') ||
-    pairs[0];
+    { symbol: activeSymbol, icon: String(activeSymbol || '?').charAt(0), color: '#6b7280', price: 0 };
   const activePairLabel = pairLabelForSymbol(activeSymbol || activePair.symbol);
 
   useEffect(() => {
@@ -62,14 +86,19 @@ export function usePairSelector() {
 
   const selectPair = useCallback(async (symbol, { silent = false } = {}) => {
     const sym = normalizeSymbol(symbol);
-    const pair = pairs.find((p) => p.symbol === sym);
-    if (!pair) return { ok: false, message: 'Unknown pair' };
+    if (!sym) return { ok: false, message: 'Empty symbol' };
 
+    // Accept any symbol — dynamic map + fallback {symbol}USDT handles unknown coins.
+    const existing = pairs.find((p) => p.symbol === sym);
+    const pair = existing || { symbol: sym, icon: sym.charAt(0), color: '#6b7280', price: 0 };
     const fullLabel = pairLabelForSymbol(pair.symbol);
 
     // 1) Instant UI + chart switch (cached seed price), even before network.
     setActiveSymbol(sym);
     setSyncing(true);
+    if (!existing) {
+      setPairs((prev) => (prev.some((p) => p.symbol === sym) ? prev : [...prev, pair]));
+    }
 
     try {
       const livePrice = await fetchLivePairPrice(sym);

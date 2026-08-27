@@ -6,7 +6,7 @@ import {
   fetchBybitDayKlines,
   barsForOneDay,
 } from '../config/bybitPublic';
-import { BYBIT_SYMBOL_MAP, fmtNum } from '../data/pairs';
+import { BYBIT_SYMBOL_MAP, fmtNum, getBybitSymbol } from '../data/pairs';
 import { sanitizeCandleData } from '../utils/chartCandles';
 
 const TF_INTERVAL = { '1M': '1', '5M': '5', '15M': '15', '1H': '60', '1D': 'D' };
@@ -29,7 +29,7 @@ export default function LauncherBybitChart({ symbol, timeframe }) {
     const el = containerRef.current;
     if (!el) return undefined;
 
-    const bybitSymbol = BYBIT_SYMBOL_MAP[symbol];
+    const bybitSymbol = getBybitSymbol(symbol) || BYBIT_SYMBOL_MAP[symbol];
     const interval = TF_INTERVAL[timeframe] || '1';
     const intervalSecs = TF_SECONDS[timeframe] || 60;
     let disposed = false;
