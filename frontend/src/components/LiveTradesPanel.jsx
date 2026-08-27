@@ -45,6 +45,13 @@ function formatMovePct(trade) {
   return '+0.00%';
 }
 
+/** Notional USD size put on this trade (position_size from backend). */
+function formatTradeValue(trade) {
+  const n = Number(trade.position_size);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 function sortLatestFirst(list) {
   // Newest first, oldest last — prefer close time for exits, else open time / id.
   return [...list].sort((a, b) => {
@@ -173,6 +180,12 @@ function TradeRowDesktop({ trade, onRequestClose, onSelectTrade }) {
       <td className="px-3 py-1.5 font-mono text-[10px] text-gray-400 whitespace-nowrap" title="Trade fire time">
         {formatTradeFireTime(trade.opened_at)}
       </td>
+      <td
+        className="px-3 py-1.5 font-mono text-amber-500/90 font-semibold whitespace-nowrap"
+        title="Notional trade value (USD size on this position)"
+      >
+        {formatTradeValue(trade)}
+      </td>
       <td className="px-3 py-1.5 font-mono">${fmtNum(trade.entry)}</td>
       <td className="px-3 py-1.5 font-mono">${fmtNum(trade.current)}</td>
       <td className={`px-3 py-1.5 font-bold font-mono ${pnlColor}`}>
@@ -259,6 +272,9 @@ function TradeRowMobile({ trade, onSelectTrade, onRequestClose }) {
           <div className="text-[9px] text-gray-500 font-mono mt-0.5">
             Fired: {formatTradeFireTime(trade.opened_at)}
           </div>
+          <div className="text-[9px] text-amber-500/90 font-mono font-semibold mt-0.5" title="Notional trade value">
+            Value: {formatTradeValue(trade)}
+          </div>
         </div>
       </div>
       <div className="text-right text-[10px] text-gray-500 dark:text-gray-400">
@@ -294,7 +310,7 @@ function TradeRowMobile({ trade, onSelectTrade, onRequestClose }) {
 function SectionLabel({ children }) {
   return (
     <tr>
-      <td colSpan={7} className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 bg-gray-50 dark:bg-gray-900/40 font-semibold">
+      <td colSpan={8} className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 bg-gray-50 dark:bg-gray-900/40 font-semibold">
         {children}
       </td>
     </tr>
@@ -349,6 +365,9 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                 <th className="px-3 py-1.5 font-semibold">Asset</th>
                 <th className="px-3 py-1.5 font-semibold">Side</th>
                 <th className="px-3 py-1.5 font-semibold">Fired</th>
+                <th className="px-3 py-1.5 font-semibold" title="Notional USD size on this trade">
+                  Trade Value
+                </th>
                 <th className="px-3 py-1.5 font-semibold">Entry</th>
                 <th className="px-3 py-1.5 font-semibold">Current</th>
                 <th className="px-3 py-1.5 font-semibold">P&L</th>
@@ -358,7 +377,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
             <tbody>
               {trades.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="text-center py-6 text-gray-500">
+                  <td colSpan={8} className="text-center py-6 text-gray-500">
                     No active positions on {activePair}. Use &quot;+ Add Position&quot; to open a live trade.
                   </td>
                 </tr>
@@ -375,7 +394,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                   ))}
                   {activeAll.length > 0 ? (
                     <tr>
-                      <td colSpan={7} className="p-0 align-top">
+                      <td colSpan={8} className="p-0 align-top">
                         <PaginationBar
                           page={livePage}
                           total={livePages}
@@ -396,7 +415,7 @@ export default function LiveTradesPanel({ trades, activeCount, activePair, onReq
                   ))}
                   {closedAll.length > 0 ? (
                     <tr>
-                      <td colSpan={7} className="p-0 align-top">
+                      <td colSpan={8} className="p-0 align-top">
                         <PaginationBar
                           page={exitPage}
                           total={exitPages}
