@@ -156,6 +156,23 @@ def upsert_open_trade(trade: dict) -> None:
         print(f"[TRADE_DB] upsert_open_trade error: {exc}")
 
 
+def delete_trade(trade_id: int) -> None:
+    """Remove a trade row (used when a LIVE open fails and we roll back the local book)."""
+    if not _mysql_enabled():
+        return
+    try:
+        tid = int(trade_id)
+    except (TypeError, ValueError):
+        return
+    try:
+        conn = _connect()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM bot_trades WHERE id=%s", (tid,))
+        conn.close()
+    except Exception as exc:
+        print(f"[TRADE_DB] delete_trade error: {exc}")
+
+
 def finalize_trade(
     trade: dict,
     *,

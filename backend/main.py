@@ -848,6 +848,8 @@ PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0
 # Opposite-signal flip: only exit old auto trade when unrealized gross > this %;
 # at or below → keep old open and skip the new opposite fire (no tiny flip-exits).
 FLIP_EXIT_MIN_GROSS_PCT = float(os.environ.get("FLIP_EXIT_MIN_GROSS_PCT", "0.25"))
+# Do not wipe a brand-new local open just because Bybit position API lags a few seconds.
+RECONCILE_GRACE_SECONDS = float(os.environ.get("RECONCILE_GRACE_SECONDS", "30"))
 # Protective stop-loss (gross %, LONG/SHORT symmetric) — no widen for choppy:
 #   −0.50% → LOSS LOCK (hold); track best_recovery (never moves backward);
 #   EXIT when recovery_drawdown = best_recovery − current ≥ 0.20%;
@@ -1461,10 +1463,30 @@ class AITradingAgent:
             return max(0.0, float(base)) if base is not None else 0.0
         return max(0.0, float(self.current_capital))
 
+    def _rollback_failed_live_open(self, trade: dict, err: str | None = None) -> None:
+        """Undo a local open that never filled on Bybit — no fake EXITED (BOOKED) row."""
+        tid = int(trade.get("id") or 0)
+        self.trades = [t for t in self.trades if int(t.get("id") or 0) != tid]
+        self.trade_history = [r for r in self.trade_history if int(r.get("id") or 0) != tid]
+        try:
+            trade_db.delete_trade(tid)
+        except Exception as exc:
+            print(f"[MYSQL] delete after failed open skipped: {exc}")
+        self.persist_runtime(force=True)
+        print(
+            f"[LIVE OPEN] Rolled back local #{tid} {trade.get('pair')} {trade.get('side')} "
+            f"— Bybit order failed ({err or 'unknown'}); not booked as exit."
+        )
+
     def reconcile_live_positions(self) -> int:
         """Drop local opens that no longer exist on Bybit (phantom / restart desync).
 
-        Returns number of local trades settled as already-flat.
+        Guards against fake exits:
+          - grace window after open (Bybit position list can lag)
+          - only book reconcile-exit for trades confirmed as ``bybit_linear``
+          - unconfirmed locals (open never filled) are discarded silently after grace
+
+        Returns number of local trades removed (booked or silent).
         """
         if bybit_api.mode != "LIVE_TRADING" or not settings_store.is_bybit_configured():
             return 0
@@ -1488,6 +1510,8 @@ class AITradingAgent:
 
         settled = 0
         still_open = []
+        now = time.time()
+        grace = max(0.0, float(RECONCILE_GRACE_SECONDS))
         for trade in list(self.trades):
             if trade.get("exchange") == "paper":
                 still_open.append(trade)
@@ -1500,7 +1524,33 @@ class AITradingAgent:
             if (symbol, side) in live_keys:
                 still_open.append(trade)
                 continue
-            # Flat on exchange — finalize local book so OPEN POSITIONS / fees / capital match reality
+
+            opened_at = float(trade.get("opened_at") or 0)
+            age = (now - opened_at) if opened_at > 0 else grace + 1.0
+            if age < grace:
+                # Fresh open — Bybit may not list the position yet; keep showing as ACTIVE.
+                still_open.append(trade)
+                continue
+
+            confirmed = trade.get("exchange") == "bybit_linear"
+            if not confirmed:
+                # Never got a Bybit fill ack — drop without fake booked PnL exit.
+                tid = int(trade.get("id") or 0)
+                self.trade_history = [
+                    r for r in self.trade_history if int(r.get("id") or 0) != tid
+                ]
+                try:
+                    trade_db.delete_trade(tid)
+                except Exception:
+                    pass
+                settled += 1
+                print(
+                    f"[RECONCILE] Dropped unconfirmed local #{tid} {trade.get('pair')} "
+                    f"{side} (no Bybit fill ack, not on exchange)"
+                )
+                continue
+
+            # Confirmed live fill earlier, now flat on exchange — settle local book.
             m = self._trade_metrics(trade, for_close=True)
             self._finalize_trade_history(
                 trade, m, "Bybit reconcile — position already flat on exchange"
@@ -1518,6 +1568,8 @@ class AITradingAgent:
             self.trades = still_open
             self._sync_agent_trailing_lock_state()
             self.persist_runtime(force=True)
+        else:
+            self.trades = still_open
         return settled
 
     def get_trading_capital_base(self):
@@ -1903,9 +1955,17 @@ class AITradingAgent:
                 if not ok:
                     notifications.push(f"Bybit order FAILED: {err}", "error")
                     print(f"❌ LIVE ORDER FAILED: {err}")
-                else:
-                    trade["bybit_symbol"] = get_bybit_symbol(trade_pair)
-                    trade["exchange"] = "bybit_linear"
+                    self._rollback_failed_live_open(trade, err)
+                    self.last_open_skip_reason = f"Bybit order failed: {err}"
+                    return None
+                trade["bybit_symbol"] = get_bybit_symbol(trade_pair)
+                trade["exchange"] = "bybit_linear"
+                # Refresh history exchange tag so UI/reconcile treat this as confirmed live.
+                for row in self.trade_history:
+                    if row.get("id") == trade["id"]:
+                        row["exchange"] = "bybit_linear"
+                        break
+                self.persist_runtime(force=True)
             else:
                 bybit_api.execute_market_open(
                     trade_pair,
