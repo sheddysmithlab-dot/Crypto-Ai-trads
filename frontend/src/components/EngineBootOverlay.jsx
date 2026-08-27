@@ -44,7 +44,9 @@ export default function EngineBootOverlay({
   const scanDone = Math.max(0, Number(momentumScanDone) || 0);
   const scanPct = scanTotal > 0 ? Math.min(1, scanDone / scanTotal) : (momentumGateReady ? 1 : 0);
   const elapsedIntro = Math.max(0, Math.min(intro, total - remainingWs));
-  const stillIntro = show && !momentumGateReady && elapsedIntro < intro - 0.2;
+  const stage = String(momentumScanStage || '').toLowerCase();
+  const scanInProgress = !momentumGateReady && stage && stage !== 'starting';
+  const stillIntro = show && !momentumGateReady && elapsedIntro < intro - 0.2 && !scanInProgress;
 
   // Lock body scroll while boot overlay is up
   useEffect(() => {
@@ -91,7 +93,6 @@ export default function EngineBootOverlay({
   if (!show) return null;
 
   const offset = RING_C * (1 - smoothProgress);
-  const stage = String(momentumScanStage || '').toLowerCase();
   const centerLabel = momentumGateReady
     ? 'READY'
     : stage === 'liquid' || stage === 'instruments'
