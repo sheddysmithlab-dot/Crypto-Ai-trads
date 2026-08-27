@@ -516,7 +516,7 @@ def _run_orderflow_trap(
 
 
 def _gate_scalp_of_score(action: str, of_trap: Optional[dict], timeframe_key: str) -> str:
-    """1m/5m: BUY/SELL only when matching OF side score ≥ setup floor (trap≥90 else≥75)."""
+    """1m/5m: BUY/SELL only when OF side score ≥ setup floor (trap≥90 / 5m≥85 / else≥75)."""
     tf = _norm_tf(timeframe_key)
     if tf not in ("1m", "5m", "30s"):
         return action
