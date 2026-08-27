@@ -976,6 +976,7 @@ class AITradingAgent:
         self.trading_ready_at = 0.0
         self.boot_ui_until = 0.0
         self.boot_started_at = 0.0
+        self.engine_armed_at = 0.0  # for 1m/5m hourly soft restart timer
         self.session_stats_snapshot: dict = {
             "trade_notional": 0.0,
             "daily_profit": 0.0,
@@ -3041,6 +3042,7 @@ class AITradingAgent:
         self.trading_ready_at = 0.0
         now = time.time()
         self.boot_started_at = now
+        self.engine_armed_at = now
         # Safety max — overlay closes earlier when momentum_gate_ready + min intro elapsed.
         self.boot_ui_until = now + float(ENGINE_BOOT_MAX_SEC)
         self.momentum_gate_ready = False
@@ -3465,6 +3467,8 @@ ENGINE_BOOT_INTRO_SEC = 10
 ENGINE_BOOT_ANALYSIS_SEC = 10  # legacy UI fallback; boot now ends on scan+min intro
 ENGINE_BOOT_MAX_SEC = float(os.environ.get("ENGINE_BOOT_MAX_SEC", "60"))
 ENGINE_WARMUP_SEC = ENGINE_BOOT_INTRO_SEC + ENGINE_BOOT_ANALYSIS_SEC  # legacy total label
+# Soft AI Engine re-arm every N seconds on 1m/5m only (open trades held).
+ENGINE_HOURLY_RESTART_SEC = float(os.environ.get("ENGINE_HOURLY_RESTART_SEC", "3600"))
 PATTERN_NEON_STAGES: list[dict] = []
 THREE_CANDLE_ENTRY = False
 # After arm: skip the first BUY/SELL detect once per pair (all charts).
@@ -3627,7 +3631,7 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
         symbol_map=symbol_map,
         engine_tf=tf_key,
         # Fresh start: do not dock previous chart pair into the new fire list.
-        active_pair=None if reason in ("bot_start", "schedule_start", "boot") else agent.active_pair,
+        active_pair=None if reason in ("bot_start", "schedule_start", "boot", "hourly_restart") else agent.active_pair,
         # Watchlist/fire size = MAX_WATCHLIST only — NOT capped by trade-risk max_concurrent.
         # max_concurrent still limits how many positions can be OPEN at once.
         max_pairs=int(getattr(agent, "MAX_WATCHLIST", 32) or 32),
@@ -3642,7 +3646,7 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
     new_watch = list(new_fire)
 
     # Start/boot: chart → #1 fire pair. Does NOT close any open trades.
-    if reason in ("bot_start", "schedule_start", "boot") and new_fire:
+    if reason in ("bot_start", "schedule_start", "boot", "hourly_restart") and new_fire:
         first = new_fire[0]
         mark = float(agent.pair_prices.get(first) or agent.current_price or 0)
         agent.set_active_pair(first, mark)
@@ -3864,6 +3868,73 @@ async def momentum_universe_timer_loop():
             _run_momentum_refresh_background("every_10_min")
         except Exception as exc:
             print(f"[MOMENTUM] timer loop note: {exc}")
+            await asyncio.sleep(30)
+
+
+async def engine_hourly_restart_loop():
+    """Every 1h on 1m/5m: soft-rearm AI Engine (fresh scan/confirm); keep open trades.
+
+    Same effect as a soft START: warmup + momentum rebuild. Does not STOP season,
+    does not close positions, does not restart Docker.
+    """
+    interval = max(60.0, float(ENGINE_HOURLY_RESTART_SEC))
+    print(
+        f"[AI ENGINE] Hourly soft-restart loop online — every {interval / 60:.0f} min "
+        f"on 1m/5m only (open trades held)."
+    )
+    while True:
+        try:
+            await asyncio.sleep(20)
+            if not agent.is_active or agent.emergency_triggered:
+                continue
+            tf = str(agent._chart_tf_key() or "").strip().lower()
+            if tf not in ("1m", "5m"):
+                continue
+            armed = float(getattr(agent, "engine_armed_at", 0) or 0)
+            if armed <= 0:
+                agent.engine_armed_at = time.time()
+                continue
+            elapsed = time.time() - armed
+            if elapsed < interval:
+                continue
+            # Skip if still in mid-boot scan (gate not ready / overlay open).
+            if not bool(getattr(agent, "momentum_gate_ready", False)):
+                continue
+            until = float(getattr(agent, "boot_ui_until", 0) or 0)
+            if until > time.time():
+                continue
+
+            open_n = len(agent.trades or [])
+            print(
+                f"[AI ENGINE] {interval / 60:.0f}-min soft restart on {tf} "
+                f"(holding {open_n} open trade(s)) — re-arm scan + watchlist"
+            )
+            system_log.push(
+                "ai",
+                f"AI Engine soft restart ({tf}) after {interval / 60:.0f} min — "
+                f"open trades held, fresh momentum scan.",
+                {"tf": tf, "open_trades": open_n, "interval_sec": interval},
+            )
+            system_log.push_agent_chat(
+                f"AI Engine RESTART ({tf}) — {interval / 60:.0f}m cycle · "
+                f"{open_n} open held · fresh scan",
+                status="ok",
+            )
+            notifications.push(
+                f"AI Engine soft restart ({tf}) — open trades kept, scanning again.",
+                "info",
+            )
+            agent.one_m_fee_hold = False
+            agent.begin_trading_warmup()  # resets engine_armed_at
+            try:
+                await apply_momentum_watchlist_refresh(reason="hourly_restart")
+            except Exception as exc:
+                print(f"[AI ENGINE] hourly restart momentum note: {exc}")
+                agent.momentum_gate_ready = True
+                agent.boot_ui_until = 0.0
+            agent.persist_runtime(force=True)
+        except Exception as exc:
+            print(f"[AI ENGINE] hourly restart loop note: {exc}")
             await asyncio.sleep(30)
 
 
@@ -5234,6 +5305,7 @@ async def start_background_tasks():
     asyncio.create_task(auto_buy_loop())
     asyncio.create_task(auto_exit_watchdog())
     asyncio.create_task(momentum_universe_timer_loop())
+    asyncio.create_task(engine_hourly_restart_loop())
     asyncio.create_task(chart_24h_refresh_loop(BYBIT_SYMBOL_MAP))
     asyncio.create_task(session_schedule_loop())
     asyncio.create_task(engine_runtime_checkpoint_loop())

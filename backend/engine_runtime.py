@@ -134,13 +134,18 @@ def restore_runtime(agent: Any) -> dict:
         if agent.is_active and (agent.watchlist or agent.momentum_fire_pairs or gate_ready):
             agent.momentum_gate_ready = True
             agent.boot_ui_until = 0.0
+            # Start hourly soft-restart clock from restore (don't fire immediately).
+            agent.engine_armed_at = time.time()
         elif saved_until > time.time() and not gate_ready:
             # Mid-boot crash — keep short remaining only
             agent.boot_ui_until = saved_until
             agent.momentum_gate_ready = False
+            agent.engine_armed_at = time.time()
         else:
             agent.boot_ui_until = 0.0
             agent.momentum_gate_ready = gate_ready
+            if agent.is_active:
+                agent.engine_armed_at = time.time()
 
         trades = data.get("trades") or []
         if isinstance(trades, list):
