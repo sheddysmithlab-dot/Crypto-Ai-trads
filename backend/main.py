@@ -55,6 +55,7 @@ from settings_persist import (
 from chart_24h import chart_24h_refresh_loop, chart_24h_store
 from chart_tf_move import fetch_tf_move
 from momentum_watchlist import (
+    MOMENTUM_REFRESH_EVERY_SECONDS,
     build_momentum_watchlist,
 )
 import bybit_instruments
@@ -3829,11 +3830,11 @@ def _run_momentum_refresh_background(reason: str) -> None:
 async def maybe_refresh_momentum_every_n_candles(
     client: httpx.AsyncClient, timeframe_key: str
 ) -> None:
-    """Boot-only momentum universe filter.
+    """Boot-only momentum universe filter (inline until gate ready).
 
-    Periodic 7th-candle re-scan DISABLED — watchlist stays on the boot
-    (or manual start) universe so chart-swap churn / scan hangs stop.
-    Boot refresh stays inline until momentum_gate_ready flips True.
+    Periodic candle re-scan DISABLED. While engine is ON, a separate
+    ``momentum_universe_timer_loop`` re-scores every 10 minutes in the
+    background and adds new coins — open trades are always held/pinned.
     """
     if not agent.is_active or agent.emergency_triggered:
         return
@@ -3850,6 +3851,35 @@ async def maybe_refresh_momentum_every_n_candles(
                 agent.last_momentum_candle_ms = int(hist[-1]["close_time"])
         except Exception:
             agent.last_momentum_candle_ms = int(time.time() * 1000)
+
+
+async def momentum_universe_timer_loop():
+    """Every 10 min: soft universe restart (new coins) while holding open trades.
+
+    Does NOT restart the Docker process or close positions — only re-runs the
+    momentum watchlist/fire list in the background (same path as boot refresh).
+    """
+    interval = max(60, int(MOMENTUM_REFRESH_EVERY_SECONDS))
+    print(
+        f"[MOMENTUM] Timer loop online — soft universe restart every {interval // 60} min "
+        f"(open trades held; new coins may be added)."
+    )
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            if not agent.is_active or agent.emergency_triggered:
+                continue
+            if not getattr(agent, "momentum_gate_ready", False):
+                continue
+            open_n = len(agent.trades or [])
+            print(
+                f"[MOMENTUM] 10-min soft restart — re-scoring universe "
+                f"(holding {open_n} open trade(s))"
+            )
+            _run_momentum_refresh_background("every_10_min")
+        except Exception as exc:
+            print(f"[MOMENTUM] timer loop note: {exc}")
+            await asyncio.sleep(30)
 
 
 def get_pattern_neon_snapshot(pair: str | None = None) -> list[dict]:
@@ -5218,6 +5248,7 @@ async def start_background_tasks():
     asyncio.create_task(self_ping_keepalive())
     asyncio.create_task(auto_buy_loop())
     asyncio.create_task(auto_exit_watchdog())
+    asyncio.create_task(momentum_universe_timer_loop())
     asyncio.create_task(chart_24h_refresh_loop(BYBIT_SYMBOL_MAP))
     asyncio.create_task(session_schedule_loop())
     asyncio.create_task(engine_runtime_checkpoint_loop())
@@ -5318,7 +5349,8 @@ async def bot_start():
         "ai",
         f"AI Engine STARTED on {agent.active_pair} ({open_count} open preserved). "
         f"Momentum watchlist: {fire_n} pair(s) above {thr:g}% on {tf_key}. "
-        f"Periodic 7-candle re-scan OFF (boot watchlist holds).",
+        f"Soft universe restart every {max(60, int(MOMENTUM_REFRESH_EVERY_SECONDS)) // 60} min "
+        f"(open trades held).",
         {
             "open_positions": open_count,
             "timeframe_seconds": agent.timeframe_seconds,

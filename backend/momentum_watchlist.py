@@ -10,6 +10,7 @@ gates NEW entries; open positions keep path TP/SL until their own exit rules fir
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any, Awaitable, Callable
 
 from chart_tf_move import fetch_tf_move
@@ -24,7 +25,10 @@ MOMENTUM_MIN_AVG_PCT: dict[str, float] = {
     "1D": 5.0,
 }
 
-MOMENTUM_REFRESH_EVERY_N_CANDLES = 7  # legacy constant; periodic re-scan disabled in main.py
+MOMENTUM_REFRESH_EVERY_N_CANDLES = 7  # legacy; candle re-scan disabled — use timer instead
+# Soft "engine universe restart": re-score liquid coins every N seconds while engine ON.
+# Open trades are NEVER closed — only the NEW-entry fire/watch list updates.
+MOMENTUM_REFRESH_EVERY_SECONDS = int(os.environ.get("MOMENTUM_REFRESH_EVERY_SECONDS", "600"))
 # Parallel kline fetches during universe score (burst only every N candles / boot).
 SCORE_CONCURRENCY = 10
 
