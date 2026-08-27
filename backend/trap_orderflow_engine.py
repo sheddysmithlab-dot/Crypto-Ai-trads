@@ -28,12 +28,12 @@ THR_BREAK_ATR = 0.10
 THR_BALANCED = 0.05
 THR_SCORE = 65.0  # default floor (15m / 1h / 1d)
 THR_SCORE_5M = 70.0  # 5m confidence floor
-THR_SCORE_1M = 90.0  # 1m only — strict floor to cut false REVERSAL / marginal fires
+THR_SCORE_1M = 78.0  # 1m only — confidence floor for fire (was 90, lowered to 78)
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
 
 # 1m fire allowlist — EXHAUSTION excluded (too many false shorts/longs).
-# REVERSAL_TRAP re-enabled on 1m (still subject to 1m≥90 floor + 5m-bias safety).
+# REVERSAL_TRAP re-enabled on 1m (still subject to 1m≥78 floor + 5m-bias safety).
 _1M_LONG_OK = ("SELL_TRAP", "ABSORPTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
 _1M_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
 _HTF_LONG_OK = ("SELL_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
@@ -605,7 +605,7 @@ def evaluate_trap_orderflow(
             setup_1 = None
 
     # 1m: never use EXHAUSTION as the primary setup (noise); pick next-best.
-    # REVERSAL_TRAP allowed on 1m (still gated by 1m≥90 floor + 5m-bias safety above).
+    # REVERSAL_TRAP allowed on 1m (still gated by 1m≥78 floor + 5m-bias safety above).
     if (exec_tf or "").strip().lower() in ("1m", "30s") and setup_1 and setup_1["name"] in (
         "EXHAUSTION",
     ):

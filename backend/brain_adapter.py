@@ -81,7 +81,7 @@ _CONFIRM_SYSTEM = (
     "Analyze under agent candle-read policy: market structure, LONG vs SHORT, "
     "classic traps, inverse/fake-breakout/absorption/exhaustion, order-flow scores, confluence, R:R. "
     "Only reply YES if judged confidence meets the TF floor in the brief "
-    "(1m≥90%, 5m≥70%, other≥65%). Otherwise reply NO. "
+    "(1m≥78%, 5m≥70%, other≥65%). Otherwise reply NO. "
     "Reply with exactly one word: YES or NO. No other text."
 )
 
@@ -96,7 +96,7 @@ def _matching_side_score(of_trap: Optional[dict], action: str) -> float:
 
 
 def _ai_yes_thr_for_tf(timeframe_key: str) -> float:
-    """AI may only YES at/above these confidence floors (1m=90, 5m=70, else=65)."""
+    """AI may only YES at/above these confidence floors (1m=78, 5m=70, else=65)."""
     return float(thr_score_for_tf(timeframe_key))
 
 
@@ -173,7 +173,7 @@ def _build_confirm_user_prompt(
         f"PATTERN DETECTED → confirm {side} {pattern}.",
         f"Pair={pair} TF={timeframe} ({tf_cfg.label}).",
         f"HARD RULE: reply YES only if confidence ≥ {thr:.0f}% on this TF "
-        f"(1m=90, 5m=70, else=65). Otherwise NO.",
+        f"(1m=78, 5m=70, else=65). Otherwise NO.",
         "",
         "ANALYZE (policy):",
         "- LONG vs SHORT quality vs market structure",
@@ -509,7 +509,7 @@ def _run_orderflow_trap(
 
 
 def _gate_1m_of_score(action: str, of_trap: Optional[dict], timeframe_key: str) -> str:
-    """1m only: BUY/SELL only when matching OF side score ≥ floor (90). Blocks brain/AI bypass."""
+    """1m only: BUY/SELL only when matching OF side score ≥ floor (78). Blocks brain/AI bypass."""
     if _norm_tf(timeframe_key) != "1m":
         return action
     if action not in ("BUY", "SELL"):
@@ -797,7 +797,7 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
             f"Order-flow conf floor: {thr_score_for_tf(tf)}% "
-            f"(1m=90, 5m=70, else=65; AI YES only at/above floor). "
+            f"(1m=78, 5m=70, else=65; AI YES only at/above floor). "
             f"{tf_cfg.note}"
         ),
         "timeframes": list(_b.TIMEFRAMES.keys()),
