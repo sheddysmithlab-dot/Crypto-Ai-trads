@@ -86,7 +86,7 @@ _CONFIRM_SYSTEM = (
     "Analyze under agent candle-read policy: market structure, LONG vs SHORT, "
     "classic traps, inverse/fake-breakout/absorption/exhaustion, order-flow scores, confluence, R:R. "
     "Only reply YES if judged confidence meets the TF floor in the brief "
-    "(overall ≥75%; named traps ≥90%). Otherwise reply NO. "
+    "(overall ≥75%; 5m named traps ≥80%; other named traps ≥90%). Otherwise reply NO. "
     "Reply with exactly one word: YES or NO. No other text."
 )
 
@@ -101,7 +101,7 @@ def _matching_side_score(of_trap: Optional[dict], action: str) -> float:
 
 
 def _ai_yes_thr_for_tf(timeframe_key: str, pattern: str | None = None) -> float:
-    """AI YES floor: named traps ≥90, otherwise overall ≥75 all TFs."""
+    """AI YES floor: 5m traps ≥80; other traps ≥90; otherwise overall ≥75."""
     return float(thr_score_for_setup(timeframe_key, pattern))
 
 
@@ -180,7 +180,7 @@ def _build_confirm_user_prompt(
         f"PATTERN DETECTED → confirm {side} {pattern}.",
         f"Pair={pair} TF={timeframe} ({tf_cfg.label}).",
         f"HARD RULE: reply YES only if confidence ≥ {thr:.0f}% on this TF "
-        f"(overall ≥75; named traps ≥90). Otherwise NO.",
+        f"(overall ≥75; 5m traps ≥80; other traps ≥90). Otherwise NO.",
         "",
         "ANALYZE (policy):",
         "- LONG vs SHORT quality vs market structure",
@@ -516,7 +516,7 @@ def _run_orderflow_trap(
 
 
 def _gate_scalp_of_score(action: str, of_trap: Optional[dict], timeframe_key: str) -> str:
-    """1m/5m: BUY/SELL only when OF side score ≥ setup floor (trap≥90 else≥75)."""
+    """1m/5m: BUY/SELL only when OF side score ≥ setup floor (5m trap≥80; else trap≥90 / ≥75)."""
     tf = _norm_tf(timeframe_key)
     if tf not in ("1m", "5m", "30s"):
         return action
@@ -810,7 +810,7 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
             "(NO=skip, unreachable=fail-open); next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
-            f"Order-flow conf floor: overall ≥75% / named traps ≥90% "
+            f"Order-flow conf floor: overall ≥75% / 5m traps ≥80% / other traps ≥90% "
             f"(AI YES only at/above setup floor). "
             f"{tf_cfg.note}"
         ),
@@ -843,7 +843,7 @@ def strategy_system_blurb() -> str:
         "   fake breakout, reversal trap (effort vs result; volume & buyer/seller pressure).\n"
         "3) Combined analysis → AI API (GLM/OpenAI) → BUY / SELL / HOLD.\n"
         "4) Next-candle fire + path SL/TP 0.5%/0.7% + opposite-side flip-exit.\n"
-        "5) If AI offline: strong OF setup (overall≥75 / trap≥90) or brain.py verdict as fallback.\n"
+        "5) If AI offline: strong OF setup (overall≥75 / 5m trap≥80 / else trap≥90) or brain.py verdict as fallback.\n"
     )
 
 

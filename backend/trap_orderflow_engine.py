@@ -27,13 +27,14 @@ THR_FAKE_WICK = 0.30
 THR_BREAK_ATR = 0.10
 THR_BALANCED = 0.05
 THR_SCORE = 75.0  # overall trade confidence floor (non-trap setups, all TFs)
-THR_SCORE_5M = 75.0
+THR_SCORE_5M = 75.0  # 5m non-trap / scalp floor
 THR_SCORE_1M = 75.0
-THR_SCORE_TRAP = 90.0  # named trap fires need a higher bar
+THR_SCORE_TRAP = 90.0  # named trap fires (non-5m)
+THR_SCORE_TRAP_5M = 80.0  # named trap fires on 5m
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
 
-# Named OF trap patterns — fire only when side score ≥ THR_SCORE_TRAP
+# Named OF trap patterns — fire only when side score ≥ trap floor for TF
 _TRAP_FIRE_PATTERNS = frozenset({
     "BUY_TRAP",
     "SELL_TRAP",
@@ -51,7 +52,7 @@ _HTF_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVER
 
 
 def thr_score_for_tf(exec_tf: str | None) -> float:
-    """Base OF confidence floor (0–100) for non-trap / overall setups — ≥75 all TFs."""
+    """Base OF confidence floor (0–100) for non-trap / scalp setups — ≥75 all TFs."""
     tf = (exec_tf or "").strip().lower()
     if tf == "5m":
         return THR_SCORE_5M
@@ -60,11 +61,19 @@ def thr_score_for_tf(exec_tf: str | None) -> float:
     return THR_SCORE
 
 
+def thr_trap_for_tf(exec_tf: str | None) -> float:
+    """Named trap floor: 5m ≥80; other TFs ≥90."""
+    tf = (exec_tf or "").strip().lower()
+    if tf == "5m":
+        return float(THR_SCORE_TRAP_5M)
+    return float(THR_SCORE_TRAP)
+
+
 def thr_score_for_setup(exec_tf: str | None, pattern: str | None = None) -> float:
-    """Floor for a specific setup: traps ≥90, everything else ≥75."""
+    """Floor for a specific setup: 5m traps ≥80; other traps ≥90; non-trap ≥75."""
     name = (pattern or "").strip().upper()
     if name in _TRAP_FIRE_PATTERNS:
-        return float(THR_SCORE_TRAP)
+        return thr_trap_for_tf(exec_tf)
     return float(thr_score_for_tf(exec_tf))
 
 
@@ -648,7 +657,7 @@ def evaluate_trap_orderflow(
         else:
             short_score += 8
 
-    # NO TRADE gates — trap setups use ≥90, others ≥75
+    # NO TRADE gates — 5m traps ≥80; other traps ≥90; non-trap ≥75
     setup_name = (setup_1 or setup_5 or {}).get("name") if (setup_1 or setup_5) else None
     thr = thr_score_for_setup(exec_tf, setup_name)
     thr_base = thr_score_for_tf(exec_tf)
@@ -730,10 +739,10 @@ def evaluate_trap_orderflow(
             reason = "Forced directional choice - higher SHORT score (NO TRADE gates not met)"
             conf = min(1.0, short_score / 100.0)
 
-    # Named trap fires need ≥90 even if a softer base floor was used earlier.
+    # Named trap fires need TF trap floor even if a softer base floor was used earlier.
     if signal in ("LONG", "SHORT") and is_trap_fire_pattern(pattern):
         side_sc = long_score if signal == "LONG" else short_score
-        trap_thr = float(THR_SCORE_TRAP)
+        trap_thr = thr_trap_for_tf(exec_tf)
         if side_sc < trap_thr:
             signal = "NO_TRADE"
             reason = (
@@ -765,7 +774,7 @@ def evaluate_trap_orderflow(
             "proxy": "ohlc_volume_split",
             "thr_score": thr,
             "thr_base": thr_base,
-            "thr_trap": float(THR_SCORE_TRAP),
+            "thr_trap": thr_trap_for_tf(exec_tf),
         },
     )
 
