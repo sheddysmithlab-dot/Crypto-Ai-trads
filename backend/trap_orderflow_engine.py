@@ -32,9 +32,10 @@ THR_SCORE_1M = 90.0  # 1m only — strict floor to cut false REVERSAL / marginal
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
 
-# 1m fire allowlist — REVERSAL_TRAP / EXHAUSTION excluded (too many false shorts/longs)
-_1M_LONG_OK = ("SELL_TRAP", "ABSORPTION", "FAKE_BREAKOUT")
-_1M_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "FAKE_BREAKOUT")
+# 1m fire allowlist — EXHAUSTION excluded (too many false shorts/longs).
+# REVERSAL_TRAP re-enabled on 1m (still subject to 1m≥90 floor + 5m-bias safety).
+_1M_LONG_OK = ("SELL_TRAP", "ABSORPTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
+_1M_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
 _HTF_LONG_OK = ("SELL_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
 _HTF_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
 
@@ -603,11 +604,12 @@ def evaluate_trap_orderflow(
         elif setup_1["side"] == "LONG" and bias_5m == "bearish":
             setup_1 = None
 
-    # 1m: never use REVERSAL_TRAP / EXHAUSTION as the primary setup (noise); pick next-best
+    # 1m: never use EXHAUSTION as the primary setup (noise); pick next-best.
+    # REVERSAL_TRAP allowed on 1m (still gated by 1m≥90 floor + 5m-bias safety above).
     if (exec_tf or "").strip().lower() in ("1m", "30s") and setup_1 and setup_1["name"] in (
-        "REVERSAL_TRAP", "EXHAUSTION",
+        "EXHAUSTION",
     ):
-        rest = [p for p in pats_1 if p["name"] not in ("REVERSAL_TRAP", "EXHAUSTION")]
+        rest = [p for p in pats_1 if p["name"] not in ("EXHAUSTION",)]
         setup_1 = pick(rest)
 
     contradiction = (
