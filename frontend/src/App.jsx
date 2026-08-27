@@ -235,44 +235,32 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // While engine active: MERGE momentum watchlist coins into existing launcher chips.
-  // Original 20 stay; new momentum coins added; dropped momentum coins removed.
+  // While engine active: launcher chips = trade-allowance list only
+  // (momentum fire / watchlist capped by max_concurrent_trades). No original-20 merge.
   // Manual swap protected for 4s so user's chart swap isn't overwritten.
   const manualSwapAtRef = useRef(0);
   useEffect(() => {
     if (!effectiveBotActive) return;
     if (Date.now() - manualSwapAtRef.current < 4000) return;
-    const pairs = Array.isArray(portfolio.watchlist) ? portfolio.watchlist : [];
+    const fire = Array.isArray(portfolio.momentumFirePairs) ? portfolio.momentumFirePairs : [];
+    const watch = Array.isArray(portfolio.watchlist) ? portfolio.watchlist : [];
+    const pairs = fire.length ? fire : watch;
     if (!pairs.length) return;
 
-    const watchSymbols = new Set(
-      pairs.map((p) => String(p).split('/')[0].toUpperCase())
-    );
-
     setLauncherSlots((prev) => {
-      // 1) Keep original 20 always (even if not in current momentum watchlist)
-      // 2) Keep momentum-added chips still in watchlist
-      // 3) Drop momentum-added chips no longer in watchlist
-      // 4) Add new watchlist coins not already docked
-      const kept = prev.filter((s) => {
-        const sym = String(s.symbol || '').toUpperCase();
-        return ORIGINAL_SYMBOLS.has(sym) || watchSymbols.has(sym);
-      });
-      const dockedSymbols = new Set(kept.map((s) => String(s.symbol || '').toUpperCase()));
-      const added = [];
+      const next = [];
+      const seen = new Set();
       for (const pair of pairs) {
         const sym = String(pair).split('/')[0].toUpperCase();
-        if (!dockedSymbols.has(sym)) {
-          const prevSlot = prev.find((s) => String(s.symbol || '').toUpperCase() === sym);
-          added.push({
-            id: prevSlot?.id || `${sym}-mom-${kept.length + added.length}`,
-            symbol: sym,
-            timeframe: prevSlot?.timeframe || '1M',
-          });
-          dockedSymbols.add(sym);
-        }
+        if (!sym || seen.has(sym)) continue;
+        seen.add(sym);
+        const prevSlot = prev.find((s) => String(s.symbol || '').toUpperCase() === sym);
+        next.push({
+          id: prevSlot?.id || `${sym}-fire-${next.length}`,
+          symbol: sym,
+          timeframe: prevSlot?.timeframe || '1M',
+        });
       }
-      const next = [...kept, ...added].slice(0, MAX_LAUNCHER_SLOTS);
       const same =
         next.length === prev.length &&
         next.every((s, i) => s.symbol === prev[i]?.symbol);
@@ -281,7 +269,12 @@ export default function App() {
       return next;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveBotActive, portfolio.watchlist, portfolio.momentumLastRefreshMs]);
+  }, [
+    effectiveBotActive,
+    portfolio.watchlist,
+    portfolio.momentumFirePairs,
+    portfolio.momentumLastRefreshMs,
+  ]);
 
   // Engine OFF → restore launcher to original 20 (drop momentum-added chips).
   useEffect(() => {
