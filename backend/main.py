@@ -3455,7 +3455,10 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
         symbol_map=symbol_map,
         engine_tf=tf_key,
         active_pair=agent.active_pair,
-        max_pairs=int(getattr(agent, "MAX_WATCHLIST", 32) or 32),
+        max_pairs=min(
+            int(getattr(agent, "max_concurrent_trades", 10) or 10),
+            int(getattr(agent, "MAX_WATCHLIST", 32) or 32),
+        ),
         progress_cb=_progress,
         lot_ok=_lot_ok if avail > 0 else None,
     )
