@@ -3255,8 +3255,13 @@ _last_real_feed_update = 0.0
 REAL_FEED_STALE_AFTER_SECONDS = 10
 
 
-def snap_qty_to_step(qty: float, bybit_symbol: str | None) -> float | None:
-    """Floor qty to Bybit lot step so market orders are not rejected."""
+def snap_qty_to_step(
+    qty: float,
+    bybit_symbol: str | None,
+    *,
+    round_up: bool = False,
+) -> float | None:
+    """Snap qty to Bybit lot step. Floor by default; ceil when meeting min notional."""
     if qty is None or qty <= 0:
         return None
     step = bybit_instruments.qty_step(bybit_symbol)
@@ -3264,12 +3269,59 @@ def snap_qty_to_step(qty: float, bybit_symbol: str | None) -> float | None:
         step = BYBIT_QTY_STEP.get(bybit_symbol) if bybit_symbol else None
     if not step or step <= 0:
         return qty
-    snapped = math.floor(qty / step + 1e-12) * step
+    if round_up:
+        snapped = math.ceil(qty / step - 1e-12) * step
+    else:
+        snapped = math.floor(qty / step + 1e-12) * step
     if snapped <= 0:
         return None
     # Avoid float junk (e.g. 0.30000000004) in order qty strings.
     decimals = max(0, min(8, -int(math.floor(math.log10(step))) if step < 1 else 0))
     return round(snapped, decimals)
+
+
+def qty_for_notional(
+    notional_usd: float,
+    entry_price: float,
+    bybit_symbol: str | None,
+    *,
+    min_notional: float = 0.0,
+) -> tuple[float | None, float]:
+    """Return (qty, effective_notional) that meets Bybit min order value.
+
+    Floored qty can land just under minNotional (ErrCode 110094). We target a
+    small buffer above the exchange minimum and round qty UP to the lot step.
+    """
+    if entry_price is None or entry_price <= 0:
+        return None, 0.0
+    # 3% buffer so mark drift / tick doesn't drop value under 5 USDT.
+    target = max(float(notional_usd or 0), float(min_notional or 0) * 1.03, float(min_notional or 0) + 0.05)
+    if target <= 0:
+        return None, 0.0
+    raw = target / float(entry_price)
+    qty = snap_qty_to_step(raw, bybit_symbol, round_up=True)
+    if qty is None or qty <= 0:
+        lot = min_lot_qty(bybit_symbol)
+        qty = snap_qty_to_step(lot, bybit_symbol, round_up=True) if lot else None
+    if qty is None or qty <= 0:
+        return None, 0.0
+
+    step = bybit_instruments.qty_step(bybit_symbol) or BYBIT_QTY_STEP.get(bybit_symbol) or 0
+    need = float(min_notional or 0)
+    # Bump one step at a time until notional clears the exchange floor.
+    for _ in range(25):
+        notion = float(qty) * float(entry_price)
+        if need <= 0 or notion + 1e-9 >= need:
+            return qty, round(notion, 4)
+        if not step or step <= 0:
+            break
+        qty = snap_qty_to_step(float(qty) + float(step), bybit_symbol, round_up=True)
+        if qty is None:
+            break
+    notion = float(qty) * float(entry_price) if qty else 0.0
+    if need > 0 and notion + 1e-9 < need:
+        return None, notion
+    return qty, round(notion, 4)
 
 
 def min_lot_qty(bybit_symbol: str | None) -> float | None:
@@ -3885,17 +3937,21 @@ def compute_auto_trade_plan(
         )
         return None
 
-    qty = snap_qty_to_step(position_usd / entry_price, bybit_symbol)
-    if (qty is None or qty <= 0) and lot is not None and lot > 0:
-        qty = snap_qty_to_step(lot, bybit_symbol) or lot
-        position_usd = max(position_usd, round(float(qty) * float(entry_price), 2))
-        if min_notional_rule > position_usd:
-            position_usd = round(min_notional_rule, 2)
-            qty = snap_qty_to_step(position_usd / entry_price, bybit_symbol) or qty
-        bumped_to_min_lot = True
+    qty, effective_notional = qty_for_notional(
+        position_usd,
+        entry_price,
+        bybit_symbol,
+        min_notional=exchange_min,
+    )
     if qty is None or qty <= 0:
-        print(f"[SIZE] Skip {trade_pair}: cannot compute qty at ${entry_price}")
+        print(
+            f"[SIZE] Skip {trade_pair}: cannot size qty ≥ min ${exchange_min:.2f} "
+            f"at px={entry_price}"
+        )
         return None
+    if effective_notional > position_usd:
+        position_usd = round(effective_notional, 2)
+        bumped_to_min_lot = True
 
     # Final margin sanity
     margin = round(position_usd / leverage, 6)
