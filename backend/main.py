@@ -1743,19 +1743,27 @@ class AITradingAgent:
         print(f"[PILLAR 3: AI AGENT] Paper trading capital reset to ${amount:,.2f}.")
 
     def set_timeframe(self, seconds):
-        """Trading-engine candle interval (not the frontend chart view).
+        """Trading-engine candle interval — synced from the chart TF the user picks.
 
-        Drives auto_buy_loop polling and pattern scans. The chart UI may use a
-        different display timeframe without calling this — open trades must not
-        be reset when the user only changes how candles are drawn.
+        Persisted to engine_runtime.json so logout / VPS restart keeps the same TF
+        (does not fall back to 1m). Open trades are not closed on TF change.
         """
+        try:
+            seconds = int(seconds)
+        except (TypeError, ValueError):
+            return
+        if seconds <= 0:
+            return
         if self.timeframe_seconds == seconds:
+            # Still checkpoint so preferred TF is on disk even if unchanged.
+            self.persist_runtime(force=True)
             return
         self.timeframe_seconds = seconds
         _reset_scan_candle_baseline()
         reset_blue_box_state()
         _invalidate_kline_cache()
-        print(f"[TIMEFRAME SYNC] Backend trading timeframe set to {seconds}s.")
+        self.persist_runtime(force=True)
+        print(f"[TIMEFRAME SYNC] Backend trading timeframe set to {seconds}s (persisted).")
 
     def open_trade(
         self,
@@ -3194,69 +3202,81 @@ class AITradingAgent:
         return str(SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")).strip().lower()
 
     def refresh_one_m_fee_budget(self) -> None:
-        """1m only: pause new entries when broker fees dominate the session book.
+        """Scalp (1m/5m): pause new entries when REALIZED fees dominate closed book.
 
-        Self-clearing: once armed, re-evaluates each call and releases the hold
-        when the session book recovers (net positive and fees back under the
-        ratio). Also clears after a max hold window so entries can never stay
-        paused forever.
+        Uses closed-round-trip gross/fees only — open MTM and open entry fees are
+        ignored so a green open position cannot falsely arm (or stick) a hold.
+        Self-clears on closed-book recover or max hold window.
         """
         if not is_scalp_tf(self._chart_tf_key()):
+            # Higher TFs: never keep a leftover scalp fee hold armed.
+            if self.one_m_fee_hold:
+                self.one_m_fee_hold = False
+                self.one_m_fee_hold_at = 0.0
             return
         book = self.get_session_gross_and_fees_usd()
         closed = int(book.get("closed_count") or 0)
-        fees = float(book.get("broker_fee_usd") or 0)
-        gross = float(book.get("gross_usd") or 0)
-        net = float(book.get("net_usd") or 0)
+        # REALIZED only — matches "fees ate the wins" intent without open noise.
+        fees = float(book.get("closed_fee_usd") or 0)
+        gross = float(book.get("closed_gross_usd") or 0)
+        net = gross - fees
+
+        def _release(why: str) -> None:
+            self.one_m_fee_hold = False
+            self.one_m_fee_hold_at = 0.0
+            print(f"[FEE BUDGET] scalp fee hold RELEASED — {why}. New entries resume.")
+            system_log.push_agent_chat(
+                f"Scalp FEE HOLD released — {why}.",
+                status="match",
+                details={"fees": fees, "gross": gross, "net": net, "closed": closed},
+            )
+            notifications.push("Fee budget recovered — new entries resume.", "success")
 
         # Already holding — check whether to release.
         if self.one_m_fee_hold:
             armed_at = float(getattr(self, "one_m_fee_hold_at", 0) or 0)
-            age = (time.time() - armed_at) if armed_at > 0 else 0
-            # Release when book recovers: net positive AND fees under ratio.
-            recovered = (net > 0) and (gross <= 0 or fees < gross * ONE_M_FEE_BUDGET_RATIO)
-            # Hard ceiling so entries can never stay paused forever.
+            # Missing timestamp (old runtime) → treat as timed out so sticky holds clear.
+            age = (time.time() - armed_at) if armed_at > 0 else ONE_M_FEE_HOLD_MAX_SECONDS
+            recovered = bool(net > 0 and fees < max(gross, 1e-9) * ONE_M_FEE_BUDGET_RATIO)
             timed_out = age >= ONE_M_FEE_HOLD_MAX_SECONDS
-            if recovered or timed_out:
-                self.one_m_fee_hold = False
-                self.one_m_fee_hold_at = 0.0
-                why = "book recovered (net>0, fees under ratio)" if recovered else f"max hold {ONE_M_FEE_HOLD_MAX_SECONDS:.0f}s elapsed"
-                print(f"[FEE BUDGET] 1m fee hold RELEASED — {why}. New entries resume.")
-                system_log.push_agent_chat(
-                    f"1m FEE HOLD released — {why}.",
-                    status="match",
-                    details={"fees": fees, "gross": gross, "net": net, "closed": closed},
-                )
-                notifications.push(f"1m fee budget recovered — new entries resume.", "success")
+            if closed < ONE_M_FEE_HOLD_MIN_CLOSED or recovered or timed_out:
+                if closed < ONE_M_FEE_HOLD_MIN_CLOSED:
+                    why = "closed sample below minimum"
+                elif recovered:
+                    why = "closed book recovered (net>0, fees under ratio)"
+                else:
+                    why = f"max hold {ONE_M_FEE_HOLD_MAX_SECONDS:.0f}s elapsed"
+                _release(why)
             return
 
         if closed < ONE_M_FEE_HOLD_MIN_CLOSED:
             return
-        fees = float(book.get("broker_fee_usd") or 0)
-        gross = float(book.get("gross_usd") or 0)
-        net = float(book.get("net_usd") or 0)
+        # Ignore dust — tiny accounts otherwise pause on cents of fee noise.
+        if fees < ONE_M_FEE_HOLD_MIN_FEE_USD:
+            return
         reason = None
         if gross > 0 and fees >= gross * ONE_M_FEE_BUDGET_RATIO:
             reason = (
-                f"1m fee budget: fees ${fees:.2f} ≥ {ONE_M_FEE_BUDGET_RATIO * 100:.0f}% "
-                f"of gross ${gross:.2f} after {closed} closes"
+                f"scalp fee budget: closed fees ${fees:.2f} ≥ {ONE_M_FEE_BUDGET_RATIO * 100:.0f}% "
+                f"of closed gross ${gross:.2f} after {closed} closes"
             )
-        elif net <= 0 and fees > 0:
+        elif net <= 0:
             reason = (
-                f"1m fee budget: net ${net:.2f} ≤ 0 (fees ${fees:.2f}) after {closed} closes"
+                f"scalp fee budget: closed net ${net:.2f} ≤ 0 "
+                f"(fees ${fees:.2f}) after {closed} closes"
             )
         if not reason:
             return
         self.one_m_fee_hold = True
         self.one_m_fee_hold_at = time.time()
-        print(f"[FEE BUDGET] {reason} — new 1m entries paused")
+        print(f"[FEE BUDGET] {reason} — new scalp entries paused")
         system_log.push_agent_chat(
-            f"1m FEE HOLD — {reason}. Open trades still manage; no new fires.",
+            f"Scalp FEE HOLD — {reason}. Open trades still manage; no new fires.",
             status="no_match",
             details={"fees": fees, "gross": gross, "net": net, "closed": closed},
         )
         notifications.push(
-            "1m fee budget hit — new entries paused (open trades still exit).",
+            "Fee budget hit — new entries paused (open trades still exit).",
             "warning",
         )
 
@@ -3459,8 +3479,9 @@ ONE_M_MIN_BARS_BETWEEN_FIRES = 5  # fire on N → next fire earliest N+5 (was 3)
 ONE_M_CONFIRM_MAX_BARS = 5
 ONE_M_MAX_CONCURRENT = 3  # hard cap PER PAIR while chart TF is 1m (fee control)
 # Hold new 1m entries when broker fees eat the session book.
-ONE_M_FEE_BUDGET_RATIO = 0.45  # fees ≥ 45% of positive gross → hold
-ONE_M_FEE_HOLD_MIN_CLOSED = 3  # need at least this many round-trips
+ONE_M_FEE_BUDGET_RATIO = 0.45  # closed fees ≥ 45% of closed gross → hold
+ONE_M_FEE_HOLD_MIN_CLOSED = 3  # need at least this many closed round-trips
+ONE_M_FEE_HOLD_MIN_FEE_USD = float(os.environ.get("ONE_M_FEE_HOLD_MIN_FEE_USD", "0.03"))
 ONE_M_FEE_HOLD_MAX_SECONDS = float(os.environ.get("ONE_M_FEE_HOLD_MAX_SECONDS", "600"))
 # Engine boot UI: intro + analysis overlay (cosmetic; trading starts on Continue).
 ENGINE_BOOT_INTRO_SEC = 10
@@ -4370,7 +4391,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         if getattr(agent, "one_m_fee_hold", False) and is_scalp_tf(timeframe_key):
             return await _skip_pending(
                 pending,
-                "1m fee budget hold — new entries paused",
+                "fee budget hold — new entries paused",
                 fire_candle_ms=fire_candle_ms,
             )
         if not agent.has_same_side_auto_capacity(side, pair):
@@ -4864,7 +4885,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             side=side,
             action=detect.get("action"),
             pattern=detect.get("pattern"),
-            reason="1m fee budget hold",
+            reason="fee budget hold",
         )
         return False
     if not agent.has_same_side_auto_capacity(side, pair):
@@ -5227,6 +5248,11 @@ async def start_background_tasks():
     try:
         restored = restore_runtime(agent)
         if restored.get("restored"):
+            # Re-evaluate fee hold against closed book (clears false sticky pauses).
+            try:
+                agent.refresh_one_m_fee_budget()
+            except Exception as fee_exc:
+                print(f"[FEE BUDGET] post-restore refresh note: {fee_exc}")
             agent.persist_runtime(force=True)
             system_log.push(
                 "ai",
@@ -5525,6 +5551,7 @@ async def bot_stop(payload: BotStopPayload | None = None):
 @app.get("/bot/status")
 async def bot_status():
     """Lightweight poll for AI Engine active flag (use on page load — WS may lag)."""
+    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     return {
         "status": "success",
         "is_active": bool(agent.is_active),
@@ -5535,6 +5562,8 @@ async def bot_status():
         "pair": agent.active_pair,
         "watchlist": list(agent.watchlist or []),
         "scan_pairs": agent.get_scan_pairs(),
+        "timeframe_seconds": int(agent.timeframe_seconds or 60),
+        "timeframe": tf_key,
     }
 
 
@@ -5801,9 +5830,12 @@ async def set_timeframe(payload: SetTimeframePayload):
 @app.get("/timeframe-profiles")
 async def timeframe_profiles():
     """UI reference: win/lose rates + capital % per chart TF."""
+    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
     return {
         "profiles": {k: get_timeframe_profile(k) for k in ("1m", "5m", "15m", "1h", "1D")},
-        "active": get_timeframe_profile(SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")),
+        "active": get_timeframe_profile(tf_key),
+        "timeframe": tf_key,
+        "timeframe_seconds": int(agent.timeframe_seconds or 60),
     }
 
 # ==========================================

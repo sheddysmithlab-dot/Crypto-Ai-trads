@@ -49,6 +49,7 @@ def dump_runtime(agent: Any) -> dict:
         "is_active": bool(getattr(agent, "is_active", False)),
         "session_hold_mode": bool(getattr(agent, "session_hold_mode", False)),
         "one_m_fee_hold": bool(getattr(agent, "one_m_fee_hold", False)),
+        "one_m_fee_hold_at": float(getattr(agent, "one_m_fee_hold_at", 0) or 0),
         "connectivity_frozen": bool(getattr(agent, "connectivity_frozen", False)),
         "freeze_reason": getattr(agent, "freeze_reason", None),
         "active_pair": getattr(agent, "active_pair", "BTC/USDT"),
@@ -111,6 +112,11 @@ def restore_runtime(agent: Any) -> dict:
         agent.trading_ready_at = 0.0
         agent.session_hold_mode = bool(data.get("session_hold_mode"))
         agent.one_m_fee_hold = bool(data.get("one_m_fee_hold"))
+        hold_at = float(data.get("one_m_fee_hold_at") or 0)
+        if agent.one_m_fee_hold and hold_at <= 0:
+            # Legacy saves had no timestamp — expire immediately on next refresh.
+            hold_at = 0.0
+        agent.one_m_fee_hold_at = hold_at
         # Never restore as frozen — force re-evaluate connectivity after boot
         agent.connectivity_frozen = False
         agent.freeze_reason = None
@@ -125,6 +131,7 @@ def restore_runtime(agent: Any) -> dict:
             agent.momentum_fire_pairs = [str(p) for p in data["momentum_fire_pairs"] if p]
         if data.get("timeframe_seconds"):
             agent.timeframe_seconds = int(data["timeframe_seconds"])
+            print(f"[ENGINE RUNTIME] Restored timeframe_seconds={agent.timeframe_seconds}")
         if data.get("trade_seq") is not None:
             agent.trade_seq = max(int(agent.trade_seq or 0), int(data["trade_seq"] or 0))
 

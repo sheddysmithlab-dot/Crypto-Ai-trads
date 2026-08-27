@@ -36,6 +36,7 @@ import {
 // and live WebSocket tick bucketing so the chart genuinely reacts to the
 // selected timeframe (not just a cosmetic label change).
 const TIMEFRAME_SECONDS = { '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 86400 };
+const SECONDS_TO_TIMEFRAME = { 60: '1M', 300: '5M', 900: '15M', 3600: '1H', 86400: '1D' };
 const CHART_TIMEFRAME_STORAGE_KEY = 'ai_trading_bot_chart_timeframe';
 
 function readStoredTimeframe() {
@@ -46,6 +47,12 @@ function readStoredTimeframe() {
     /* private browsing / storage blocked */
   }
   return '1M';
+}
+
+function timeframeFromSeconds(seconds) {
+  const s = Number(seconds);
+  if (Number.isFinite(s) && SECONDS_TO_TIMEFRAME[s]) return SECONDS_TO_TIMEFRAME[s];
+  return null;
 }
 
 // Standard kline granularities on each exchange (1M and above).
@@ -314,6 +321,8 @@ export function useTradingChart({
   pairLabelRef.current = pairLabel;
 
   const [timeframe, setTimeframe] = useState(initialTimeframe);
+  const timeframeRef = useRef(timeframe);
+  timeframeRef.current = timeframe;
   const [chartSourceMode, setChartSourceModeState] = useState('PAPER_TRADING');
   const [chartHistorySource, setChartHistorySource] = useState('—');
   const [chartLiveSource, setChartLiveSource] = useState('—');
@@ -908,7 +917,8 @@ export function useTradingChart({
   );
 
   const switchTimeframe = useCallback(
-    (tf) => {
+    (tf, { persistBackend = true } = {}) => {
+      if (!tf || !TIMEFRAME_SECONDS[tf]) return;
       setTimeframe(tf);
       currentIntervalRef.current = TIMEFRAME_SECONDS[tf] || 3600;
       const timeScaleOpts = buildTimeScaleOptions(currentIntervalRef.current);
@@ -920,12 +930,14 @@ export function useTradingChart({
       // Re-subscribe kline stream for the new interval (1m vs 5m etc.).
       connectFreeSource(pairLabelRef.current);
 
-      // Sync trading engine TF so auto-size % matches chart (1m=3% … 1D=20%).
-      authFetch('/set-timeframe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ seconds: TIMEFRAME_SECONDS[tf] || 60 }),
-      }).catch((err) => console.warn('set-timeframe sync failed:', err));
+      // Sync trading engine TF so auto-size % matches chart (persists on VPS).
+      if (persistBackend) {
+        authFetch('/set-timeframe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ seconds: TIMEFRAME_SECONDS[tf] || 60 }),
+        }).catch((err) => console.warn('set-timeframe sync failed:', err));
+      }
 
       try {
         localStorage.setItem(CHART_TIMEFRAME_STORAGE_KEY, tf);
@@ -1031,12 +1043,8 @@ export function useTradingChart({
 
     // Fetch real history for the initial pair using the persisted chart timeframe.
     loadRealHistoryInBackground(pairLabelRef.current, initialTimeframe, entryPrice);
-    // Sync backend sizing/scan TF to stored chart TF on load.
-    authFetch('/set-timeframe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ seconds: TIMEFRAME_SECONDS[initialTimeframe] || 60 }),
-    }).catch((err) => console.warn('initial set-timeframe sync failed:', err));
+    // Do NOT POST localStorage TF here — that was overwriting VPS-persisted TF
+    // back to 1M on every login/refresh. Backend TF is adopted in a separate effect.
 
     chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
       redrawBlueBoxOverlay();
@@ -1191,6 +1199,37 @@ export function useTradingChart({
   useEffect(() => {
     if (externalTradingMode) setChartDataSourceMode(externalTradingMode);
   }, [externalTradingMode, setChartDataSourceMode]);
+
+  const switchTimeframeRef = useRef(switchTimeframe);
+  switchTimeframeRef.current = switchTimeframe;
+
+  // Adopt VPS-persisted engine TF on login/refresh — never overwrite backend with
+  // a stale localStorage default (that was snapping the engine back to 1M).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await authFetch('/bot/status');
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        const serverTf = timeframeFromSeconds(data.timeframe_seconds);
+        if (!serverTf || cancelled) return;
+        try {
+          localStorage.setItem(CHART_TIMEFRAME_STORAGE_KEY, serverTf);
+        } catch {
+          /* storage blocked */
+        }
+        if (serverTf !== timeframeRef.current) {
+          switchTimeframeRef.current(serverTf, { persistBackend: false });
+        }
+      } catch (err) {
+        console.warn('backend timeframe sync failed:', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Live wall-clock in the chart header (updates every second even between ticks).
   useEffect(() => {
