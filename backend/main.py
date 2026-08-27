@@ -2817,7 +2817,7 @@ class AITradingAgent:
         tf = str(
             SECONDS_TO_TIMEFRAME_KEY.get(getattr(self, "timeframe_seconds", 60), "1m")
         ).strip().lower()
-        if is_scalp_tf(tf):
+        if str(tf).strip().lower() == "1m":
             limit = max(limit, int(ONE_M_MAX_CONCURRENT))
         return self.same_side_auto_count(side, pair) < limit
 
@@ -3973,9 +3973,9 @@ def effective_max_concurrent_trades(agent) -> int:
 def concurrent_entry_blocked(agent, pair: str) -> str | None:
     """Skip reason if a new entry would exceed caps; else None.
 
-    1m fee pack: cap is **per pair/chart** (ONE_M_MAX_CONCURRENT), not a low UI
+    1m only: cap is **per pair/chart** (ONE_M_MAX_CONCURRENT), not a low UI
     global max — otherwise risk%→max_concurrent=3 blocks all other charts.
-    Other TFs: user global max_concurrent_trades only.
+    5m/other TFs: user global max_concurrent_trades only.
     """
     tf = str(
         SECONDS_TO_TIMEFRAME_KEY.get(getattr(agent, "timeframe_seconds", 60), "1m")
@@ -3983,7 +3983,7 @@ def concurrent_entry_blocked(agent, pair: str) -> str | None:
     open_n = len(getattr(agent, "trades", None) or [])
     user_max = effective_max_concurrent_trades(agent)
 
-    if is_scalp_tf(tf):
+    if str(tf).strip().lower() == "1m":
         n = count_open_trades_for_pair(agent, pair)
         if n >= ONE_M_MAX_CONCURRENT:
             return (
@@ -4254,7 +4254,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
         # 1m only: no fire on candle 2/3 after a fire on candle 1 (next earliest = candle 4).
         tf_l = (timeframe_key or "").strip().lower()
-        if is_scalp_tf(tf_l):
+        if str(tf_l).strip().lower() == "1m":
             earliest = agent.one_m_earliest_next_fire_ms(pair, interval_ms)
             if earliest is not None and fire_candle_ms < earliest:
                 return await _skip_pending(
@@ -4373,7 +4373,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             )
 
         PENDING_ENTRY_SIGNALS.pop(pair, None)
-        if is_scalp_tf(timeframe_key):
+        if str(timeframe_key or "").strip().lower() == "1m":
             LAST_AUTO_FIRE_CANDLE_MS[pair] = int(fire_candle_ms)
         fire_label = (
             "scalp body confirm"
