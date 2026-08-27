@@ -26,8 +26,8 @@ THR_Z_TVOL = 1.0
 THR_FAKE_WICK = 0.30
 THR_BREAK_ATR = 0.10
 THR_BALANCED = 0.05
-THR_SCORE = 75.0  # overall trade confidence floor (non-trap setups, all TFs)
-THR_SCORE_5M = 75.0
+THR_SCORE = 75.0  # overall floor (1m / 15m+ non-trap)
+THR_SCORE_5M = 85.0  # 5m chart — stricter than overall 75
 THR_SCORE_1M = 75.0
 THR_SCORE_TRAP = 90.0  # named trap fires need a higher bar
 THR_RV_PRICE_WEAK = 0.70
@@ -51,15 +51,20 @@ _HTF_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVER
 
 
 def thr_score_for_tf(exec_tf: str | None) -> float:
-    """Base OF confidence floor (0–100) for non-trap / overall setups — ≥75 all TFs."""
+    """Base OF confidence floor (0–100) for non-trap setups.
+
+    1m/30s → 75; 5m → 85; 15m+ → 75. Named traps use thr_score_for_setup (≥90).
+    """
     tf = (exec_tf or "").strip().lower()
-    if tf in ("1m", "5m", "30s"):
+    if tf in ("1m", "30s"):
         return THR_SCORE_1M
+    if tf == "5m":
+        return THR_SCORE_5M
     return THR_SCORE
 
 
 def thr_score_for_setup(exec_tf: str | None, pattern: str | None = None) -> float:
-    """Floor for a specific setup: traps ≥90, everything else ≥75."""
+    """Floor for a specific setup: traps ≥90, else TF base (5m=85, others=75)."""
     name = (pattern or "").strip().upper()
     if name in _TRAP_FIRE_PATTERNS:
         return float(THR_SCORE_TRAP)
