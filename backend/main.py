@@ -3061,7 +3061,7 @@ class AITradingAgent:
         self.momentum_gate_ready = False
         self.momentum_fire_pairs = []
         self.momentum_scores = []
-        self.watchlist = []  # reset — fresh scan rebuilds trade-allowance list
+        self.watchlist = []  # reset — fresh momentum scan rebuilds fire/watchlist
         self.momentum_scan_done = 0
         self.momentum_scan_total = 0
         self.momentum_scan_stage = "starting"
@@ -3641,12 +3641,11 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
     built = await build_momentum_watchlist(
         symbol_map=symbol_map,
         engine_tf=tf_key,
-        # Fresh start: do not dock previous chart pair into the new allowance list.
+        # Fresh start: do not dock previous chart pair into the new fire list.
         active_pair=None if reason in ("bot_start", "schedule_start", "boot") else agent.active_pair,
-        max_pairs=min(
-            int(getattr(agent, "max_concurrent_trades", 10) or 10),
-            int(getattr(agent, "MAX_WATCHLIST", 32) or 32),
-        ),
+        # Watchlist/fire size = MAX_WATCHLIST only — NOT capped by trade-risk max_concurrent.
+        # max_concurrent still limits how many positions can be OPEN at once.
+        max_pairs=int(getattr(agent, "MAX_WATCHLIST", 32) or 32),
         progress_cb=_progress,
         lot_ok=_lot_ok if avail > 0 else None,
     )

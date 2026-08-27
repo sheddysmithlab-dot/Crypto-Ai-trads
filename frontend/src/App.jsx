@@ -235,7 +235,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // While engine active: launcher chips = trade-allowance fire list
+  // While engine active: launcher chips follow momentum fire/watchlist
   // + any open-trade pairs (pinned — refresh must never hide related opens).
   // Manual swap protected for 4s so user's chart swap isn't overwritten.
   const manualSwapAtRef = useRef(0);
@@ -438,7 +438,7 @@ export default function App() {
         return;
       }
       pushActionLog(`Agent config applied. max_concurrent_trades=${configData.max_concurrent_trades}`);
-      // Engine START: clear old launcher; fresh momentum scan rebuilds trade-allowance chips.
+      // Engine START: clear old launcher; fresh momentum scan rebuilds chips.
       chartResetPendingRef.current = true;
       setLauncherSlots([]);
       persistLauncherSlots([]);
