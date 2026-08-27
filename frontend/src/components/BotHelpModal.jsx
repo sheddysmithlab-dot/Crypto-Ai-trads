@@ -7,7 +7,7 @@ const SECTIONS = [
       'Momentum gate: only coins with MARKET avg% above TF floor (1M>0.03, 5M>0.05, 15M>0.15, 1H>0.35, 1D>5) auto-enter watchlist; re-scan every 7 candles.',
       'HARD RULE: 7th-candle / watchlist refresh·replace·add·edit NEVER closes or hides related OPEN trades — they keep their own TP/SL until exit.',
       'Brain patterns + structure traps + order-flow trap (1M exec / 5M bias) → AI BUY/SELL/HOLD.',
-      'Pattern scan uses the last closed candle. On 1m and 5m (same scalp strategy): lock after AI confirm, then fire only when a later closed bar is green (LONG) or red (SHORT) — max 5 bars then skip; other pairs pause while locked. On 15m+: fire at next candle open. First detect per pair is skipped.',
+      'Pattern scan uses the last closed candle. On 1m and 5m: lock after AI confirm, then fire as soon as the next bar turns green (LONG) or red (SHORT) live — do not wait for candle close; max 5 bars then skip. On 15m+: fire at next candle open. First detect per pair is skipped.',
       'Size by TF capital %: 1m/5m 1.5% · 15m 10% · 1h 15% · 1D 20%.',
       '1m/5m scalp: OF≥75 (trap≥90), dual profit lock +0.50→+0.40 then +0.65→+0.55, fee-budget hold. Fees: Bybit taker×GST (0.055%×1.18≈0.0649%/side). 1m only: max 3 open per chart + 5-bar spacing.',
       '1m/5m: AI Engine soft-restarts every 1 hour (fresh momentum scan + confirm pipeline; open trades kept).',

@@ -3150,7 +3150,8 @@ class AITradingAgent:
             f"[AI ENGINE] Armed — trading READY now "
             f"(boot UI scan-driven, max {ENGINE_BOOT_MAX_SEC:g}s). "
             f"Momentum watchlist gate pending. "
-            f"Detect on closed candle → 1m/5m: lock then green/red confirm (max {ONE_M_CONFIRM_MAX_BARS}); "
+            f"Detect on closed candle → 1m/5m: lock then fire on first green/red "
+            f"tick of next bar (max {ONE_M_CONFIRM_MAX_BARS} bars, no candle-close wait); "
             f"other TFs: fire at next candle open. "
             f"First detect per pair is skipped."
         )
@@ -3553,12 +3554,12 @@ TIMEFRAME_KEY_TO_BYBIT_KLINE = {
 # different candle granularities.
 LAST_CANDLE_TIMESTAMPS = {}
 
-# Detect on last closed candle → queue → fire (1m: after green/red confirm; else next open).
+# Detect on last closed candle → queue → fire (1m/5m: first green/red tick; else next open).
 PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
 # 1m only: last auto fire candle open-time per pair (blocks fires after a gap).
 LAST_AUTO_FIRE_CANDLE_MS: dict[str, int] = {}
 ONE_M_MIN_BARS_BETWEEN_FIRES = 5  # fire on N → next fire earliest N+5 (was 3)
-# 1m: after pattern+AI lock, wait up to N closed bars for body color confirm before fire/skip.
+# 1m/5m: after pattern+AI lock, wait up to N bars for live green/red START (not candle close).
 ONE_M_CONFIRM_MAX_BARS = 5
 ONE_M_MAX_CONCURRENT = 3  # hard cap PER PAIR while chart TF is 1m (fee control)
 # Hold new 1m entries when broker fees eat the session book.
@@ -4351,8 +4352,21 @@ async def fetch_closed_candle_history(
     return candles
 
 
+async def fetch_forming_candle(
+    client: httpx.AsyncClient,
+    bybit_symbol: str,
+    timeframe_key: str,
+) -> dict | None:
+    """Latest in-progress kline (Bybit newest-first → rows[0])."""
+    interval = TIMEFRAME_KEY_TO_BYBIT_KLINE.get(timeframe_key, "5")
+    rows = await fetch_kline_rows(client, bybit_symbol, interval, 2)
+    if not rows:
+        return None
+    return parse_bybit_kline(rows[0])
+
+
 def _candle_body_confirms_side(side: str, open_px: float, close_px: float) -> bool:
-    """LONG needs green body; SHORT needs red body. Doji/flat = no confirm."""
+    """LONG needs green tick (price > open); SHORT needs red (price < open). Flat = no."""
     try:
         o = float(open_px)
         c = float(close_px)
@@ -4368,9 +4382,10 @@ def _candle_body_confirms_side(side: str, open_px: float, close_px: float) -> bo
 async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
     """Scan last CLOSED candle for pattern; queue entry then fire on confirm/open.
 
-    1m flow:
-      detect + AI → lock → wait up to ONE_M_CONFIRM_MAX_BARS closed bars for
-      green (LONG) / red (SHORT) body → FIRE; else SKIP. No AI re-call while locked.
+    1m/5m scalp flow:
+      detect + AI → lock → on the NEXT forming candle, fire as soon as live
+      price turns green (LONG) or red (SHORT) vs that bar's open — do NOT wait
+      for candle close (first tick of matching color is enough).
     Other TFs:
       detect → queue → fire at next candle open (unchanged).
     """
@@ -4555,7 +4570,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         if str(timeframe_key or "").strip().lower() == "1m":
             LAST_AUTO_FIRE_CANDLE_MS[pair] = int(fire_candle_ms)
         fire_label = (
-            "scalp body confirm"
+            "scalp green/red start"
             if pending.get("mode") in ("confirm_1m", "confirm_scalp")
             else "next-candle open"
         )
@@ -4602,7 +4617,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         )
         return True
 
-    # --- 1a) 1m confirm-lock: wait green/red closed body (max 5), no new detect ---
+    # --- 1a) Scalp confirm-lock: fire on FIRST green/red tick of forming candle ---
+    # LONG → as soon as live > open (green starts); SHORT → live < open (red starts).
+    # Do not wait for candle close; first matching tick is enough even if it later flips.
     pending = PENDING_ENTRY_SIGNALS.get(pair)
     if (
         pending
@@ -4630,20 +4647,35 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 return False
             return await _execute_queued_fire(pending)
 
-        lookback_c = max(MIN_CANDLES, 100)
         try:
-            hist_c = await fetch_closed_candle_history(
-                client, bybit_symbol, timeframe_key, limit=lookback_c
-            )
+            forming = await fetch_forming_candle(client, bybit_symbol, timeframe_key)
         except Exception as exc:
-            print(f"[BRAIN] 1m confirm history fail {pair}: {exc}")
+            print(f"[BRAIN] scalp confirm forming-candle fail {pair}: {exc}")
             return False
-        if not hist_c:
+        if not forming:
             return False
 
-        bar = hist_c[-1]
-        close_time = int(bar.get("close_time") or 0)
-        if close_time <= detect_ms:
+        bar_start = int(forming.get("close_time") or 0)
+        open_px = float(forming.get("open") or 0)
+        # Prefer live WS mark; else forming-bar close; else public ticker.
+        live_px = float(agent.mark_price_for(pair) or 0)
+        forming_close = float(forming.get("close") or 0)
+        if live_px <= 0 and forming_close > 0:
+            live_px = forming_close
+        if live_px <= 0:
+            try:
+                tick = await fetch_ticker_last_price(client, bybit_symbol)
+                if tick and float(tick) > 0:
+                    live_px = float(tick)
+            except Exception:
+                pass
+        if live_px > 0:
+            agent.set_pair_mark(pair, live_px)
+        if open_px <= 0 or live_px <= 0 or bar_start <= 0:
+            return False
+
+        # Still on the detect candle — wait until the NEXT bar opens.
+        if bar_start <= detect_ms:
             _push_pattern_neon(
                 pair=pair,
                 candle_time_ms=detect_ms + interval_ms,
@@ -4651,101 +4683,95 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 side=side,
                 action=detect.get("action"),
                 pattern=detect.get("pattern"),
-                reason=f"Lock {side} — wait {want} confirm 0/{max_bars}",
+                reason=f"Lock {side} — wait next bar for {want} start",
             )
             return False
 
-        last_seen_c = int(pending.get("last_confirm_candle_ms") or detect_ms)
-        if close_time <= last_seen_c:
-            seen = int(pending.get("confirm_bars_seen") or 0)
-            _push_pattern_neon(
-                pair=pair,
-                candle_time_ms=close_time,
-                stage="confirming",
-                side=side,
-                action=detect.get("action"),
-                pattern=detect.get("pattern"),
-                reason=f"Lock {side} — wait {want} confirm {seen}/{max_bars}",
+        # How many bars into the confirm window (1 = first bar after detect).
+        bars_into = max(1, int((bar_start - detect_ms) // max(interval_ms, 1)))
+        pending["confirm_bars_seen"] = bars_into
+        pending["last_confirm_candle_ms"] = bar_start
+
+        # Timeout: past max bars with no matching color tick → skip.
+        if bars_into > max_bars:
+            PENDING_ENTRY_SIGNALS[pair] = pending
+            return await _skip_pending(
+                pending,
+                f"scalp confirm timeout after {max_bars} candles (no {want} start)",
+                fire_candle_ms=bar_start,
             )
-            return False
 
-        # New closed bar after detect — count toward confirm window.
-        pending["last_confirm_candle_ms"] = close_time
-        pending["confirm_bars_seen"] = int(pending.get("confirm_bars_seen") or 0) + 1
-        seen = int(pending["confirm_bars_seen"])
-        open_px = float(bar.get("open") or 0)
-        close_px = float(bar.get("close") or 0)
-        matched = _candle_body_confirms_side(side, open_px, close_px)
-
+        matched = _candle_body_confirms_side(side, open_px, live_px)
         if matched:
-            pending["fire_candle_time"] = close_time
+            pending["fire_candle_time"] = bar_start
             pending["confirm_matched"] = True
             PENDING_ENTRY_SIGNALS[pair] = pending
             if not agent.trading_ready():
                 _push_pattern_neon(
                     pair=pair,
-                    candle_time_ms=close_time,
+                    candle_time_ms=bar_start,
                     stage="confirming",
                     side=side,
                     action=detect.get("action"),
                     pattern=detect.get("pattern"),
-                    reason=f"{want} confirm {seen}/{max_bars} · warmup hold",
+                    reason=f"{want} started · warmup hold",
                 )
                 system_log.push_agent_chat(
-                    f"CONFIRM {side} on {pair}: {want} bar@{close_time} ({seen}/{max_bars}) — warmup hold",
+                    f"CONFIRM {side} on {pair}: {want} started @ live={live_px} "
+                    f"open={open_px} (bar {bars_into}/{max_bars}) — warmup hold",
                     status="match",
-                    details={"pair": pair, "side": side, "confirm_bar": close_time, "seen": seen},
+                    details={
+                        "pair": pair,
+                        "side": side,
+                        "confirm_bar": bar_start,
+                        "live": live_px,
+                        "open": open_px,
+                        "seen": bars_into,
+                    },
                 )
                 return False
             _push_pattern_neon(
                 pair=pair,
-                candle_time_ms=close_time,
+                candle_time_ms=bar_start,
                 stage="confirming",
                 side=side,
                 action=detect.get("action"),
                 pattern=detect.get("pattern"),
-                reason=f"{want} confirm {seen}/{max_bars} → firing",
+                reason=f"{want} started → firing now",
             )
             system_log.push_agent_chat(
-                f"CONFIRM {side} on {pair}: {want} bar@{close_time} ({seen}/{max_bars}) → fire",
+                f"CONFIRM {side} on {pair}: {want} started @ live={live_px} "
+                f"open={open_px} (bar {bars_into}/{max_bars}) → fire NOW",
                 status="match",
-                details={"pair": pair, "side": side, "confirm_bar": close_time, "seen": seen},
+                details={
+                    "pair": pair,
+                    "side": side,
+                    "confirm_bar": bar_start,
+                    "live": live_px,
+                    "open": open_px,
+                    "seen": bars_into,
+                },
+            )
+            print(
+                f"[BRAIN] {side} {pair} {want}-start confirm: live={live_px} open={open_px} "
+                f"bar@{bar_start} → fire (no candle-close wait)"
             )
             return await _execute_queued_fire(pending)
 
+        # Wrong color / flat — keep lock; poll again next tick (~0.5s).
         PENDING_ENTRY_SIGNALS[pair] = pending
-        if seen >= max_bars:
-            return await _skip_pending(
-                pending,
-                f"1m confirm timeout after {max_bars} candles (no {want} body)",
-                fire_candle_ms=close_time,
-            )
-
         _push_pattern_neon(
             pair=pair,
-            candle_time_ms=close_time,
+            candle_time_ms=bar_start,
             stage="confirming",
             side=side,
             action=detect.get("action"),
             pattern=detect.get("pattern"),
-            reason=f"Hold {side} — wait {want} {seen}/{max_bars}",
-        )
-        system_log.push_agent_chat(
-            f"HOLD {side} on {pair}: no {want} body ({seen}/{max_bars}) — keep lock",
-            status="scanning",
-            details={
-                "pair": pair,
-                "side": side,
-                "confirm_bar": close_time,
-                "seen": seen,
-                "max": max_bars,
-                "open": open_px,
-                "close": close_px,
-            },
+            reason=f"Hold {side} — wait {want} start {bars_into}/{max_bars}",
         )
         return False
 
-    # --- 1b) Non-1m: fire queued signal once the next candle has OPENed ---
+    # --- 1b) Non-scalp: fire queued signal once the next candle has OPENed ---
     pending = PENDING_ENTRY_SIGNALS.get(pair)
     if pending and pending.get("timeframe_key") == timeframe_key:
         fire_candle_ms = int(pending["fire_candle_time"])
@@ -5016,11 +5042,11 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             side=side,
             action=detect.get("action"),
             pattern=detect.get("pattern"),
-            reason=f"Lock {side} — wait {want} confirm 0/{ONE_M_CONFIRM_MAX_BARS}",
+            reason=f"Lock {side} — wait {want} start (live tick)",
         )
         system_log.push_agent_chat(
-            f"LOCKED {side} on {pair}: {detect.get('pattern')} — wait {want} confirm "
-            f"(max {ONE_M_CONFIRM_MAX_BARS}) | AI={detect.get('ai_confirmation', 'SKIP')}",
+            f"LOCKED {side} on {pair}: {detect.get('pattern')} — fire on first {want} tick "
+            f"(max {ONE_M_CONFIRM_MAX_BARS} bars, no close wait) | AI={detect.get('ai_confirmation', 'SKIP')}",
             status="match",
             details={
                 "pair": pair,
@@ -5032,7 +5058,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         )
         print(
             f"[BRAIN] LOCKED {side} {pair} pattern={detect.get('pattern')} "
-            f"on closed@{close_time} → wait {want} confirm max {ONE_M_CONFIRM_MAX_BARS} "
+            f"on closed@{close_time} → fire on first {want} tick "
+            f"(max {ONE_M_CONFIRM_MAX_BARS} bars, no candle-close wait) "
             f"(AI={detect.get('ai_confirmation', 'SKIP')})"
         )
         return False
