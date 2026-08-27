@@ -954,6 +954,7 @@ class AITradingAgent:
         self.session_stats_frozen = False
         self.session_hold_mode = False  # STOP→Hold: no new entries; open trades still auto-exit
         self.one_m_fee_hold = False  # 1m only: pause new entries when fees dominate
+        self.one_m_fee_hold_at = 0.0  # when fee_hold was armed (for max-hold ceiling)
         # Momentum watchlist gate (MARKET avg% filter)
         self.momentum_gate_ready = False
         self.momentum_fire_pairs: list[str] = []
@@ -3206,13 +3207,42 @@ class AITradingAgent:
         return str(SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")).strip().lower()
 
     def refresh_one_m_fee_budget(self) -> None:
-        """1m only: pause new entries when broker fees dominate the session book."""
+        """1m only: pause new entries when broker fees dominate the session book.
+
+        Self-clearing: once armed, re-evaluates each call and releases the hold
+        when the session book recovers (net positive and fees back under the
+        ratio). Also clears after a max hold window so entries can never stay
+        paused forever.
+        """
         if self._chart_tf_key() != "1m":
-            return
-        if self.one_m_fee_hold:
             return
         book = self.get_session_gross_and_fees_usd()
         closed = int(book.get("closed_count") or 0)
+        fees = float(book.get("broker_fee_usd") or 0)
+        gross = float(book.get("gross_usd") or 0)
+        net = float(book.get("net_usd") or 0)
+
+        # Already holding — check whether to release.
+        if self.one_m_fee_hold:
+            armed_at = float(getattr(self, "one_m_fee_hold_at", 0) or 0)
+            age = (time.time() - armed_at) if armed_at > 0 else 0
+            # Release when book recovers: net positive AND fees under ratio.
+            recovered = (net > 0) and (gross <= 0 or fees < gross * ONE_M_FEE_BUDGET_RATIO)
+            # Hard ceiling so entries can never stay paused forever.
+            timed_out = age >= ONE_M_FEE_HOLD_MAX_SECONDS
+            if recovered or timed_out:
+                self.one_m_fee_hold = False
+                self.one_m_fee_hold_at = 0.0
+                why = "book recovered (net>0, fees under ratio)" if recovered else f"max hold {ONE_M_FEE_HOLD_MAX_SECONDS:.0f}s elapsed"
+                print(f"[FEE BUDGET] 1m fee hold RELEASED — {why}. New entries resume.")
+                system_log.push_agent_chat(
+                    f"1m FEE HOLD released — {why}.",
+                    status="match",
+                    details={"fees": fees, "gross": gross, "net": net, "closed": closed},
+                )
+                notifications.push(f"1m fee budget recovered — new entries resume.", "success")
+            return
+
         if closed < ONE_M_FEE_HOLD_MIN_CLOSED:
             return
         fees = float(book.get("broker_fee_usd") or 0)
@@ -3231,6 +3261,7 @@ class AITradingAgent:
         if not reason:
             return
         self.one_m_fee_hold = True
+        self.one_m_fee_hold_at = time.time()
         print(f"[FEE BUDGET] {reason} — new 1m entries paused")
         system_log.push_agent_chat(
             f"1m FEE HOLD — {reason}. Open trades still manage; no new fires.",
@@ -3443,6 +3474,7 @@ ONE_M_MAX_CONCURRENT = 3  # hard cap PER PAIR while chart TF is 1m (fee control)
 # Hold new 1m entries when broker fees eat the session book.
 ONE_M_FEE_BUDGET_RATIO = 0.45  # fees ≥ 45% of positive gross → hold
 ONE_M_FEE_HOLD_MIN_CLOSED = 3  # need at least this many round-trips
+ONE_M_FEE_HOLD_MAX_SECONDS = float(os.environ.get("ONE_M_FEE_HOLD_MAX_SECONDS", "600"))
 # Engine boot UI: intro + analysis overlay (cosmetic; trading starts on Continue).
 ENGINE_BOOT_INTRO_SEC = 10
 ENGINE_BOOT_ANALYSIS_SEC = 10  # legacy UI fallback; boot now ends on scan+min intro
