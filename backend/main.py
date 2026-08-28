@@ -899,15 +899,15 @@ MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", 
 AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path lock/trail profit + protective SL (same engine)
 INVERT_AUTO_TRADE_FIRE = False
 # Profit book (gross %, LONG/SHORT symmetric):
-#   Default: +0.50% first LOCK; trail 0.10% → floor +0.40%; then +0.20 steps / 0.20 trail.
+#   Default: +0.50% first LOCK; trail 0.10% → floor +0.40%; then +0.20 steps / 0.10 trail.
 #   1m dual lock:
 #     (1) +0.50% → trail 0.10% → floor +0.40%  (same as other TFs while under +0.65%)
-#     (2) +0.65%+ → fee-pack lock; trail 0.10% → floor +0.55%; then +0.20 steps / 0.20 trail
+#     (2) +0.65%+ → fee-pack lock; trail 0.10% → floor +0.55%; then +0.20 steps / 0.10 trail
 PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.50"))
 PROFIT_LOCK_PCT_1M = float(os.environ.get("PROFIT_LOCK_PCT_1M", "0.65"))
 PROFIT_LOCK_STEP_PCT = float(os.environ.get("PROFIT_LOCK_STEP_PCT", "0.20"))
 PROFIT_TRAIL_FIRST_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "0.10"))
-PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.20"))
+PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.10"))
 # Opposite-signal flip: only exit old auto trade when unrealized gross > this %;
 # at or below → keep old open and skip the new opposite fire (no tiny flip-exits).
 FLIP_EXIT_MIN_GROSS_PCT = float(os.environ.get("FLIP_EXIT_MIN_GROSS_PCT", "0.25"))
@@ -2442,7 +2442,7 @@ class AITradingAgent:
 
         Default / 1m under fee-pack: first lock (+0.50) → 0.10% giveback (floor +0.40).
         1m fee-pack lock (+0.65): also 0.10% giveback (floor +0.55).
-        Higher stepped locks (+0.85…): 0.20% giveback.
+        Higher stepped locks (+0.85…): 0.10% giveback.
         """
         lvl = float(lock_lvl)
         if self._is_1m_trade(trade):
