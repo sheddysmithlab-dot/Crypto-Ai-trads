@@ -12,6 +12,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
+from timeframe_profiles import is_scalp_tf
+
 EPS = 1e-12
 # Tolerate float rounding at score floors (e.g. 74.96 displayed as 75.0).
 SCORE_FLOOR_EPS = float(os.environ.get("SCORE_FLOOR_EPS", "0.05"))
@@ -63,6 +65,13 @@ _TRAP_FIRE_PATTERNS = frozenset({
     "FAKE_BREAKOUT",
 })
 
+# Score-only imbalance entries — disabled (named traps above still fire).
+_IMBALANCE_FIRE_PATTERNS = frozenset({
+    "IMBALANCE",
+    "QUALIFIED_IMBALANCE",
+    "RAW_IMBALANCE",
+})
+
 # 1m fire allowlist — REVERSAL_TRAP + EXHAUSTION blocked (false fades).
 _1M_LONG_OK = ("SELL_TRAP", "ABSORPTION", "FAKE_BREAKOUT")
 _1M_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "FAKE_BREAKOUT")
@@ -106,13 +115,46 @@ def thr_score_for_setup(
     if name in _TRAP_FIRE_PATTERNS:
         return thr_trap_for_tf(exec_tf)
     tf = (exec_tf or "").strip().lower()
-    if tf in ("1m", "30s"):
+    if is_scalp_tf(tf):
         return float(THR_SCORE_IMBALANCE_1M)
     return float(thr_score_for_tf(exec_tf))
 
 
 def is_trap_fire_pattern(pattern: str | None) -> bool:
     return (pattern or "").strip().upper() in _TRAP_FIRE_PATTERNS
+
+
+def is_imbalance_fire_pattern(pattern: str | None) -> bool:
+    """True for score-only imbalance fires (not named OF traps)."""
+    name = (pattern or "").strip().upper()
+    if not name:
+        return False
+    base = name.split("+", 1)[0].strip()
+    return base in _IMBALANCE_FIRE_PATTERNS
+
+
+def _apply_imbalance_block(result: TrapOFResult) -> TrapOFResult:
+    """Hard skip any LONG/SHORT whose root pattern is imbalance-only."""
+    if result.final_signal not in ("LONG", "SHORT"):
+        return result
+    if not is_imbalance_fire_pattern(result.pattern):
+        return result
+    max_sc = max(float(result.long_score), float(result.short_score))
+    return TrapOFResult(
+        timeframe=result.timeframe,
+        pattern=result.pattern,
+        bias_5m=result.bias_5m,
+        buy_pressure=result.buy_pressure,
+        sell_pressure=result.sell_pressure,
+        buy_volume_ratio=result.buy_volume_ratio,
+        sell_volume_ratio=result.sell_volume_ratio,
+        long_score=result.long_score,
+        short_score=result.short_score,
+        final_signal="NO_TRADE",
+        confidence=max_sc / 100.0,
+        primary_reason=f"IMBALANCE entries disabled (was {result.pattern})",
+        details=result.details,
+    )
 
 
 @dataclass
@@ -688,8 +730,8 @@ def evaluate_trap_orderflow(
         elif setup_1["side"] == "LONG" and bias_5m == "bearish":
             setup_1 = None
 
-    # 1m: never use REVERSAL_TRAP / EXHAUSTION as primary (noise); pick next-best.
-    if (exec_tf or "").strip().lower() in ("1m", "30s") and setup_1 and setup_1["name"] in (
+    # Scalp (1m/5m/30s): never use REVERSAL_TRAP / EXHAUSTION as primary (noise); pick next-best.
+    if is_scalp_tf(exec_tf) and setup_1 and setup_1["name"] in (
         "REVERSAL_TRAP", "EXHAUSTION",
     ):
         rest = [p for p in pats_1 if p["name"] not in ("REVERSAL_TRAP", "EXHAUSTION")]
@@ -844,7 +886,8 @@ def evaluate_trap_orderflow(
             )
             conf = side_sc / 100.0
 
-    return TrapOFResult(
+    return _apply_imbalance_block(
+        TrapOFResult(
         timeframe=exec_tf.upper(),
         pattern=pattern,
         bias_5m=bias_5m,
@@ -873,6 +916,7 @@ def evaluate_trap_orderflow(
             "thr_base": thr_base,
             "thr_trap": thr_trap_for_tf(exec_tf),
         },
+        )
     )
 
 
@@ -939,7 +983,7 @@ def merge_with_structure_trap(
     Opposite structure → score penalty (−12); block if below TF floor.
     """
     if not structure_trap_side:
-        return of_result
+        return _apply_imbalance_block(of_result)
     struct_signal = "LONG" if structure_trap_side == "BUY" else "SHORT"
     tf = (of_result.timeframe or "").strip().lower()
     strict_scalp = tf in ("1m", "5m", "30s")
@@ -965,7 +1009,8 @@ def merge_with_structure_trap(
             short_s += 5 if of_result.final_signal == "SHORT" else 0
         signal = of_result.final_signal
         conf = min(1.0, max(long_s, short_s) / 100.0)
-        return TrapOFResult(
+        return _apply_imbalance_block(
+            TrapOFResult(
             timeframe=of_result.timeframe,
             pattern=pattern,
             bias_5m=of_result.bias_5m,
@@ -979,6 +1024,7 @@ def merge_with_structure_trap(
             confidence=conf,
             primary_reason=reason,
             details={**base_details, "structure_1m_boost": not strict_scalp},
+            )
         )
 
     # Conflict or NO_TRADE — apply penalty when OF picked a side opposite structure
@@ -1010,7 +1056,8 @@ def merge_with_structure_trap(
             reason = f"Structure trap {structure_trap_type} aligned with order-flow scores"
 
     conf = 0.0 if signal == "NO_TRADE" else min(1.0, max(long_s, short_s) / 100.0)
-    return TrapOFResult(
+    return _apply_imbalance_block(
+        TrapOFResult(
         timeframe=of_result.timeframe,
         pattern=pattern,
         bias_5m=of_result.bias_5m,
@@ -1028,4 +1075,5 @@ def merge_with_structure_trap(
             "structure_conflict_penalty": pen,
             "structure_1m_boost": False,
         },
+        )
     )

@@ -409,10 +409,8 @@ async def consult_ai_provider(context):
         trap_score = context.get("confidence")
     score_txt = "—" if trap_score is None else str(trap_score)
     tf_l = timeframe.strip().lower()
-    if tf_l in ("1m", "30s"):
+    if is_scalp_tf(tf_l):
         thr = 85
-    elif tf_l == "5m":
-        thr = 70
     else:
         thr = 65
 
@@ -2839,14 +2837,14 @@ class AITradingAgent:
     def has_same_side_auto_capacity(self, side: str, pair: str) -> bool:
         """False when this pair already has enough same-side auto positions.
 
-        1m fee pack: allow up to ONE_M_MAX_CONCURRENT same-side stacks per chart
+        1m/5m/30s fee pack: allow up to ONE_M_MAX_CONCURRENT same-side stacks per chart
         (3 per pair → e.g. 3 charts × 3 = 9 open).
         """
         limit = max(1, int(MAX_SAME_SIDE_AUTO_PER_PAIR))
         tf = str(
             SECONDS_TO_TIMEFRAME_KEY.get(getattr(self, "timeframe_seconds", 60), "1m")
         ).strip().lower()
-        if str(tf).strip().lower() == "1m":
+        if is_scalp_tf(tf):
             limit = max(limit, int(ONE_M_MAX_CONCURRENT))
         return self.same_side_auto_count(side, pair) < limit
 
@@ -3526,6 +3524,9 @@ FIRST_DETECT_SKIPPED: set[str] = set()
 SKIP_TRADE_PATTERNS = frozenset(
     {
         "MA_COMPRESSION_CONSOLIDATION_ZONE",
+        "IMBALANCE",
+        "QUALIFIED_IMBALANCE",
+        "RAW_IMBALANCE",
     }
 )
 
@@ -4103,9 +4104,9 @@ def effective_max_concurrent_trades(agent) -> int:
 def concurrent_entry_blocked(agent, pair: str) -> str | None:
     """Skip reason if a new entry would exceed caps; else None.
 
-    1m only: cap is **per pair/chart** (ONE_M_MAX_CONCURRENT), not a low UI
+    Scalp TFs (1m/5m/30s): cap is **per pair/chart** (ONE_M_MAX_CONCURRENT), not a low UI
     global max — otherwise risk%→max_concurrent=3 blocks all other charts.
-    5m/other TFs: user global max_concurrent_trades only.
+    Higher TFs: user global max_concurrent_trades only.
     """
     tf = str(
         SECONDS_TO_TIMEFRAME_KEY.get(getattr(agent, "timeframe_seconds", 60), "1m")
@@ -4113,7 +4114,7 @@ def concurrent_entry_blocked(agent, pair: str) -> str | None:
     open_n = len(getattr(agent, "trades", None) or [])
     user_max = effective_max_concurrent_trades(agent)
 
-    if str(tf).strip().lower() == "1m":
+    if is_scalp_tf(tf):
         n = count_open_trades_for_pair(agent, pair)
         if n >= ONE_M_MAX_CONCURRENT:
             return (
@@ -4407,14 +4408,14 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 fire_candle_ms=fire_candle_ms,
             )
 
-        # 1m only: no fire on candle 2/3 after a fire on candle 1 (next earliest = candle 4).
+        # Scalp (1m/5m/30s): no fire on candle 2/3 after a fire on candle 1 (next earliest = candle 4).
         tf_l = (timeframe_key or "").strip().lower()
-        if str(tf_l).strip().lower() == "1m":
+        if is_scalp_tf(tf_l):
             earliest = agent.one_m_earliest_next_fire_ms(pair, interval_ms)
             if earliest is not None and fire_candle_ms < earliest:
                 return await _skip_pending(
                     pending,
-                    f"1m spacing: next fire after candle gap "
+                    f"scalp spacing: next fire after candle gap "
                     f"(earliest fire@{earliest}, attempted@{fire_candle_ms})",
                     fire_candle_ms=fire_candle_ms,
                 )
@@ -4538,7 +4539,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             )
 
         PENDING_ENTRY_SIGNALS.pop(pair, None)
-        if str(timeframe_key or "").strip().lower() == "1m":
+        if is_scalp_tf(timeframe_key):
             LAST_AUTO_FIRE_CANDLE_MS[pair] = int(fire_candle_ms)
         fire_label = (
             "scalp green/red start"
