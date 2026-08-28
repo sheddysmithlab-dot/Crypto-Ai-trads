@@ -24,6 +24,8 @@ import brain as _b
 from trap_orderflow_engine import (
     evaluate_trap_orderflow,
     merge_with_structure_trap,
+    score_below_floor,
+    score_meets_floor,
     thr_score_for_setup,
     thr_score_for_tf,
 )
@@ -135,7 +137,7 @@ def _setup_meets_ai_confirm_threshold(
     strategy = _brain_strategy_from_think(think)
     thr = _ai_yes_thr_for_tf(tf, pattern, brain_strategy=strategy)
     of_score = _matching_side_score(of_trap, action)
-    if of_score >= thr:
+    if of_score >= thr - 1e-6:
         return True
     # Strict score path on 1m/5m — never call AI below floor
     if tf in ("1m", "30s", "5m"):
@@ -555,11 +557,11 @@ def _gate_scalp_of_score(
     long_s = float(of_trap.get("long_score") or 0)
     short_s = float(of_trap.get("short_score") or 0)
     if action == "BUY":
-        if long_s < thr:
+        if score_below_floor(long_s, thr):
             print(f"[AI-BRAIN] scalp gate: BUY blocked LONG={long_s:.0f} < {thr:.0f}")
             return "HOLD"
         return "BUY"
-    if short_s < thr:
+    if score_below_floor(short_s, thr):
         print(f"[AI-BRAIN] scalp gate: SELL blocked SHORT={short_s:.0f} < {thr:.0f}")
         return "HOLD"
     return "SELL"
@@ -586,9 +588,9 @@ def _fallback_action_from_brain_and_of(
         sig = of_trap.get("final_signal")
         long_s = float(of_trap.get("long_score") or 0)
         short_s = float(of_trap.get("short_score") or 0)
-        if sig == "LONG" and long_s >= thr:
+        if sig == "LONG" and score_meets_floor(long_s, thr):
             return "BUY"
-        if sig == "SHORT" and short_s >= thr:
+        if sig == "SHORT" and score_meets_floor(short_s, thr):
             return "SELL"
         if tf in ("1m", "5m", "30s"):
             # Scalp: never fall through to brain pattern if OF score is below floor
@@ -711,46 +713,54 @@ async def evaluate_live_entry_async(
             return _blocked("AI not configured — skip trade (no fail-open)")
 
         strategy = _brain_strategy_from_think(think)
+        thr = thr_score_for_setup(tf, (of_trap or {}).get("pattern"), brain_strategy=strategy)
+        side_sc = _matching_side_score(of_trap, setup_action)
+
         if not _setup_meets_ai_confirm_threshold(setup_action, of_trap, timeframe_key, think):
-            thr = thr_score_for_setup(tf, (of_trap or {}).get("pattern"), brain_strategy=strategy)
-            side_sc = _matching_side_score(of_trap, setup_action)
             return _blocked(
                 f"OF score {side_sc:.1f} < floor {thr:.0f} — skip trade"
             )
 
-        confirmed = await _confirm_setup_with_ai(
-            settings,
-            pair=pair,
-            timeframe=timeframe_key,
-            action=setup_action,
-            think=think,
-            of_trap=of_trap,
+        allow_of_pass = os.environ.get("AI_FAILOPEN_OF_PASS", "1").strip().lower() in (
+            "1", "true", "yes",
         )
-        if confirmed is False:
-            side = "LONG" if setup_action == "BUY" else "SHORT"
-            pattern, score = _setup_label_and_score(think, of_trap, setup_action)
-            return _blocked(
-                f"AI rejected confirm ({side} {pattern} / trap score {score})",
-                ai_confirmation="NO",
+        # Scalp fast-path: strong OF clears floor → skip AI (cooldown/outage safe).
+        if tf in ("1m", "5m", "30s") and allow_of_pass and score_meets_floor(side_sc, thr):
+            ai_confirmation = "OF_PASS"
+            print(
+                f"[AI-CONFIRM] Scalp OF pass — skip AI consult "
+                f"({side_sc:.1f} ≥ {thr:.0f}) on {pair}"
             )
-        if confirmed is not True:
-            side_sc = _matching_side_score(of_trap, setup_action)
-            allow_of_pass = os.environ.get("AI_FAILOPEN_OF_PASS", "1").strip().lower() in (
-                "1", "true", "yes",
-            )
-            if allow_of_pass and side_sc >= thr:
-                ai_confirmation = "OF_PASS"
-                print(
-                    f"[AI-CONFIRM] AI unavailable — OF pass "
-                    f"({side_sc:.1f} ≥ {thr:.0f}) on {pair}"
-                )
-            else:
-                return _blocked(
-                    "AI unavailable or unclear — skip trade (no fail-open)",
-                    ai_confirmation="UNAVAILABLE",
-                )
         else:
-            ai_confirmation = "YES"
+            confirmed = await _confirm_setup_with_ai(
+                settings,
+                pair=pair,
+                timeframe=timeframe_key,
+                action=setup_action,
+                think=think,
+                of_trap=of_trap,
+            )
+            if confirmed is False:
+                side = "LONG" if setup_action == "BUY" else "SHORT"
+                pattern, score = _setup_label_and_score(think, of_trap, setup_action)
+                return _blocked(
+                    f"AI rejected confirm ({side} {pattern} / trap score {score})",
+                    ai_confirmation="NO",
+                )
+            if confirmed is not True:
+                if allow_of_pass and score_meets_floor(side_sc, thr):
+                    ai_confirmation = "OF_PASS"
+                    print(
+                        f"[AI-CONFIRM] AI unavailable — OF pass "
+                        f"({side_sc:.1f} ≥ {thr:.0f}) on {pair}"
+                    )
+                else:
+                    return _blocked(
+                        "AI unavailable or unclear — skip trade (no fail-open)",
+                        ai_confirmation="UNAVAILABLE",
+                    )
+            else:
+                ai_confirmation = "YES"
 
     out = _flatten(
         think,

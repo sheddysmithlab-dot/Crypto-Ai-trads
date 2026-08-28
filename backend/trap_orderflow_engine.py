@@ -13,6 +13,17 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 EPS = 1e-12
+# Tolerate float rounding at score floors (e.g. 74.96 displayed as 75.0).
+SCORE_FLOOR_EPS = float(os.environ.get("SCORE_FLOOR_EPS", "0.05"))
+
+
+def score_meets_floor(score: float, thr: float) -> bool:
+    return float(score) >= float(thr) - SCORE_FLOOR_EPS
+
+
+def score_below_floor(score: float, thr: float) -> bool:
+    return not score_meets_floor(score, thr)
+
 
 # Calibratable thresholds (policy defaults)
 THR_PRESSURE = 0.60
@@ -712,7 +723,7 @@ def evaluate_trap_orderflow(
     bal_pressure = abs(m1["buyer_ratio"] - 0.50) < THR_BALANCED
     bal_volume = abs(m1["buy_ratio"] - 0.50) < THR_BALANCED
     max_score = max(long_score, short_score)
-    low_conf = max_score < thr
+    low_conf = score_below_floor(max_score, thr)
 
     # Named-pattern ok flags (15m+ may bypass low conf; 1m/5m never do)
     _long_ok = _1M_LONG_OK if strict_scalp else _HTF_LONG_OK
@@ -744,12 +755,12 @@ def evaluate_trap_orderflow(
     elif strict_scalp:
         # 1m/5m: named trap preferred; score-only QUALIFIED_IMBALANCE when side ≥ floor.
         if not setup_1 and not setup_5:
-            if long_score >= thr and long_score >= short_score:
+            if score_meets_floor(long_score, thr) and long_score >= short_score:
                 signal = "LONG"
                 pattern = "QUALIFIED_IMBALANCE"
                 reason = f"scalp QUALIFIED_IMBALANCE LONG {long_score:.1f} ≥ {thr:.0f}"
                 conf = min(1.0, long_score / 100.0)
-            elif short_score >= thr and short_score > long_score:
+            elif score_meets_floor(short_score, thr) and short_score > long_score:
                 signal = "SHORT"
                 pattern = "QUALIFIED_IMBALANCE"
                 reason = f"scalp QUALIFIED_IMBALANCE SHORT {short_score:.1f} ≥ {thr:.0f}"
@@ -778,14 +789,14 @@ def evaluate_trap_orderflow(
             )
             pattern = (setup_1 or setup_5 or {}).get("name", "IMBALANCE")
             conf = max_score / 100.0
-        elif long_score >= thr and long_score >= short_score:
+        elif score_meets_floor(long_score, thr) and long_score >= short_score:
             signal = "LONG"
             pattern = (setup_1 or setup_5 or {}).get("name", "IMBALANCE")
             reason = (setup_1 or setup_5 or {}).get(
                 "reason", f"scalp LONG score {long_score:.0f} ≥ {thr:.0f}"
             )
             conf = min(1.0, long_score / 100.0)
-        elif short_score >= thr and short_score > long_score:
+        elif score_meets_floor(short_score, thr) and short_score > long_score:
             signal = "SHORT"
             pattern = (setup_1 or setup_5 or {}).get("name", "IMBALANCE")
             reason = (setup_1 or setup_5 or {}).get(
@@ -800,12 +811,12 @@ def evaluate_trap_orderflow(
     else:
         # Higher TFs: keep prior pattern / force behavior
         prefer_long = long_score >= short_score
-        if prefer_long and (long_ok_pattern or long_score >= thr or setup_5):
+        if prefer_long and (long_ok_pattern or score_meets_floor(long_score, thr) or setup_5):
             signal = "LONG"
             pattern = (setup_1 or setup_5 or {}).get("name", "IMBALANCE")
             reason = (setup_1 or setup_5 or {}).get("reason", "Higher LONG score / directional evidence")
             conf = min(1.0, long_score / 100.0)
-        elif (not prefer_long) and (short_ok_pattern or short_score >= thr or setup_5):
+        elif (not prefer_long) and (short_ok_pattern or score_meets_floor(short_score, thr) or setup_5):
             signal = "SHORT"
             pattern = (setup_1 or setup_5 or {}).get("name", "IMBALANCE")
             reason = (setup_1 or setup_5 or {}).get("reason", "Higher SHORT score / directional evidence")
@@ -883,20 +894,28 @@ def _apply_structure_conflict(
     )
 
     if signal in ("LONG", "SHORT") and struct_signal != signal:
-        pen = float(STRUCTURE_OPPOSITE_PENALTY)
-        if signal == "LONG":
-            long_s -= pen
+        pre_side = long_s if signal == "LONG" else short_s
+        if strict_scalp and score_meets_floor(pre_side, thr):
+            reason = (
+                f"{reason} | structure trap wanted {struct_signal} "
+                f"(scalp: pre-penalty {pre_side:.1f} ≥ {thr:.0f}, no penalty)"
+            )
+            details_pen = 0.0
         else:
-            short_s -= pen
-        side_sc = long_s if signal == "LONG" else short_s
-        reason = (
-            f"{reason} | structure trap wanted {struct_signal} "
-            f"(−{pen:.0f} score → {side_sc:.0f})"
-        )
-        if side_sc < thr:
-            signal = "NO_TRADE"
-            reason = f"{reason} → blocked (score {side_sc:.1f} < {thr:.0f})"
-        details_pen = pen
+            pen = float(STRUCTURE_OPPOSITE_PENALTY)
+            if signal == "LONG":
+                long_s -= pen
+            else:
+                short_s -= pen
+            side_sc = long_s if signal == "LONG" else short_s
+            reason = (
+                f"{reason} | structure trap wanted {struct_signal} "
+                f"(−{pen:.0f} score → {side_sc:.0f})"
+            )
+            if score_below_floor(side_sc, thr):
+                signal = "NO_TRADE"
+                reason = f"{reason} → blocked (score {side_sc:.1f} < {thr:.0f})"
+            details_pen = pen
     else:
         details_pen = 0.0
 
