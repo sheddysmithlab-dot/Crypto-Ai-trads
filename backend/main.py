@@ -3825,12 +3825,19 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
     agent.momentum_scan_stage = "ready"
     agent.momentum_scan_done = int(built.get("scored") or len(scores))
     agent.momentum_scan_total = int(built.get("scored") or len(scores))
-    # First boot only: shorten overlay deadline so READY flashes ~1.5s then closes.
+    # First boot only: keep overlay up through remaining intro MP4, then ~1.5s READY.
     # Do NOT rewrite on later 7-candle refreshes (would re-open overlay).
     until = float(getattr(agent, "boot_ui_until", 0) or 0)
     if until > time.time():
-        agent.boot_ui_until = time.time() + 1.5
-        print("[BOOT UI] Scan ready — overlay closes in 1.5s.")
+        started = float(getattr(agent, "boot_started_at", 0) or 0)
+        intro_left = 0.0
+        if started > 0:
+            intro_left = max(0.0, float(ENGINE_BOOT_INTRO_SEC) - (time.time() - started))
+        agent.boot_ui_until = time.time() + max(1.5, intro_left + 1.5)
+        print(
+            f"[BOOT UI] Scan ready — overlay holds intro {intro_left:.1f}s + 1.5s READY "
+            f"(closes in {max(1.5, intro_left + 1.5):.1f}s)."
+        )
 
     # Drop unfilled pending signals only — NEVER close filled open trades here.
     for pair in list(PENDING_ENTRY_SIGNALS.keys()):

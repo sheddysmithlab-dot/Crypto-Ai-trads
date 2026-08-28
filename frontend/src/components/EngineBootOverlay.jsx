@@ -12,8 +12,8 @@ const RING_C = 2 * Math.PI * RING_R;
 
 /**
  * Full-screen boot sequence after AI Engine START:
- * 0–introSec  intro MP4
- * then scan progress ring (no fixed countdown number) until momentum gate ready
+ * 0–introSec  intro MP4 (always full length — scan runs in background)
+ * then scan progress ring until momentum gate ready
  * Blocks all background interaction; Cancel stops engine immediately (no confirm).
  */
 export default function EngineBootOverlay({
@@ -34,43 +34,74 @@ export default function EngineBootOverlay({
 }) {
   const [videoOk, setVideoOk] = useState(true);
   const [smoothProgress, setSmoothProgress] = useState(0);
+  const [introElapsed, setIntroElapsed] = useState(0);
+  const [bootActive, setBootActive] = useState(false);
+  const [forceHide, setForceHide] = useState(false);
   const videoRef = useRef(null);
+  const bootGenRef = useRef(0);
 
   const remainingWs = Math.max(0, Number(warmupRemainingSec) || 0);
-  const total = Math.max(1, Number(warmupTotalSec) || TOTAL_SEC);
   const intro = Math.max(1, Number(introSec) || INTRO_SEC);
   const scanTotal = Math.max(0, Number(momentumScanTotal) || 0);
   const scanDone = Math.max(0, Number(momentumScanDone) || 0);
   const scanPct = scanTotal > 0 ? Math.min(1, scanDone / scanTotal) : (momentumGateReady ? 1 : 0);
-  const elapsedIntro = Math.max(0, Math.min(intro, total - remainingWs));
   const stage = String(momentumScanStage || '').toLowerCase();
-  const scanInProgress = !momentumGateReady && stage && stage !== 'starting';
-  const stillIntro = !momentumGateReady && elapsedIntro < intro - 0.2 && !scanInProgress;
 
-  // Client-side force-close: once READY, hide after 1.5s even if WS remaining is stuck.
-  const [forceHide, setForceHide] = useState(false);
+  // Start a boot session when engine goes active with remaining boot UI time.
   useEffect(() => {
     if (!active) {
+      setBootActive(false);
+      setIntroElapsed(0);
       setForceHide(false);
       return undefined;
     }
-    if (!momentumGateReady) {
-      return undefined;
+    if (remainingWs > 0.05 && !bootActive && !forceHide) {
+      bootGenRef.current += 1;
+      setBootActive(true);
+      setIntroElapsed(0);
+      setForceHide(false);
     }
-    // Gate already ready (e.g. page refresh while engine running) → hide immediately
-    // unless server still reports boot remaining (fresh START READY flash).
-    if (remainingWs <= 0.05) {
-      setForceHide(true);
-      return undefined;
-    }
-    const t = setTimeout(() => setForceHide(true), 1500);
-    return () => clearTimeout(t);
-  }, [active, momentumGateReady, remainingWs]);
+    return undefined;
+  }, [active, remainingWs, bootActive, forceHide]);
 
-  // ONLY show while server reports boot remaining > 0 (fresh START / mid-scan).
-  // Never use !momentumGateReady — on every browser refresh gate starts false
-  // and would flash SCAN/PREPARING even when the VPS engine is already warm.
-  const show = Boolean(active && !forceHide && remainingWs > 0.05);
+  // Local wall-clock intro — never cancelled by scan stage / early READY.
+  useEffect(() => {
+    if (!bootActive) return undefined;
+    const gen = bootGenRef.current;
+    const t0 = Date.now();
+    const id = setInterval(() => {
+      if (bootGenRef.current !== gen) return;
+      setIntroElapsed((Date.now() - t0) / 1000);
+    }, 100);
+    return () => clearInterval(id);
+  }, [bootActive]);
+
+  const stillIntro = bootActive && introElapsed < intro - 0.05;
+
+  // After intro finishes and gate is READY → close overlay.
+  useEffect(() => {
+    if (!active || !bootActive || stillIntro || !momentumGateReady) {
+      return undefined;
+    }
+    const t = setTimeout(() => {
+      setForceHide(true);
+      setBootActive(false);
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [active, bootActive, stillIntro, momentumGateReady]);
+
+  // If intro done but gate never ready, follow server remaining (safety).
+  useEffect(() => {
+    if (!active || !bootActive || stillIntro) return undefined;
+    if (remainingWs > 0.05) return undefined;
+    if (!momentumGateReady) {
+      setForceHide(true);
+      setBootActive(false);
+    }
+    return undefined;
+  }, [active, bootActive, stillIntro, remainingWs, momentumGateReady]);
+
+  const show = Boolean(active && bootActive && !forceHide);
 
   // Lock body scroll while boot overlay is up
   useEffect(() => {
@@ -88,7 +119,11 @@ export default function EngineBootOverlay({
     const el = videoRef.current;
     if (!el) return undefined;
     el.muted = true;
-    el.currentTime = 0;
+    try {
+      el.currentTime = 0;
+    } catch {
+      /* ignore */
+    }
     const play = el.play();
     if (play && typeof play.catch === 'function') {
       play.catch(() => {
@@ -130,6 +165,8 @@ export default function EngineBootOverlay({
       ? 'scoring'
       : stage || 'preparing';
 
+  const introBarPct = Math.min(100, (introElapsed / intro) * 100);
+
   return (
     <div
       className="fixed inset-0 z-[200] flex flex-col items-center justify-center pointer-events-auto"
@@ -170,7 +207,7 @@ export default function EngineBootOverlay({
             <div className="mx-auto h-1.5 w-48 sm:w-64 rounded-full bg-white/15 overflow-hidden">
               <div
                 className="h-full rounded-full bg-cyan-400 shadow-[0_0_12px_#22d3ee] transition-[width] duration-100 linear"
-                style={{ width: `${Math.min(100, (elapsedIntro / intro) * 100)}%` }}
+                style={{ width: `${introBarPct}%` }}
               />
             </div>
             <div className="mt-2 text-gray-200 text-[11px] font-mono">
