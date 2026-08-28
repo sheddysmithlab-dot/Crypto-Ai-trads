@@ -910,7 +910,7 @@ PROFIT_TRAIL_FIRST_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_FIRST_GIVEB
 PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.20"))
 # Opposite-signal flip: only exit old auto trade when unrealized gross > this %;
 # at or below → keep old open and skip the new opposite fire (no tiny flip-exits).
-FLIP_EXIT_MIN_GROSS_PCT = float(os.environ.get("FLIP_EXIT_MIN_GROSS_PCT", "0.50"))
+FLIP_EXIT_MIN_GROSS_PCT = float(os.environ.get("FLIP_EXIT_MIN_GROSS_PCT", "0.25"))
 # Do not wipe a brand-new local open just because Bybit position API lags a few seconds.
 RECONCILE_GRACE_SECONDS = float(os.environ.get("RECONCILE_GRACE_SECONDS", "30"))
 # Protective stop-loss (gross %, LONG/SHORT symmetric) — no widen for choppy:
@@ -4465,8 +4465,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                     fire_candle_ms=fire_candle_ms,
                 )
 
-        # Opposite flip: >0.50% gross → exit old + continue fire;
-        # ≤0.50% → keep old + skip new.
+        # Opposite flip (additive only): >0.25% gross → exit old + continue fire;
+        # ≤0.25% → keep old + skip new. Path lock/trail/emergency exits unchanged.
         flip = agent.close_opposite_positions_for_flip(
             side, pair, pattern=detect.get("pattern")
         )
