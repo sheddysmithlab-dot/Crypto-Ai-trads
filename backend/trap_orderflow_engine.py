@@ -8,6 +8,7 @@ already present on the candle dict.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -29,10 +30,11 @@ THR_BALANCED = 0.05
 THR_SCORE = 75.0  # overall trade confidence floor (non-trap setups, all TFs)
 THR_SCORE_5M = 75.0  # 5m non-trap / scalp floor
 THR_SCORE_1M = 75.0
-THR_SCORE_IMBALANCE_1M = 85.0  # generic IMBALANCE on 1m/30s — stricter than named traps
-THR_SCORE_INSIDE_BAR = 85.0  # brain inside_bar — higher floor than generic 75
-THR_SCORE_TRAP = 90.0  # named trap fires (non-5m)
+THR_SCORE_IMBALANCE_1M = float(os.environ.get("THR_SCORE_IMBALANCE_1M", "78"))  # 1m generic floor
+THR_SCORE_INSIDE_BAR = float(os.environ.get("THR_SCORE_INSIDE_BAR", "80"))  # brain inside_bar on 1m
+THR_SCORE_TRAP = 90.0  # named trap fires (15m+)
 THR_SCORE_TRAP_5M = 80.0  # named trap fires on 5m
+THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "80"))  # named trap fires on 1m/30s
 STRUCTURE_OPPOSITE_PENALTY = 12.0  # OF vs structure trap conflict — subtract from firing side
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
@@ -68,8 +70,10 @@ def thr_score_for_tf(exec_tf: str | None) -> float:
 
 
 def thr_trap_for_tf(exec_tf: str | None) -> float:
-    """Named trap floor: 5m ≥80; other TFs ≥90."""
+    """Named trap floor: 1m/30s ≥80; 5m ≥80; other TFs ≥90."""
     tf = (exec_tf or "").strip().lower()
+    if tf in ("1m", "30s"):
+        return float(THR_SCORE_TRAP_1M)
     if tf == "5m":
         return float(THR_SCORE_TRAP_5M)
     return float(THR_SCORE_TRAP)
@@ -729,12 +733,12 @@ def evaluate_trap_orderflow(
     elif strict_scalp and low_conf:
         # 1m/5m: score ≥ thr required — pattern / HTF / RAW bypass off
         signal = "NO_TRADE"
-        reason = f"scalp strict: score {max_score:.0f} < {thr:.0f} (pattern bypass off)"
+        reason = f"scalp strict: score {max_score:.1f} < {thr:.0f} (pattern bypass off)"
         pattern = setup_1["name"] if setup_1 else (setup_5["name"] if setup_5 else "NONE")
         conf = max_score / 100.0
     elif low_conf and not (long_ok_pattern or short_ok_pattern):
         signal = "NO_TRADE"
-        reason = f"Low confidence (max score {max_score:.0f} < {thr:.0f})"
+        reason = f"Low confidence (max score {max_score:.1f} < {thr:.0f})"
         pattern = setup_1["name"] if setup_1 else (setup_5["name"] if setup_5 else "NONE")
         conf = max_score / 100.0
     elif strict_scalp:

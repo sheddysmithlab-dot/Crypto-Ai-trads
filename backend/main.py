@@ -4886,8 +4886,18 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         print(f"[BRAIN] SKIP pattern={blocked_pat} on {pair} — no trade")
         return False
 
-    # First valid BUY/SELL after arm: skip once per pair (all charts).
-    if pair not in FIRST_DETECT_SKIPPED:
+    # First valid BUY/SELL after arm: optional skip once per pair (HTF default on; 1m/5m off).
+    skip_first_on_scalp = os.environ.get("SKIP_FIRST_DETECT_SCALP", "0").strip().lower() in (
+        "1", "true", "yes",
+    )
+    skip_first_on_htf = os.environ.get("SKIP_FIRST_DETECT", "1").strip().lower() not in (
+        "0", "false", "no",
+    )
+    should_skip_first = (
+        (is_scalp_tf(tf_l) and skip_first_on_scalp)
+        or (not is_scalp_tf(tf_l) and skip_first_on_htf)
+    )
+    if should_skip_first and pair not in FIRST_DETECT_SKIPPED:
         FIRST_DETECT_SKIPPED.add(pair)
         side = "LONG" if detect["action"] == "BUY" else "SHORT"
         _push_pattern_neon(

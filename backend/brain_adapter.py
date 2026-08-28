@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -733,11 +734,23 @@ async def evaluate_live_entry_async(
                 ai_confirmation="NO",
             )
         if confirmed is not True:
-            return _blocked(
-                "AI unavailable or unclear — skip trade (no fail-open)",
-                ai_confirmation="UNAVAILABLE",
+            side_sc = _matching_side_score(of_trap, setup_action)
+            allow_of_pass = os.environ.get("AI_FAILOPEN_OF_PASS", "1").strip().lower() in (
+                "1", "true", "yes",
             )
-        ai_confirmation = "YES"
+            if allow_of_pass and side_sc >= thr:
+                ai_confirmation = "OF_PASS"
+                print(
+                    f"[AI-CONFIRM] AI unavailable — OF pass "
+                    f"({side_sc:.1f} ≥ {thr:.0f}) on {pair}"
+                )
+            else:
+                return _blocked(
+                    "AI unavailable or unclear — skip trade (no fail-open)",
+                    ai_confirmation="UNAVAILABLE",
+                )
+        else:
+            ai_confirmation = "YES"
 
     out = _flatten(
         think,
@@ -750,8 +763,9 @@ async def evaluate_live_entry_async(
     )
     out["ai_confirmation"] = ai_confirmation
     out["ai_driven"] = False
-    if ai_confirmation == "YES" and out.get("action") in ("BUY", "SELL"):
-        out["reason"] = f"{out.get('reason', '')} | AI=YES".strip(" |")
+    if ai_confirmation in ("YES", "OF_PASS") and out.get("action") in ("BUY", "SELL"):
+        tag = "AI=YES" if ai_confirmation == "YES" else "AI=OF_PASS"
+        out["reason"] = f"{out.get('reason', '')} | {tag}".strip(" |")
     return out
 
 
