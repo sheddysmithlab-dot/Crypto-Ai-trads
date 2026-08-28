@@ -2057,6 +2057,74 @@ def _false_breakout_signal(ctx: Context, i: int, tf: TimeframeConfig) -> Optiona
                   min(score / 12.0, 1.0), hits, reasons, tf.key)
 
 
+def _classic_pattern_signal(ctx: Context, i: int, pm: PatternMatch,
+                             tf: TimeframeConfig) -> Optional[Signal]:
+    """Generic builder for star / soldiers / crows / kicker families.
+
+    Mirrors trading_instructions() family rules numerically. Reuses the
+    existing _confluence() scoring and _target_from_level() target logic so
+    no new scoring/planning code is introduced.
+    Skips neutral patterns (doji) — those need a confirm candle (out of scope).
+    """
+    if pm.direction == "neutral":
+        return None  # doji needs confirmation; not in this subset
+
+    c = ctx.series[i]
+    side = "BUY" if pm.direction == "bullish" else "SELL"
+    fam = pm.family
+    n = int(PATTERNS.get(pm.name, {}).get("candles") or 1)
+    start = max(0, i - n + 1)
+    pat_candles = ctx.series[start : i + 1]
+    if not pat_candles:
+        return None
+
+    buffer = 0.1 * c.total_range
+    pat_low = min(k.low for k in pat_candles)
+    pat_high = max(k.high for k in pat_candles)
+
+    if fam in ("kicker", "belt-hold"):
+        entry = c.close
+        if side == "BUY":
+            stop = c.low - buffer
+        else:
+            stop = c.high + buffer
+    elif fam == "soldiers":
+        entry = c.close
+        stop = pat_candles[0].low - buffer   # first candle low
+    elif fam == "crows":
+        entry = c.close
+        stop = pat_candles[0].high + buffer   # first candle high
+    else:  # star + abandoned baby + doji_star
+        entry = c.close
+        stop = (pat_low - buffer) if side == "BUY" else (pat_high + buffer)
+
+    risk = abs(entry - stop)
+    if risk <= EPS:
+        return None
+    tgt = _target_from_level(entry, side, ctx, i, tf.min_rr)
+    if side == "BUY" and tgt <= entry:
+        tgt = entry + tf.min_rr * risk
+    if side == "SELL" and tgt >= entry:
+        tgt = entry - tf.min_rr * risk
+    reward = abs(tgt - entry)
+    rr = reward / risk
+    if rr < tf.min_rr:
+        return None
+
+    hits, score, reasons = _confluence(ctx, i, side, pm.kind)
+    # small family bonus for multi-candle conviction
+    if fam in ("star", "soldiers", "crows") and n >= 3:
+        score += 1.0
+    if fam == "kicker" and c.body >= 0.5 * c.total_range:
+        score += 1.0
+    if fam == "belt-hold" and c.body >= 0.5 * c.total_range:
+        score += 1.0
+
+    return Signal(side, "classic_pattern", [pm.name], i, c.timestamp,
+                  entry, stop, tgt, risk, reward, round(rr, 2), score,
+                  min(score / 12.0, 1.0), hits, reasons, tf.key)
+
+
 # --------------------------------------------------------------------------
 #  main engine
 # --------------------------------------------------------------------------
@@ -2064,6 +2132,23 @@ _STRATEGY_MAP = {
     "pin bar": _pin_bar_signal,
     "engulfing": _engulfing_signal,
     "inside bar": _inside_bar_signal,
+    # classic families (star/soldiers/crows/kicker + all others via fallback below)
+    "star": _classic_pattern_signal,
+    "soldiers": _classic_pattern_signal,
+    "crows": _classic_pattern_signal,
+    "kicker": _classic_pattern_signal,
+    "piercing": _classic_pattern_signal,
+    "doji": _classic_pattern_signal,
+    "harami-combo": _classic_pattern_signal,
+    "engulfing-combo": _classic_pattern_signal,
+    "tweezer": _classic_pattern_signal,
+    "three-methods": _classic_pattern_signal,
+    "swallow": _classic_pattern_signal,
+    "separating-lines": _classic_pattern_signal,
+    "belt-hold": _classic_pattern_signal,
+    "three-line-strike": _classic_pattern_signal,
+    "ladder": _classic_pattern_signal,
+    "meeting-lines": _classic_pattern_signal,
 }
 
 
@@ -2080,7 +2165,7 @@ def detect_signals(candles: Sequence[Candle], timeframe: str = "1h",
     n = len(candles)
     signals: List[Signal] = []
 
-    # scan the whole series (or a recent window) for the 4 strategies
+    # scan the whole series (or a recent window) for all pattern families
     start = 0 if lookback is None else max(0, n - lookback)
     for i in range(start, n):
         # 1) false breakout (structural, detected separately)
@@ -2088,11 +2173,9 @@ def detect_signals(candles: Sequence[Candle], timeframe: str = "1h",
         if fb:
             signals.append(fb)
 
-        # 2) pattern-based strategies
+        # 2) pattern-based strategies — specialized builders first, else classic
         for pm in detect_at(candles, i):
-            builder = _STRATEGY_MAP.get(pm.family)
-            if builder is None:
-                continue
+            builder = _STRATEGY_MAP.get(pm.family, _classic_pattern_signal)
             sig = builder(ctx, i, pm, tf)
             if sig:
                 signals.append(sig)

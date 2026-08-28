@@ -114,6 +114,87 @@ def _matching_side_score(of_trap: Optional[dict], action: str) -> float:
     return max(float(of_trap.get("long_score") or 0), float(of_trap.get("short_score") or 0))
 
 
+def _brain_side_ok(
+    think: dict,
+    action: str,
+    timeframe_key: str,
+) -> tuple[bool, float, str]:
+    """Brain/pattern layer: matching signal or trap must clear confluence + R:R floors."""
+    if action not in ("BUY", "SELL"):
+        return False, 0.0, "not actionable"
+    tf = _norm_tf(timeframe_key)
+    tf_cfg = _b.TIMEFRAMES.get(tf, _b.TIMEFRAMES["1h"])
+    min_sc = float(tf_cfg.min_score)
+    min_rr = float(tf_cfg.min_rr)
+
+    sig = think.get("signal")
+    if sig is not None:
+        if sig.side != action:
+            sc = float(getattr(sig, "score", 0) or 0)
+            return False, sc, f"brain signal {sig.side} != {action}"
+        sc = float(getattr(sig, "score", 0) or 0)
+        rr = float(getattr(sig, "rr", 0) or 0)
+        if sc < min_sc:
+            return False, sc, f"brain score {sc:.1f} < {min_sc:.0f}"
+        if rr < min_rr - 1e-6:
+            return False, sc, f"brain R:R {rr:.2f} < {min_rr:.0f}"
+        return True, sc, "ok"
+
+    trap = think.get("trap")
+    if trap is not None and getattr(trap, "side", None) == action:
+        sc = float(getattr(trap, "score", 0) or 0)
+        rr = float(getattr(trap, "rr", 0) or 0)
+        if sc < min_sc:
+            return False, sc, f"trap score {sc:.1f} < {min_sc:.0f}"
+        if rr < min_rr - 1e-6:
+            return False, sc, f"trap R:R {rr:.2f} < {min_rr:.0f}"
+        return True, sc, "trap"
+
+    return False, 0.0, "no qualifying brain signal/trap"
+
+
+def _of_side_ok(
+    of_trap: Optional[dict],
+    action: str,
+    timeframe_key: str,
+    think: dict,
+) -> tuple[bool, float, str]:
+    """Order-flow layer: final_signal must match action and side score ≥ setup floor."""
+    if action not in ("BUY", "SELL"):
+        return False, 0.0, "not actionable"
+    if not of_trap:
+        return False, 0.0, "OF missing"
+    want_sig = "LONG" if action == "BUY" else "SHORT"
+    of_sig = (of_trap or {}).get("final_signal")
+    if of_sig != want_sig:
+        side_sc = _matching_side_score(of_trap, action)
+        return False, side_sc, f"OF {of_sig or 'NONE'} != {want_sig}"
+    tf = _norm_tf(timeframe_key)
+    strategy = _brain_strategy_from_think(think)
+    pattern = (of_trap or {}).get("pattern")
+    thr = thr_score_for_setup(tf, pattern, brain_strategy=strategy)
+    side_sc = _matching_side_score(of_trap, action)
+    if score_below_floor(side_sc, thr):
+        return False, side_sc, f"OF score {side_sc:.1f} < {thr:.0f}"
+    return True, side_sc, "ok"
+
+
+def _dual_score_passes(
+    action: str,
+    of_trap: Optional[dict],
+    think: dict,
+    timeframe_key: str,
+) -> tuple[bool, str, float, float]:
+    """Both brain confluence and OF side score must pass (all TFs, all patterns)."""
+    b_ok, b_sc, b_msg = _brain_side_ok(think, action, timeframe_key)
+    if not b_ok:
+        return False, f"Brain gate: {b_msg}", b_sc, 0.0
+    o_ok, o_sc, o_msg = _of_side_ok(of_trap, action, timeframe_key, think)
+    if not o_ok:
+        return False, f"OF gate: {o_msg}", b_sc, o_sc
+    return True, f"brain={b_sc:.1f} OF={o_sc:.1f}", b_sc, o_sc
+
+
 def _ai_yes_thr_for_tf(
     timeframe_key: str,
     pattern: str | None = None,
@@ -129,28 +210,9 @@ def _setup_meets_ai_confirm_threshold(
     timeframe_key: str,
     think: dict,
 ) -> bool:
-    """AI is called only when OF confidence clears the setup YES floor."""
-    if action not in ("BUY", "SELL"):
-        return False
-    tf = _norm_tf(timeframe_key)
-    pattern = (of_trap or {}).get("pattern")
-    strategy = _brain_strategy_from_think(think)
-    thr = _ai_yes_thr_for_tf(tf, pattern, brain_strategy=strategy)
-    of_score = _matching_side_score(of_trap, action)
-    if of_score >= thr - 1e-6:
-        return True
-    # Strict score path on 1m/5m — never call AI below floor
-    if tf in ("1m", "30s", "5m"):
-        return False
-    sig = think.get("signal")
-    tf_cfg = _b.TIMEFRAMES.get(tf, _b.TIMEFRAMES["1h"])
-    if sig is not None and (not of_trap or of_score <= 0):
-        try:
-            if float(getattr(sig, "score", 0) or 0) >= float(tf_cfg.min_score):
-                return True
-        except (TypeError, ValueError):
-            pass
-    return False
+    """AI consult only when BOTH brain confluence and OF side score clear floors."""
+    ok, _, _, _ = _dual_score_passes(action, of_trap, think, timeframe_key)
+    return ok
 
 
 def _setup_label_and_score(think: dict, of_trap: Optional[dict], action: str) -> tuple:
@@ -198,8 +260,8 @@ def _build_confirm_user_prompt(
     lines = [
         f"PATTERN DETECTED → confirm {side} {pattern}.",
         f"Pair={pair} TF={timeframe} ({tf_cfg.label}).",
-        f"HARD RULE: reply YES only if confidence ≥ {thr:.0f}% on this TF "
-        f"(overall ≥75; 5m traps ≥80; other traps ≥90). Otherwise NO.",
+        f"HARD RULE: reply YES only if BOTH brain confluence ≥ {tf_cfg.min_score} "
+        f"AND order-flow side_score ≥ {thr:.0f} on this TF. Otherwise NO.",
         "",
         "ANALYZE (policy):",
         "- LONG vs SHORT quality vs market structure",
@@ -214,7 +276,8 @@ def _build_confirm_user_prompt(
         f"- Note: {tf_cfg.note}",
         "",
         "SETUP FACTS:",
-        f"- Detected side: {side} · pattern={pattern} · side_score={side_score:.1f} (need ≥{thr:.0f})",
+        f"- Detected side: {side} · pattern={pattern} · "
+        f"OF={side_score:.1f} (≥{thr:.0f}) · brain≥{tf_cfg.min_score} required",
     ]
     if trap_score is not None and trap_score != side_score:
         lines.append(f"- Trap/pattern score field: {trap_score}")
@@ -357,10 +420,17 @@ async def _confirm_setup_with_ai(
             if side_score < thr:
                 print(
                     f"[AI-CONFIRM] '{provider}' YES ignored — "
-                    f"side_score {side_score:.1f} < floor {thr:.0f}"
+                    f"OF side_score {side_score:.1f} < floor {thr:.0f}"
                 )
                 return False
-            print(f"[AI-CONFIRM] '{provider}' → YES  (raw: {raw!r}, score={side_score:.1f}≥{thr:.0f})")
+            b_ok, _, b_sc, o_sc = _dual_score_passes(action, of_trap, think, timeframe)
+            if not b_ok:
+                print(f"[AI-CONFIRM] '{provider}' YES ignored — dual score failed after YES")
+                return False
+            print(
+                f"[AI-CONFIRM] '{provider}' → YES  (raw: {raw!r}, "
+                f"brain={b_sc:.1f} OF={o_sc:.1f}≥{thr:.0f})"
+            )
             return True
         print(f"[AI-CONFIRM] '{provider}' unclear {raw!r} — skip trade.")
         return None
@@ -586,29 +656,14 @@ def _gate_scalp_of_score(
     timeframe_key: str,
     think: Optional[dict] = None,
 ) -> str:
-    """1m/5m: BUY/SELL only when OF side score ≥ setup floor (inside_bar≥85; trap≥80/90; ≥75)."""
-    tf = _norm_tf(timeframe_key)
-    if tf not in ("1m", "5m", "30s"):
-        return action
+    """All TFs: BUY/SELL only when BOTH brain confluence and OF side score pass."""
     if action not in ("BUY", "SELL"):
         return action
-    pattern = (of_trap or {}).get("pattern")
-    strategy = _brain_strategy_from_think(think or {})
-    thr = thr_score_for_setup(tf, pattern, brain_strategy=strategy)
-    if not of_trap:
-        print(f"[AI-BRAIN] scalp gate: no OF result — HOLD (need score ≥ {thr:.0f})")
+    ok, msg, b_sc, o_sc = _dual_score_passes(action, of_trap, think or {}, timeframe_key)
+    if not ok:
+        print(f"[AI-BRAIN] dual gate blocked {action}: {msg} (brain={b_sc:.1f} OF={o_sc:.1f})")
         return "HOLD"
-    long_s = float(of_trap.get("long_score") or 0)
-    short_s = float(of_trap.get("short_score") or 0)
-    if action == "BUY":
-        if score_below_floor(long_s, thr):
-            print(f"[AI-BRAIN] scalp gate: BUY blocked LONG={long_s:.0f} < {thr:.0f}")
-            return "HOLD"
-        return "BUY"
-    if score_below_floor(short_s, thr):
-        print(f"[AI-BRAIN] scalp gate: SELL blocked SHORT={short_s:.0f} < {thr:.0f}")
-        return "HOLD"
-    return "SELL"
+    return action
 
 
 def _gate_1m_of_score(
@@ -623,28 +678,18 @@ def _gate_1m_of_score(
 def _fallback_action_from_brain_and_of(
     think: dict, of_trap: Optional[dict], timeframe_key: str = "1m"
 ) -> str:
-    """When AI unavailable: prefer strong order-flow trap, else brain verdict."""
-    tf = _norm_tf(timeframe_key)
-    pattern = (of_trap or {}).get("pattern") if of_trap else None
-    strategy = _brain_strategy_from_think(think)
-    thr = thr_score_for_setup(tf, pattern, brain_strategy=strategy)
-    if of_trap:
-        sig = of_trap.get("final_signal")
-        long_s = float(of_trap.get("long_score") or 0)
-        short_s = float(of_trap.get("short_score") or 0)
-        if sig == "LONG" and score_meets_floor(long_s, thr):
-            return "BUY"
-        if sig == "SHORT" and score_meets_floor(short_s, thr):
-            return "SELL"
-        if tf in ("1m", "5m", "30s"):
-            # Scalp: never fall through to brain pattern if OF score is below floor
-            return "HOLD"
-        if sig == "NO_TRADE":
-            pass
-    if tf in ("1m", "5m", "30s"):
+    """Pick BUY/SELL only when BOTH brain pattern/trap AND OF pass on the same side."""
+    if not of_trap:
         return "HOLD"
-    brain_verdict = think.get("verdict", "HOLD")
-    return brain_verdict if brain_verdict in ("BUY", "SELL") else "HOLD"
+    candidates: list[tuple[str, float]] = []
+    for action in ("BUY", "SELL"):
+        ok, _, b_sc, o_sc = _dual_score_passes(action, of_trap, think, timeframe_key)
+        if ok:
+            candidates.append((action, o_sc + b_sc * 0.1))
+    if not candidates:
+        return "HOLD"
+    candidates.sort(key=lambda x: -x[1])
+    return candidates[0][0]
 
 
 # ─── public API ───────────────────────────────────────────────────────────────
@@ -745,8 +790,14 @@ async def evaluate_live_entry_async(
             return _blocked(f"Order-flow NO_TRADE — skip | {(of_trap or {}).get('primary_reason') or ''}")
 
         sig = think.get("signal")
-        if sig is None and think.get("verdict") not in ("BUY", "SELL"):
+        if sig is None and think.get("trap") is None:
             return _blocked("Backend brain signal missing — skip trade")
+
+        ok_dual, dual_msg, b_sc, o_sc = _dual_score_passes(
+            setup_action, of_trap, think, timeframe_key
+        )
+        if not ok_dual:
+            return _blocked(f"Dual score failed — {dual_msg} (brain={b_sc:.1f} OF={o_sc:.1f})")
 
         if settings is None:
             return _blocked("Backend settings missing — skip trade")
@@ -760,20 +811,15 @@ async def evaluate_live_entry_async(
         thr = thr_score_for_setup(tf, (of_trap or {}).get("pattern"), brain_strategy=strategy)
         side_sc = _matching_side_score(of_trap, setup_action)
 
-        if not _setup_meets_ai_confirm_threshold(setup_action, of_trap, timeframe_key, think):
-            return _blocked(
-                f"OF score {side_sc:.1f} < floor {thr:.0f} — skip trade"
-            )
-
         allow_of_pass = os.environ.get("AI_FAILOPEN_OF_PASS", "1").strip().lower() in (
             "1", "true", "yes",
         )
-        # Scalp fast-path: strong OF clears floor → skip AI (cooldown/outage safe).
+        # Scalp fast-path: dual score already passed → skip AI when OF clears floor.
         if tf in ("1m", "5m", "30s") and allow_of_pass and score_meets_floor(side_sc, thr):
             ai_confirmation = "OF_PASS"
             print(
                 f"[AI-CONFIRM] Scalp OF pass — skip AI consult "
-                f"({side_sc:.1f} ≥ {thr:.0f}) on {pair}"
+                f"(brain={b_sc:.1f} OF={side_sc:.1f}≥{thr:.0f}) on {pair}"
             )
         else:
             confirmed = await _confirm_setup_with_ai(
@@ -792,11 +838,11 @@ async def evaluate_live_entry_async(
                     ai_confirmation="NO",
                 )
             if confirmed is not True:
-                if allow_of_pass and score_meets_floor(side_sc, thr):
+                if allow_of_pass and score_meets_floor(side_sc, thr) and ok_dual:
                     ai_confirmation = "OF_PASS"
                     print(
                         f"[AI-CONFIRM] AI unavailable — OF pass "
-                        f"({side_sc:.1f} ≥ {thr:.0f}) on {pair}"
+                        f"(brain={b_sc:.1f} OF={side_sc:.1f}≥{thr:.0f}) on {pair}"
                     )
                 else:
                     return _blocked(
