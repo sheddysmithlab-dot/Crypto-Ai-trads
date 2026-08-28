@@ -742,15 +742,26 @@ def evaluate_trap_orderflow(
         pattern = setup_1["name"] if setup_1 else (setup_5["name"] if setup_5 else "NONE")
         conf = max_score / 100.0
     elif strict_scalp:
-        # 1m/5m: named trap required — no raw score-only IMBALANCE fires.
+        # 1m/5m: named trap preferred; score-only QUALIFIED_IMBALANCE when side ≥ floor.
         if not setup_1 and not setup_5:
-            signal = "NO_TRADE"
-            reason = (
-                "No named trap/setup — raw IMBALANCE blocked "
-                "(need ABSORPTION/SELL_TRAP/FAKE_BREAKOUT/BUY_TRAP etc.)"
-            )
-            pattern = "IMBALANCE"
-            conf = max_score / 100.0
+            if long_score >= thr and long_score >= short_score:
+                signal = "LONG"
+                pattern = "QUALIFIED_IMBALANCE"
+                reason = f"scalp QUALIFIED_IMBALANCE LONG {long_score:.1f} ≥ {thr:.0f}"
+                conf = min(1.0, long_score / 100.0)
+            elif short_score >= thr and short_score > long_score:
+                signal = "SHORT"
+                pattern = "QUALIFIED_IMBALANCE"
+                reason = f"scalp QUALIFIED_IMBALANCE SHORT {short_score:.1f} ≥ {thr:.0f}"
+                conf = min(1.0, short_score / 100.0)
+            else:
+                signal = "NO_TRADE"
+                reason = (
+                    f"No trap setup — score below {thr:.0f} "
+                    f"(L={long_score:.1f} S={short_score:.1f})"
+                )
+                pattern = "IMBALANCE"
+                conf = max_score / 100.0
         elif bias_5m == "bearish" and long_score >= short_score:
             signal = "NO_TRADE"
             reason = (
@@ -884,7 +895,7 @@ def _apply_structure_conflict(
         )
         if side_sc < thr:
             signal = "NO_TRADE"
-            reason = f"{reason} → blocked (score {side_sc:.0f} < {thr:.0f})"
+            reason = f"{reason} → blocked (score {side_sc:.1f} < {thr:.0f})"
         details_pen = pen
     else:
         details_pen = 0.0
