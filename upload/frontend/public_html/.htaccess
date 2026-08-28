@@ -1,4 +1,4 @@
-﻿# Force fresh HTML so hard refresh picks new hashed assets
+# Force fresh HTML so hard refresh picks new hashed assets
 <IfModule mod_headers.c>
   <FilesMatch "index\.html$">
     Header set Cache-Control "no-cache, no-store, must-revalidate"

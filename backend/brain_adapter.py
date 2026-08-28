@@ -91,6 +91,17 @@ _CONFIRM_SYSTEM = (
 )
 
 
+def _brain_strategy_from_think(think: dict) -> Optional[str]:
+    sig = think.get("signal")
+    if sig is None:
+        return None
+    strat = getattr(sig, "strategy", None)
+    if strat:
+        return str(strat)
+    patterns = getattr(sig, "patterns", None) or []
+    return str(patterns[0]) if patterns else None
+
+
 def _matching_side_score(of_trap: Optional[dict], action: str) -> float:
     of_trap = of_trap or {}
     if action == "BUY":
@@ -100,9 +111,13 @@ def _matching_side_score(of_trap: Optional[dict], action: str) -> float:
     return max(float(of_trap.get("long_score") or 0), float(of_trap.get("short_score") or 0))
 
 
-def _ai_yes_thr_for_tf(timeframe_key: str, pattern: str | None = None) -> float:
-    """AI YES floor: 5m traps ≥80; other traps ≥90; otherwise overall ≥75."""
-    return float(thr_score_for_setup(timeframe_key, pattern))
+def _ai_yes_thr_for_tf(
+    timeframe_key: str,
+    pattern: str | None = None,
+    *,
+    brain_strategy: str | None = None,
+) -> float:
+    return float(thr_score_for_setup(timeframe_key, pattern, brain_strategy=brain_strategy))
 
 
 def _setup_meets_ai_confirm_threshold(
@@ -116,7 +131,8 @@ def _setup_meets_ai_confirm_threshold(
         return False
     tf = _norm_tf(timeframe_key)
     pattern = (of_trap or {}).get("pattern")
-    thr = _ai_yes_thr_for_tf(tf, pattern)
+    strategy = _brain_strategy_from_think(think)
+    thr = _ai_yes_thr_for_tf(tf, pattern, brain_strategy=strategy)
     of_score = _matching_side_score(of_trap, action)
     if of_score >= thr:
         return True
@@ -259,17 +275,18 @@ async def _confirm_setup_with_ai(
     Returns:
       True  — YES
       False — NO (skip trade)
-      None  — unreachable / not configured / cool-down (fail-open → fire)
+      None  — unreachable / not configured / cool-down (skip trade — no fail-open)
     """
     provider = getattr(settings, "ai_provider", "none")
     api_key = getattr(settings, "ai_api_key", "") or ""
     if provider == "none" or not api_key:
+        print("[AI-CONFIRM] AI not configured — skip trade.")
         return None
 
     try:
         from main import agent as _agent
         if not _agent.ai_consult_allowed():
-            print("[AI-CONFIRM] Cool-down active — fail-open (no AI block).")
+            print("[AI-CONFIRM] Cool-down active — skip trade.")
             return None
     except Exception:
         pass
@@ -298,7 +315,7 @@ async def _confirm_setup_with_ai(
     cfg = _DEFAULTS.get(provider, _DEFAULTS["custom"])
     base_url = (getattr(settings, "ai_base_url", None) or cfg["base_url"] or "").rstrip("/")
     if not base_url:
-        print(f"[AI-CONFIRM] No base_url for '{provider}' — fail-open.")
+        print(f"[AI-CONFIRM] No base_url for '{provider}' — skip trade.")
         return None
     model = getattr(settings, "ai_model", None) or cfg["model"]
 
@@ -321,7 +338,7 @@ async def _confirm_setup_with_ai(
                 },
             )
         if resp.status_code != 200:
-            print(f"[AI-CONFIRM] '{provider}' HTTP {resp.status_code} — fail-open.")
+            print(f"[AI-CONFIRM] '{provider}' HTTP {resp.status_code} — skip trade.")
             _notify_ai_health(False)
             return None
         raw = resp.json()["choices"][0]["message"]["content"].strip().upper()
@@ -331,7 +348,8 @@ async def _confirm_setup_with_ai(
             print(f"[AI-CONFIRM] '{provider}' → NO  (raw: {raw!r}) — skip trade.")
             return False
         if token.startswith("YES"):
-            thr = _ai_yes_thr_for_tf(timeframe, (of_trap or {}).get("pattern"))
+            strategy = _brain_strategy_from_think(think)
+            thr = _ai_yes_thr_for_tf(timeframe, (of_trap or {}).get("pattern"), brain_strategy=strategy)
             side_score = _matching_side_score(of_trap, action)
             if side_score < thr:
                 print(
@@ -341,10 +359,10 @@ async def _confirm_setup_with_ai(
                 return False
             print(f"[AI-CONFIRM] '{provider}' → YES  (raw: {raw!r}, score={side_score:.1f}≥{thr:.0f})")
             return True
-        print(f"[AI-CONFIRM] '{provider}' unclear {raw!r} — fail-open.")
+        print(f"[AI-CONFIRM] '{provider}' unclear {raw!r} — skip trade.")
         return None
     except Exception as exc:
-        print(f"[AI-CONFIRM] API error ({exc}) — fail-open.")
+        print(f"[AI-CONFIRM] API error ({exc}) — skip trade.")
         _notify_ai_health(False)
         return None
 
@@ -515,15 +533,21 @@ def _run_orderflow_trap(
         return None
 
 
-def _gate_scalp_of_score(action: str, of_trap: Optional[dict], timeframe_key: str) -> str:
-    """1m/5m: BUY/SELL only when OF side score ≥ setup floor (5m trap≥80; else trap≥90 / ≥75)."""
+def _gate_scalp_of_score(
+    action: str,
+    of_trap: Optional[dict],
+    timeframe_key: str,
+    think: Optional[dict] = None,
+) -> str:
+    """1m/5m: BUY/SELL only when OF side score ≥ setup floor (inside_bar≥85; trap≥80/90; ≥75)."""
     tf = _norm_tf(timeframe_key)
     if tf not in ("1m", "5m", "30s"):
         return action
     if action not in ("BUY", "SELL"):
         return action
     pattern = (of_trap or {}).get("pattern")
-    thr = thr_score_for_setup(tf, pattern)
+    strategy = _brain_strategy_from_think(think or {})
+    thr = thr_score_for_setup(tf, pattern, brain_strategy=strategy)
     if not of_trap:
         print(f"[AI-BRAIN] scalp gate: no OF result — HOLD (need score ≥ {thr:.0f})")
         return "HOLD"
@@ -540,8 +564,13 @@ def _gate_scalp_of_score(action: str, of_trap: Optional[dict], timeframe_key: st
     return "SELL"
 
 
-def _gate_1m_of_score(action: str, of_trap: Optional[dict], timeframe_key: str) -> str:
-    return _gate_scalp_of_score(action, of_trap, timeframe_key)
+def _gate_1m_of_score(
+    action: str,
+    of_trap: Optional[dict],
+    timeframe_key: str,
+    think: Optional[dict] = None,
+) -> str:
+    return _gate_scalp_of_score(action, of_trap, timeframe_key, think=think)
 
 
 def _fallback_action_from_brain_and_of(
@@ -550,7 +579,8 @@ def _fallback_action_from_brain_and_of(
     """When AI unavailable: prefer strong order-flow trap, else brain verdict."""
     tf = _norm_tf(timeframe_key)
     pattern = (of_trap or {}).get("pattern") if of_trap else None
-    thr = thr_score_for_setup(tf, pattern)
+    strategy = _brain_strategy_from_think(think)
+    thr = thr_score_for_setup(tf, pattern, brain_strategy=strategy)
     if of_trap:
         sig = of_trap.get("final_signal")
         long_s = float(of_trap.get("long_score") or 0)
@@ -586,9 +616,9 @@ async def evaluate_live_entry_async(
     risk_pct: float = 0.01,
     settings=None,           # settings_store from main.py
 ) -> Dict[str, Any]:
-    """Async entry: brain + order-flow set BUY/SELL; AI only confirms YES/NO.
+    """Async entry: brain + order-flow set BUY/SELL; AI must confirm YES.
 
-    AI NO → NO_TRADE. AI YES or unreachable → fire (fail-open).
+    Missing brain/OF/AI signal → NO_TRADE (no fail-open).
     """
     tf = _norm_tf(timeframe_key)
     risk_pct_pct = float(risk_pct) * 100.0
@@ -637,52 +667,77 @@ async def evaluate_live_entry_async(
 
     # Direction comes only from brain + order-flow (never invented by AI).
     setup_action = _fallback_action_from_brain_and_of(think, of_trap, timeframe_key)
-    setup_action = _gate_1m_of_score(setup_action or "HOLD", of_trap, timeframe_key)
+    setup_action = _gate_1m_of_score(setup_action or "HOLD", of_trap, timeframe_key, think=think)
 
-    ai_confirmation = "SKIP"
-    if setup_action in ("BUY", "SELL") and settings is not None:
-        # AI only on candles that already clear agent confidence / OF TF floor.
+    def _blocked(reason: str, *, ai_confirmation: str = "MISSING") -> Dict[str, Any]:
+        side = "LONG" if setup_action == "BUY" else "SHORT" if setup_action == "SELL" else None
+        rejected = _flatten(
+            think,
+            ai_action="HOLD",
+            pair=pair,
+            timeframe_key=timeframe_key,
+            risk_pct_pct=risk_pct_pct,
+            equity=float(account_balance),
+            of_trap=of_trap,
+        )
+        rejected["action"] = "NO_TRADE"
+        rejected["ai_confirmation"] = ai_confirmation
+        rejected["ai_driven"] = False
+        if side:
+            rejected["direction"] = side
+        rejected["reason"] = reason
+        return rejected
+
+    ai_confirmation = "MISSING"
+    if setup_action in ("BUY", "SELL"):
+        if not of_trap:
+            return _blocked("Backend OF signal missing — skip trade")
+
+        of_sig = (of_trap or {}).get("final_signal")
+        if of_sig == "NO_TRADE":
+            return _blocked(f"Order-flow NO_TRADE — skip | {(of_trap or {}).get('primary_reason') or ''}")
+
+        sig = think.get("signal")
+        if sig is None and think.get("verdict") not in ("BUY", "SELL"):
+            return _blocked("Backend brain signal missing — skip trade")
+
+        if settings is None:
+            return _blocked("Backend settings missing — skip trade")
+
+        provider = getattr(settings, "ai_provider", "none")
+        api_key = getattr(settings, "ai_api_key", "") or ""
+        if provider == "none" or not api_key:
+            return _blocked("AI not configured — skip trade (no fail-open)")
+
+        strategy = _brain_strategy_from_think(think)
         if not _setup_meets_ai_confirm_threshold(setup_action, of_trap, timeframe_key, think):
-            thr = thr_score_for_setup(tf, (of_trap or {}).get("pattern"))
+            thr = thr_score_for_setup(tf, (of_trap or {}).get("pattern"), brain_strategy=strategy)
             side_sc = _matching_side_score(of_trap, setup_action)
-            print(
-                f"[AI-CONFIRM] Skip call {pair} {timeframe_key}: "
-                f"score {side_sc:.1f} < floor {thr:.0f} — no AI, HOLD"
+            return _blocked(
+                f"OF score {side_sc:.1f} < floor {thr:.0f} — skip trade"
             )
-            setup_action = "HOLD"
-        else:
-            confirmed = await _confirm_setup_with_ai(
-                settings,
-                pair=pair,
-                timeframe=timeframe_key,
-                action=setup_action,
-                think=think,
-                of_trap=of_trap,
+
+        confirmed = await _confirm_setup_with_ai(
+            settings,
+            pair=pair,
+            timeframe=timeframe_key,
+            action=setup_action,
+            think=think,
+            of_trap=of_trap,
+        )
+        if confirmed is False:
+            side = "LONG" if setup_action == "BUY" else "SHORT"
+            pattern, score = _setup_label_and_score(think, of_trap, setup_action)
+            return _blocked(
+                f"AI rejected confirm ({side} {pattern} / trap score {score})",
+                ai_confirmation="NO",
             )
-            if confirmed is False:
-                side = "LONG" if setup_action == "BUY" else "SHORT"
-                pattern, score = _setup_label_and_score(think, of_trap, setup_action)
-                rejected = _flatten(
-                    think,
-                    ai_action="HOLD",
-                    pair=pair,
-                    timeframe_key=timeframe_key,
-                    risk_pct_pct=risk_pct_pct,
-                    equity=float(account_balance),
-                    of_trap=of_trap,
-                )
-                rejected["action"] = "NO_TRADE"
-                rejected["ai_confirmation"] = "NO"
-                rejected["ai_driven"] = False
-                rejected["reason"] = (
-                    f"AI rejected confirm ({side} {pattern} / trap score {score}) | "
-                    f"{rejected.get('reason') or ''}"
-                ).strip(" |")
-                return rejected
-            if confirmed is True:
-                ai_confirmation = "YES"
-            else:
-                ai_confirmation = "SKIP"  # unreachable → fail-open
+        if confirmed is not True:
+            return _blocked(
+                "AI unavailable or unclear — skip trade (no fail-open)",
+                ai_confirmation="UNAVAILABLE",
+            )
+        ai_confirmation = "YES"
 
     out = _flatten(
         think,
@@ -695,10 +750,8 @@ async def evaluate_live_entry_async(
     )
     out["ai_confirmation"] = ai_confirmation
     out["ai_driven"] = False
-    if ai_confirmation != "SKIP" and out.get("action") in ("BUY", "SELL"):
-        out["reason"] = f"{out.get('reason', '')} | AI={ai_confirmation}".strip(" |")
-    elif ai_confirmation == "SKIP" and out.get("action") in ("BUY", "SELL"):
-        out["reason"] = f"{out.get('reason', '')} | AI=SKIP (fail-open)".strip(" |")
+    if ai_confirmation == "YES" and out.get("action") in ("BUY", "SELL"):
+        out["reason"] = f"{out.get('reason', '')} | AI=YES".strip(" |")
     return out
 
 
@@ -754,7 +807,18 @@ def evaluate_live_entry(
         candles_5m=candles_5m or (candles if tf == "5m" else None),
     )
     ai_action = _fallback_action_from_brain_and_of(think, of_trap, timeframe_key)
-    ai_action = _gate_1m_of_score(ai_action or "HOLD", of_trap, timeframe_key)
+    ai_action = _gate_1m_of_score(ai_action or "HOLD", of_trap, timeframe_key, think=think)
+    if ai_action in ("BUY", "SELL"):
+        return {
+            "action": "NO_TRADE",
+            "reason": "AI confirmation required — use async scan path",
+            "engine": ENGINE_NAME,
+            "entry_pattern": ENTRY_PATTERN_NAME,
+            "timeframe_key": timeframe_key,
+            "pair": pair,
+            "ai_driven": False,
+            "ai_confirmation": "MISSING",
+        }
     out = _flatten(
         think,
         ai_action=ai_action,

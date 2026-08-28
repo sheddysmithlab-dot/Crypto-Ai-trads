@@ -29,10 +29,16 @@ THR_BALANCED = 0.05
 THR_SCORE = 75.0  # overall trade confidence floor (non-trap setups, all TFs)
 THR_SCORE_5M = 75.0  # 5m non-trap / scalp floor
 THR_SCORE_1M = 75.0
+THR_SCORE_IMBALANCE_1M = 85.0  # generic IMBALANCE on 1m/30s — stricter than named traps
+THR_SCORE_INSIDE_BAR = 85.0  # brain inside_bar — higher floor than generic 75
 THR_SCORE_TRAP = 90.0  # named trap fires (non-5m)
 THR_SCORE_TRAP_5M = 80.0  # named trap fires on 5m
+STRUCTURE_OPPOSITE_PENALTY = 12.0  # OF vs structure trap conflict — subtract from firing side
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
+# Last N closed candles: up/down balance → ±12 OF score (10/10 = 0; LONG + net up, SHORT + net down).
+FLOW_LOOKBACK_CANDLES = 20
+FLOW_SCORE_MAX = 12.0
 
 # Named OF trap patterns — fire only when side score ≥ trap floor for TF
 _TRAP_FIRE_PATTERNS = frozenset({
@@ -69,11 +75,24 @@ def thr_trap_for_tf(exec_tf: str | None) -> float:
     return float(THR_SCORE_TRAP)
 
 
-def thr_score_for_setup(exec_tf: str | None, pattern: str | None = None) -> float:
-    """Floor for a specific setup: 5m traps ≥80; other traps ≥90; non-trap ≥75."""
+def thr_score_for_setup(
+    exec_tf: str | None,
+    pattern: str | None = None,
+    *,
+    brain_strategy: str | None = None,
+) -> float:
+    """Floor for a specific setup: inside_bar ≥85; 5m traps ≥80; other traps ≥90; 1m IMBALANCE ≥85."""
+    strat = (brain_strategy or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if strat == "inside_bar":
+        return float(THR_SCORE_INSIDE_BAR)
     name = (pattern or "").strip().upper()
+    if "INSIDE_BAR" in name:
+        return float(THR_SCORE_INSIDE_BAR)
     if name in _TRAP_FIRE_PATTERNS:
         return thr_trap_for_tf(exec_tf)
+    tf = (exec_tf or "").strip().lower()
+    if tf in ("1m", "30s"):
+        return float(THR_SCORE_IMBALANCE_1M)
     return float(thr_score_for_tf(exec_tf))
 
 
@@ -488,6 +507,23 @@ def _detect_patterns(
     return list(best.values())
 
 
+def _flow_score_20(bars: Sequence[FlowBar], i: int) -> dict:
+    """Up/down count on last FLOW_LOOKBACK_CANDLES bars → per-side flow score in ±FLOW_SCORE_MAX."""
+    n = FLOW_LOOKBACK_CANDLES
+    start = max(0, i - n + 1)
+    window = bars[start : i + 1]
+    up = sum(1 for b in window if b.close > b.open)
+    down = sum(1 for b in window if b.close < b.open)
+    net = up - down
+    scale = FLOW_SCORE_MAX / float(n)
+    return {
+        "up_20": up,
+        "down_20": down,
+        "flow_long": net * scale,
+        "flow_short": -net * scale,
+    }
+
+
 def _score_side(
     side: str,
     bias_5m: str,
@@ -495,6 +531,7 @@ def _score_side(
     m: dict,
     tf_dir_1m: str,
     contradiction: bool,
+    flow_score: float = 0.0,
 ) -> float:
     score = 0.0
     # 5M direction 25
@@ -544,6 +581,7 @@ def _score_side(
         score += 10  # confirmed pattern bonus
     if contradiction:
         score -= 10
+    score += float(flow_score)
     return score
 
 
@@ -647,8 +685,13 @@ def evaluate_trap_orderflow(
         or (bias_5m == "bearish" and dir_1m == "bullish")
     )
 
-    long_score = _score_side("LONG", bias_5m, setup_1, m1, dir_1m, contradiction)
-    short_score = _score_side("SHORT", bias_5m, setup_1, m1, dir_1m, contradiction)
+    flow_20 = _flow_score_20(bars_1m, i1)
+    long_score = _score_side(
+        "LONG", bias_5m, setup_1, m1, dir_1m, contradiction, flow_score=flow_20["flow_long"]
+    )
+    short_score = _score_side(
+        "SHORT", bias_5m, setup_1, m1, dir_1m, contradiction, flow_score=flow_20["flow_short"]
+    )
 
     # 5M structural override boost
     if setup_5:
@@ -695,8 +738,32 @@ def evaluate_trap_orderflow(
         pattern = setup_1["name"] if setup_1 else (setup_5["name"] if setup_5 else "NONE")
         conf = max_score / 100.0
     elif strict_scalp:
-        # 1m/5m: only emit side when that side's score clears thr (no RAW force)
-        if long_score >= thr and long_score >= short_score:
+        # 1m/5m: named trap required — no raw score-only IMBALANCE fires.
+        if not setup_1 and not setup_5:
+            signal = "NO_TRADE"
+            reason = (
+                "No named trap/setup — raw IMBALANCE blocked "
+                "(need ABSORPTION/SELL_TRAP/FAKE_BREAKOUT/BUY_TRAP etc.)"
+            )
+            pattern = "IMBALANCE"
+            conf = max_score / 100.0
+        elif bias_5m == "bearish" and long_score >= short_score:
+            signal = "NO_TRADE"
+            reason = (
+                f"5m bearish bias — scalp LONG blocked "
+                f"(L={long_score:.0f} S={short_score:.0f})"
+            )
+            pattern = (setup_1 or setup_5 or {}).get("name", "IMBALANCE")
+            conf = max_score / 100.0
+        elif bias_5m == "bullish" and short_score > long_score:
+            signal = "NO_TRADE"
+            reason = (
+                f"5m bullish bias — scalp SHORT blocked "
+                f"(L={long_score:.0f} S={short_score:.0f})"
+            )
+            pattern = (setup_1 or setup_5 or {}).get("name", "IMBALANCE")
+            conf = max_score / 100.0
+        elif long_score >= thr and long_score >= short_score:
             signal = "LONG"
             pattern = (setup_1 or setup_5 or {}).get("name", "IMBALANCE")
             reason = (setup_1 or setup_5 or {}).get(
@@ -766,6 +833,10 @@ def evaluate_trap_orderflow(
         primary_reason=reason,
         details={
             "dir_1m": dir_1m,
+            "up_20": flow_20["up_20"],
+            "down_20": flow_20["down_20"],
+            "flow_long_20": round(flow_20["flow_long"], 4),
+            "flow_short_20": round(flow_20["flow_short"], 4),
             "patterns_1m": pats_1,
             "patterns_5m": pats_5,
             "setup_1m": setup_1,
@@ -779,6 +850,51 @@ def evaluate_trap_orderflow(
     )
 
 
+def _apply_structure_conflict(
+    of_result: TrapOFResult,
+    struct_signal: str,
+    *,
+    strict_scalp: bool,
+) -> tuple[float, float, str, str, str, float]:
+    """Penalise firing side when structure trap opposes OF; block if below floor."""
+    long_s = float(of_result.long_score)
+    short_s = float(of_result.short_score)
+    signal = of_result.final_signal
+    reason = of_result.primary_reason
+    pattern = of_result.pattern
+    thr = float(
+        of_result.details.get("thr_score")
+        or thr_score_for_setup(of_result.timeframe, of_result.pattern)
+    )
+
+    if signal in ("LONG", "SHORT") and struct_signal != signal:
+        pen = float(STRUCTURE_OPPOSITE_PENALTY)
+        if signal == "LONG":
+            long_s -= pen
+        else:
+            short_s -= pen
+        side_sc = long_s if signal == "LONG" else short_s
+        reason = (
+            f"{reason} | structure trap wanted {struct_signal} "
+            f"(−{pen:.0f} score → {side_sc:.0f})"
+        )
+        if side_sc < thr:
+            signal = "NO_TRADE"
+            reason = f"{reason} → blocked (score {side_sc:.0f} < {thr:.0f})"
+        details_pen = pen
+    else:
+        details_pen = 0.0
+
+    if signal == struct_signal and signal in ("LONG", "SHORT"):
+        pattern = f"{of_result.pattern}+STRUCTURE_{of_result.details.get('structure_trap') or 'TRAP'}"
+        if strict_scalp:
+            reason = f"{reason} | structure agrees (no scalp score boost)"
+        else:
+            reason = f"{reason} | structure agrees"
+
+    return long_s, short_s, signal, reason, pattern, details_pen
+
+
 def merge_with_structure_trap(
     of_result: TrapOFResult,
     structure_trap_side: Optional[str],
@@ -786,25 +902,35 @@ def merge_with_structure_trap(
 ) -> TrapOFResult:
     """Blend classic brain.py structure trap with order-flow trap (both kept).
 
-    1m/5m: no structure score bonus and no NO_TRADE lift — OF floor alone decides fire.
-    Higher TFs: keep light structure agree bonus + lift.
+    Opposite structure → score penalty (−12); block if below TF floor.
     """
     if not structure_trap_side:
         return of_result
-    # structure_trap_side is BUY/SELL
     struct_signal = "LONG" if structure_trap_side == "BUY" else "SHORT"
     tf = (of_result.timeframe or "").strip().lower()
     strict_scalp = tf in ("1m", "5m", "30s")
 
-    # Scalp TFs: annotate only — do not inflate scores or lift NO_TRADE over the OF floor
-    if strict_scalp:
-        reason = of_result.primary_reason
-        pattern = of_result.pattern
-        if of_result.final_signal == struct_signal:
-            pattern = f"{of_result.pattern}+STRUCTURE_{structure_trap_type or 'TRAP'}"
-            reason = f"{of_result.primary_reason} | structure {structure_trap_type} agrees (no scalp score boost)"
-        elif of_result.final_signal in ("LONG", "SHORT"):
-            reason = f"{of_result.primary_reason} | note: structure trap wanted {struct_signal}"
+    base_details = {
+        **of_result.details,
+        "structure_trap": structure_trap_type,
+        "structure_side": structure_trap_side,
+    }
+
+    if of_result.final_signal == struct_signal and of_result.final_signal in ("LONG", "SHORT"):
+        pattern = f"{of_result.pattern}+STRUCTURE_{structure_trap_type or 'TRAP'}"
+        reason = (
+            f"{of_result.primary_reason} | structure {structure_trap_type} agrees"
+            + (" (no scalp score boost)" if strict_scalp else "")
+        )
+        long_s, short_s = float(of_result.long_score), float(of_result.short_score)
+        if not strict_scalp:
+            bonus = 8.0
+            long_s += bonus if struct_signal == "LONG" else 0
+            short_s += bonus if struct_signal == "SHORT" else 0
+            long_s += 5 if of_result.final_signal == "LONG" else 0
+            short_s += 5 if of_result.final_signal == "SHORT" else 0
+        signal = of_result.final_signal
+        conf = min(1.0, max(long_s, short_s) / 100.0)
         return TrapOFResult(
             timeframe=of_result.timeframe,
             pattern=pattern,
@@ -813,41 +939,43 @@ def merge_with_structure_trap(
             sell_pressure=of_result.sell_pressure,
             buy_volume_ratio=of_result.buy_volume_ratio,
             sell_volume_ratio=of_result.sell_volume_ratio,
-            long_score=of_result.long_score,
-            short_score=of_result.short_score,
-            final_signal=of_result.final_signal,
-            confidence=of_result.confidence,
+            long_score=long_s,
+            short_score=short_s,
+            final_signal=signal,
+            confidence=conf,
             primary_reason=reason,
-            details={
-                **of_result.details,
-                "structure_trap": structure_trap_type,
-                "structure_side": structure_trap_side,
-                "structure_1m_boost": False,
-            },
+            details={**base_details, "structure_1m_boost": not strict_scalp},
         )
 
-    bonus = 8.0
-    long_s = of_result.long_score + (bonus if struct_signal == "LONG" else 0)
-    short_s = of_result.short_score + (bonus if struct_signal == "SHORT" else 0)
+    # Conflict or NO_TRADE — apply penalty when OF picked a side opposite structure
+    patched = TrapOFResult(
+        timeframe=of_result.timeframe,
+        pattern=of_result.pattern,
+        bias_5m=of_result.bias_5m,
+        buy_pressure=of_result.buy_pressure,
+        sell_pressure=of_result.sell_pressure,
+        buy_volume_ratio=of_result.buy_volume_ratio,
+        sell_volume_ratio=of_result.sell_volume_ratio,
+        long_score=of_result.long_score,
+        short_score=of_result.short_score,
+        final_signal=of_result.final_signal,
+        confidence=of_result.confidence,
+        primary_reason=of_result.primary_reason,
+        details=base_details,
+    )
+    long_s, short_s, signal, reason, pattern, pen = _apply_structure_conflict(
+        patched, struct_signal, strict_scalp=strict_scalp
+    )
 
-    # If OF is NO_TRADE only due to low conf but structure agrees with a side, lift it
-    thr = thr_score_for_tf(of_result.timeframe)
-    lift_floor = thr - 5
-    signal = of_result.final_signal
-    reason = of_result.primary_reason
-    pattern = of_result.pattern
-    if of_result.final_signal == "NO_TRADE" and max(long_s, short_s) >= lift_floor:
-        signal = "LONG" if long_s >= short_s else "SHORT"
-        pattern = f"STRUCTURE_{structure_trap_type or 'TRAP'}+OF"
-        reason = f"Structure trap {structure_trap_type} aligned with order-flow scores"
-    elif signal == struct_signal:
-        pattern = f"{of_result.pattern}+STRUCTURE_{structure_trap_type or 'TRAP'}"
-        reason = f"{of_result.primary_reason} | structure {structure_trap_type} agrees"
-        long_s = long_s + (5 if signal == "LONG" else 0)
-        short_s = short_s + (5 if signal == "SHORT" else 0)
-    elif signal in ("LONG", "SHORT") and signal != struct_signal:
-        reason = f"{of_result.primary_reason} | note: structure trap wanted {struct_signal}"
+    if not strict_scalp and signal == "NO_TRADE":
+        thr = thr_score_for_tf(of_result.timeframe)
+        lift_floor = thr - 5
+        if max(long_s, short_s) >= lift_floor and struct_signal == ("LONG" if long_s >= short_s else "SHORT"):
+            signal = "LONG" if long_s >= short_s else "SHORT"
+            pattern = f"STRUCTURE_{structure_trap_type or 'TRAP'}+OF"
+            reason = f"Structure trap {structure_trap_type} aligned with order-flow scores"
 
+    conf = 0.0 if signal == "NO_TRADE" else min(1.0, max(long_s, short_s) / 100.0)
     return TrapOFResult(
         timeframe=of_result.timeframe,
         pattern=pattern,
@@ -859,7 +987,11 @@ def merge_with_structure_trap(
         long_score=long_s,
         short_score=short_s,
         final_signal=signal,
-        confidence=min(1.0, max(long_s, short_s) / 100.0),
+        confidence=conf,
         primary_reason=reason,
-        details={**of_result.details, "structure_trap": structure_trap_type, "structure_side": structure_trap_side},
+        details={
+            **base_details,
+            "structure_conflict_penalty": pen,
+            "structure_1m_boost": False,
+        },
     )
