@@ -45,6 +45,7 @@ THR_SCORE_5M = 75.0  # 5m non-trap / scalp floor
 THR_SCORE_1M = 75.0
 THR_SCORE_IMBALANCE_1M = float(os.environ.get("THR_SCORE_IMBALANCE_1M", "75"))
 THR_SCORE_INSIDE_BAR = float(os.environ.get("THR_SCORE_INSIDE_BAR", "75"))
+THR_SCORE_CLASSIC_PATTERN = float(os.environ.get("THR_SCORE_CLASSIC_PATTERN", "65"))
 THR_SCORE_TRAP = 90.0  # named trap fires (15m+)
 THR_SCORE_TRAP_5M = 80.0  # named trap fires on 5m
 THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "75"))
@@ -105,8 +106,10 @@ def thr_score_for_setup(
     *,
     brain_strategy: str | None = None,
 ) -> float:
-    """Floor for a specific setup: inside_bar ≥85; 5m traps ≥80; other traps ≥90; 1m IMBALANCE ≥85."""
+    """Floor for a specific setup: classic_pattern ≥65; inside_bar ≥75; traps ≥80/90; else ≥75."""
     strat = (brain_strategy or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if strat == "classic_pattern":
+        return float(THR_SCORE_CLASSIC_PATTERN)
     if strat == "inside_bar":
         return float(THR_SCORE_INSIDE_BAR)
     name = (pattern or "").strip().upper()
@@ -647,6 +650,8 @@ def evaluate_trap_orderflow(
     candles_5m: Optional[Sequence[dict]],
     *,
     exec_tf: str = "1m",
+    brain_strategy: str | None = None,
+    brain_side: str | None = None,
 ) -> TrapOFResult:
     """Run 5M bias + 1M execution trap policy. Falls back if only one TF present."""
     bars_1m = [candle_to_flow(c) for c in (candles_1m or [])]
@@ -757,15 +762,21 @@ def evaluate_trap_orderflow(
         else:
             short_score += 8
 
-    # NO TRADE gates — 5m traps ≥80; other traps ≥90; non-trap ≥75
+    # NO TRADE gates — classic_pattern ≥65; traps ≥80/90; non-trap ≥75
     setup_name = (setup_1 or setup_5 or {}).get("name") if (setup_1 or setup_5) else None
-    thr = thr_score_for_setup(exec_tf, setup_name)
+    strat_norm = (brain_strategy or "").strip().lower().replace("-", "_").replace(" ", "_")
+    side_norm = (brain_side or "").strip().upper()
+    classic_brain = strat_norm == "classic_pattern" and side_norm in ("BUY", "SELL")
+    thr = thr_score_for_setup(exec_tf, setup_name, brain_strategy=brain_strategy)
     thr_base = thr_score_for_tf(exec_tf)
     strict_scalp = (exec_tf or "").strip().lower() in ("1m", "5m", "30s")
     bal_pressure = abs(m1["buyer_ratio"] - 0.50) < THR_BALANCED
     bal_volume = abs(m1["buy_ratio"] - 0.50) < THR_BALANCED
     max_score = max(long_score, short_score)
-    low_conf = score_below_floor(max_score, thr)
+    gate_score = (
+        long_score if side_norm == "BUY" else short_score
+    ) if classic_brain else max_score
+    low_conf = score_below_floor(gate_score, thr)
 
     # Named-pattern ok flags (15m+ may bypass low conf; 1m/5m never do)
     _long_ok = _1M_LONG_OK if strict_scalp else _HTF_LONG_OK
@@ -786,7 +797,8 @@ def evaluate_trap_orderflow(
     elif strict_scalp and low_conf:
         # 1m/5m: score ≥ thr required — pattern / HTF / RAW bypass off
         signal = "NO_TRADE"
-        reason = f"scalp strict: score {max_score:.1f} < {thr:.0f} (pattern bypass off)"
+        shown = gate_score if classic_brain else max_score
+        reason = f"scalp strict: score {shown:.1f} < {thr:.0f} (pattern bypass off)"
         pattern = setup_1["name"] if setup_1 else (setup_5["name"] if setup_5 else "NONE")
         conf = max_score / 100.0
     elif low_conf and not (long_ok_pattern or short_ok_pattern):

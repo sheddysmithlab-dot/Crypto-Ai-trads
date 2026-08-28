@@ -639,7 +639,15 @@ def _run_orderflow_trap(
 ) -> Optional[dict]:
     try:
         c1, c5 = _resolve_1m_5m(candles, timeframe_key, htf_candles, candles_1m, candles_5m)
-        of = evaluate_trap_orderflow(c1, c5, exec_tf=_norm_tf(timeframe_key))
+        brain_strategy = _brain_strategy_from_think(think)
+        sig = think.get("signal")
+        brain_side = getattr(sig, "side", None) if sig else None
+        of = evaluate_trap_orderflow(
+            c1, c5,
+            exec_tf=_norm_tf(timeframe_key),
+            brain_strategy=brain_strategy,
+            brain_side=str(brain_side) if brain_side else None,
+        )
         struct = think.get("trap")
         struct_side = getattr(struct, "side", None) if struct else None
         struct_type = getattr(struct, "trap_type", None) if struct else None
