@@ -12,12 +12,13 @@ const RING_C = 2 * Math.PI * RING_R;
 
 /**
  * Full-screen boot sequence after AI Engine START:
- * 0–introSec  intro MP4 (always full length — scan runs in background)
- * then scan progress ring until momentum gate ready
- * Blocks all background interaction; Cancel stops engine immediately (no confirm).
+ * - Intro MP4 while scan has not started yet
+ * - Neon scan ring as soon as momentum scan is in progress (instruments/liquid/scoring)
+ * - READY flash, then close
  */
 export default function EngineBootOverlay({
   active,
+  starting = false,
   warmupRemainingSec = 0,
   warmupTotalSec = TOTAL_SEC,
   introSec = INTRO_SEC,
@@ -39,6 +40,7 @@ export default function EngineBootOverlay({
   const [forceHide, setForceHide] = useState(false);
   const videoRef = useRef(null);
   const bootGenRef = useRef(0);
+  const wasActiveRef = useRef(false);
 
   const remainingWs = Math.max(0, Number(warmupRemainingSec) || 0);
   const intro = Math.max(1, Number(introSec) || INTRO_SEC);
@@ -46,25 +48,42 @@ export default function EngineBootOverlay({
   const scanDone = Math.max(0, Number(momentumScanDone) || 0);
   const scanPct = scanTotal > 0 ? Math.min(1, scanDone / scanTotal) : (momentumGateReady ? 1 : 0);
   const stage = String(momentumScanStage || '').toLowerCase();
+  const scanInProgress =
+    !momentumGateReady &&
+    (stage === 'instruments' ||
+      stage === 'liquid' ||
+      stage === 'scoring' ||
+      scanTotal > 0 ||
+      scanDone > 0);
 
-  // Start a boot session when engine goes active with remaining boot UI time.
+  // Arm boot overlay on fresh START / restart / pending gate.
   useEffect(() => {
-    if (!active) {
+    const rising = active && !wasActiveRef.current;
+    wasActiveRef.current = Boolean(active);
+
+    if (!active && !starting) {
       setBootActive(false);
       setIntroElapsed(0);
       setForceHide(false);
       return undefined;
     }
-    if (remainingWs > 0.05 && !bootActive && !forceHide) {
+
+    const shouldArm =
+      starting ||
+      rising ||
+      remainingWs > 0.05 ||
+      (active && !momentumGateReady);
+
+    if (shouldArm && !bootActive) {
       bootGenRef.current += 1;
       setBootActive(true);
       setIntroElapsed(0);
       setForceHide(false);
     }
     return undefined;
-  }, [active, remainingWs, bootActive, forceHide]);
+  }, [active, starting, remainingWs, momentumGateReady, bootActive]);
 
-  // Local wall-clock intro — never cancelled by scan stage / early READY.
+  // Local intro clock (only matters before scan UI takes over).
   useEffect(() => {
     if (!bootActive) return undefined;
     const gen = bootGenRef.current;
@@ -76,34 +95,34 @@ export default function EngineBootOverlay({
     return () => clearInterval(id);
   }, [bootActive]);
 
-  const stillIntro = bootActive && introElapsed < intro - 0.05;
+  // Show neon RING as soon as scan is running; otherwise intro video for introSec.
+  const stillIntro = bootActive && !scanInProgress && !momentumGateReady && introElapsed < intro - 0.05;
 
-  // After intro finishes and gate is READY → close overlay.
+  // Close after gate ready (and intro/ring phase done).
   useEffect(() => {
-    if (!active || !bootActive || stillIntro || !momentumGateReady) {
+    if (!bootActive || stillIntro || scanInProgress || !momentumGateReady) {
       return undefined;
     }
     const t = setTimeout(() => {
       setForceHide(true);
       setBootActive(false);
-    }, 1500);
+    }, 1600);
     return () => clearTimeout(t);
-  }, [active, bootActive, stillIntro, momentumGateReady]);
+  }, [bootActive, stillIntro, scanInProgress, momentumGateReady]);
 
-  // If intro done but gate never ready, follow server remaining (safety).
+  // Safety: if scan never reports, follow remainingWs after intro.
   useEffect(() => {
-    if (!active || !bootActive || stillIntro) return undefined;
+    if (!bootActive || stillIntro || scanInProgress) return undefined;
     if (remainingWs > 0.05) return undefined;
-    if (!momentumGateReady) {
+    if (!momentumGateReady && !starting) {
       setForceHide(true);
       setBootActive(false);
     }
     return undefined;
-  }, [active, bootActive, stillIntro, remainingWs, momentumGateReady]);
+  }, [bootActive, stillIntro, scanInProgress, remainingWs, momentumGateReady, starting]);
 
-  const show = Boolean(active && bootActive && !forceHide);
+  const show = Boolean(bootActive && !forceHide && (active || starting));
 
-  // Lock body scroll while boot overlay is up
   useEffect(() => {
     if (!show) return undefined;
     const prev = document.body.style.overflow;
@@ -113,7 +132,6 @@ export default function EngineBootOverlay({
     };
   }, [show]);
 
-  // Start / restart intro video when intro phase is visible
   useEffect(() => {
     if (!show || !stillIntro || !videoOk) return undefined;
     const el = videoRef.current;
@@ -126,9 +144,7 @@ export default function EngineBootOverlay({
     }
     const play = el.play();
     if (play && typeof play.catch === 'function') {
-      play.catch(() => {
-        /* Autoplay blocked — still show first frame */
-      });
+      play.catch(() => {});
     }
     return () => {
       try {
@@ -139,7 +155,6 @@ export default function EngineBootOverlay({
     };
   }, [show, stillIntro, videoOk]);
 
-  // Smooth ring from scan progress
   useEffect(() => {
     if (!show || stillIntro) {
       setSmoothProgress(0);
@@ -158,7 +173,9 @@ export default function EngineBootOverlay({
       ? 'LOAD'
       : stage === 'scoring'
         ? (scanTotal > 0 ? `${scanDone}/${scanTotal}` : 'SCAN')
-        : 'SCAN';
+        : scanInProgress
+          ? 'SCAN'
+          : 'SCAN';
   const centerSub = momentumGateReady
     ? 'watchlist set'
     : stage === 'scoring'
@@ -234,7 +251,7 @@ export default function EngineBootOverlay({
               <svg
                 width={RING_SIZE}
                 height={RING_SIZE}
-                className="-rotate-90 overflow-visible"
+                className="-rotate-90 overflow-visible animate-pulse"
                 style={{ overflow: 'visible' }}
               >
                 <circle
@@ -258,6 +275,7 @@ export default function EngineBootOverlay({
                   style={{
                     filter:
                       'drop-shadow(0 0 10px #3b9eff) drop-shadow(0 0 22px rgba(59,158,255,0.85)) drop-shadow(0 0 18px rgba(255,138,31,0.45))',
+                    transition: 'stroke-dashoffset 0.25s linear',
                   }}
                 />
               </svg>

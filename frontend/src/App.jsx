@@ -878,6 +878,7 @@ export default function App() {
 
       <EngineBootOverlay
         active={effectiveBotActive}
+        starting={botLoading}
         warmupRemainingSec={portfolio.warmupRemainingSec}
         warmupTotalSec={portfolio.warmupTotalSec}
         introSec={portfolio.bootIntroSec}
