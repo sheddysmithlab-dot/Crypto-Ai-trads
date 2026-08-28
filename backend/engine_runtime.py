@@ -17,6 +17,11 @@ _DEFAULT_DATA = Path(__file__).resolve().parent / "data"
 DATA_DIR = Path(os.environ.get("ENGINE_RUNTIME_DATA_DIR", str(_DEFAULT_DATA)))
 RUNTIME_PATH = DATA_DIR / "engine_runtime.json"
 
+# Match main.py ONE_M_FEE_HOLD_ENABLED (avoid circular import).
+_FEE_HOLD_ENABLED = os.environ.get("ONE_M_FEE_HOLD_ENABLED", "0").strip().lower() in (
+    "1", "true", "yes",
+)
+
 # How many consecutive AI failures before freeze
 AI_FAIL_FREEZE_STREAK = int(os.environ.get("AI_FAIL_FREEZE_STREAK", "3"))
 # Market feed considered stale after this many seconds without a tick
@@ -111,8 +116,8 @@ def restore_runtime(agent: Any) -> dict:
         # Resume mid-session: trading ready immediately; do NOT re-open boot overlay.
         agent.trading_ready_at = 0.0
         agent.session_hold_mode = bool(data.get("session_hold_mode"))
-        agent.one_m_fee_hold = bool(data.get("one_m_fee_hold"))
-        hold_at = float(data.get("one_m_fee_hold_at") or 0)
+        agent.one_m_fee_hold = bool(data.get("one_m_fee_hold")) if _FEE_HOLD_ENABLED else False
+        hold_at = float(data.get("one_m_fee_hold_at") or 0) if _FEE_HOLD_ENABLED else 0.0
         if agent.one_m_fee_hold and hold_at <= 0:
             # Legacy saves had no timestamp — expire immediately on next refresh.
             hold_at = 0.0

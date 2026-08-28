@@ -3278,7 +3278,7 @@ class AITradingAgent:
             return False
         if not self.trading_ready():
             return False
-        if self.one_m_fee_hold and is_scalp_tf(self._chart_tf_key()):
+        if ONE_M_FEE_HOLD_ENABLED and self.one_m_fee_hold and is_scalp_tf(self._chart_tf_key()):
             return False
         return bool(self.is_active)
 
@@ -3286,12 +3286,16 @@ class AITradingAgent:
         return str(SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")).strip().lower()
 
     def refresh_one_m_fee_budget(self) -> None:
-        """Scalp (1m/5m): pause new entries when REALIZED fees dominate closed book.
+        """Scalp (1m/5m): optional pause when REALIZED fees dominate closed book.
 
-        Uses closed-round-trip gross/fees only — open MTM and open entry fees are
-        ignored so a green open position cannot falsely arm (or stick) a hold.
-        Self-clears on closed-book recover or max hold window.
+        Disabled by default (ONE_M_FEE_HOLD_ENABLED=false). When off, clears any
+        leftover hold and never arms new fee pauses.
         """
+        if not ONE_M_FEE_HOLD_ENABLED:
+            if self.one_m_fee_hold:
+                self.one_m_fee_hold = False
+                self.one_m_fee_hold_at = 0.0
+            return
         if not is_scalp_tf(self._chart_tf_key()):
             # Higher TFs: never keep a leftover scalp fee hold armed.
             if self.one_m_fee_hold:
@@ -3562,8 +3566,11 @@ ONE_M_MIN_BARS_BETWEEN_FIRES = 5  # fire on N → next fire earliest N+5 (was 3)
 # 1m/5m: after pattern+AI lock, wait up to N bars for live green/red START (not candle close).
 ONE_M_CONFIRM_MAX_BARS = 5
 ONE_M_MAX_CONCURRENT = 3  # hard cap PER PAIR while chart TF is 1m (fee control)
-# Hold new 1m entries when broker fees eat the session book.
-ONE_M_FEE_BUDGET_RATIO = 0.45  # closed fees ≥ 45% of closed gross → hold
+# Hold new scalp entries when broker fees eat the session book (disabled by default).
+ONE_M_FEE_HOLD_ENABLED = os.environ.get("ONE_M_FEE_HOLD_ENABLED", "0").strip().lower() in (
+    "1", "true", "yes",
+)
+ONE_M_FEE_BUDGET_RATIO = 0.45  # closed fees ≥ 45% of closed gross → hold (when enabled)
 ONE_M_FEE_HOLD_MIN_CLOSED = 3  # need at least this many closed round-trips
 ONE_M_FEE_HOLD_MIN_FEE_USD = float(os.environ.get("ONE_M_FEE_HOLD_MIN_FEE_USD", "0.03"))
 ONE_M_FEE_HOLD_MAX_SECONDS = float(os.environ.get("ONE_M_FEE_HOLD_MAX_SECONDS", "600"))
@@ -4486,7 +4493,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             )
         if agent.daily_target_reached:
             return await _skip_pending(pending, "Daily profit target already reached", fire_candle_ms=fire_candle_ms)
-        if getattr(agent, "one_m_fee_hold", False) and is_scalp_tf(timeframe_key):
+        if ONE_M_FEE_HOLD_ENABLED and getattr(agent, "one_m_fee_hold", False) and is_scalp_tf(timeframe_key):
             return await _skip_pending(
                 pending,
                 "fee budget hold — new entries paused",
@@ -4986,7 +4993,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return False
     if agent.daily_target_reached:
         return False
-    if getattr(agent, "one_m_fee_hold", False) and is_scalp_tf(tf_l):
+    if ONE_M_FEE_HOLD_ENABLED and getattr(agent, "one_m_fee_hold", False) and is_scalp_tf(tf_l):
         _push_pattern_neon(
             pair=pair,
             candle_time_ms=close_time,
@@ -5140,7 +5147,8 @@ async def auto_buy_loop():
                     # Warmup: scan + detect + queue immediately; fire gated inside scan_and_maybe_fire_pair.
                     # Feed-stale freeze: pause NEW detects only; keep managing open + pending fires.
                     frozen = bool(agent.connectivity_frozen) or (
-                        getattr(agent, "one_m_fee_hold", False)
+                        ONE_M_FEE_HOLD_ENABLED
+                        and getattr(agent, "one_m_fee_hold", False)
                         and is_scalp_tf(timeframe_key)
                     )
                     fire_pairs = list(agent.get_scan_pairs())
