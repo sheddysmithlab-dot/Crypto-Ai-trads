@@ -50,7 +50,7 @@ export default function StopEngineModal({
           </button>
           <p className="text-[10px] text-gray-500 -mt-1 px-1">
             {hasOpen
-              ? 'Stop new fires. Held trades keep path SL/TP and update portfolio until they close.'
+              ? 'Stop new fires. Held trades keep path exit rules until they close.'
               : 'Turn engine OFF on VPS. You can START again anytime from this page.'}
           </p>
 

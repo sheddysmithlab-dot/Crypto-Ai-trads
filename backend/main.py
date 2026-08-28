@@ -922,6 +922,18 @@ LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0
 LOSS_RECOVERY_RETRACE_CHOPPY_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_CHOPPY_PCT", "0.20"))
 LOSS_LOCK_CLEAR_PCT = float(os.environ.get("LOSS_LOCK_CLEAR_PCT", "0.20"))  # unlock → profit book
 LOSS_BAND_PCT = float(os.environ.get("LOSS_BAND_PCT", "0.70"))  # hard floor / instant exit
+
+
+def _brain_exit_prices_valid(entry: float, side: str, sl: float, tp: float) -> bool:
+    """True when brain stop/target are on the correct side of entry for the side."""
+    if entry <= 0 or sl <= 0 or tp <= 0:
+        return False
+    if side == "LONG":
+        return sl < entry and tp > entry
+    if side == "SHORT":
+        return sl > entry and tp < entry
+    return False
+
 LOSS_EMERGENCY_PCT = LOSS_BAND_PCT
 # Micro-cap alts — tighter loss band (default 1m 0.35% hard exit is too slow for these).
 MICRO_CAP_PAIRS = frozenset({
@@ -4471,12 +4483,18 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
         brain_sl = detect.get("sl")
         brain_tp = detect.get("tp")
-        if brain_sl and brain_tp and float(brain_sl) > 0 and float(brain_tp) > 0:
+        lock_pct = PROFIT_LOCK_PCT
+        if (
+            brain_sl
+            and brain_tp
+            and float(brain_sl) > 0
+            and float(brain_tp) > 0
+            and _brain_exit_prices_valid(float(mark_px), side, float(brain_sl), float(brain_tp))
+        ):
             sl_price = round(float(brain_sl), price_decimals_for_mark(mark_px))
             tp_price = round(float(brain_tp), price_decimals_for_mark(mark_px))
             exit_label = f"brain SL={sl_price} TP={tp_price}"
         else:
-            lock_pct = PROFIT_LOCK_PCT
             sl_price, tp_price = agent._fixed_exit_prices(
                 float(mark_px), side, loss_pct=LOSS_PROTECT_PCT, profit_pct=lock_pct
             )
@@ -4488,6 +4506,10 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 f"(floor = peak − {PROFIT_TRAIL_GIVEBACK_PCT:g}%) "
                 f"SL={sl_price} TP={tp_price}"
             )
+            if brain_sl and brain_tp and float(brain_sl) > 0 and float(brain_tp) > 0:
+                exit_label = (
+                    f"brain SL/TP invalid for {side} (sl={brain_sl}, tp={brain_tp}) — {exit_label}"
+                )
 
         rr = detect.get("risk_reward") or (FIXED_EXIT_PROFIT_PCT / FIXED_EXIT_LOSS_PCT)
         trade = agent.open_trade(
@@ -4558,6 +4580,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 "tp": trade.get("tp_price"),
                 "detect_candle": detect_candle_ms,
                 "fire_candle": fire_candle_ms,
+                "mode": bybit_api.mode,
             }
         )
         print(

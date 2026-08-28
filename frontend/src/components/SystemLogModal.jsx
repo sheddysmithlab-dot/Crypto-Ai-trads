@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  EXIT_POLICY_SYSTEM_LOG,
+  tradeFireModeLabel,
+} from '../data/exitPolicyLabels';
 
 const PANEL_STORAGE_KEY = 'systemLogPanel';
 const MIN_W = 360;
@@ -185,7 +189,15 @@ function formatIso(ts) {
   if (!ts) return '—';
   const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts);
   if (Number.isNaN(d.getTime())) return '—';
-  return d.toISOString().replace('T', ' ').slice(0, 19);
+  return d.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
 }
 
 const CATEGORY_COLOR = {
@@ -252,10 +264,15 @@ export default function SystemLogModal({
   const backendNotifications = systemLogs?.notifications || [];
 
   const isPaper = (conn.bybit_mode || tradingMode) === 'PAPER_TRADING';
+  const isLive = (conn.bybit_mode || tradingMode) === 'LIVE_TRADING';
   const wsOk = apiStatus?.color === 'green';
   const bybitOk = isPaper || (conn.bybit_configured && (conn.bybit_mode === 'LIVE_TRADING' ? conn.bybit_connected : true));
   const aiOk = conn.ai_configured;
-  const bybitTestnetOk = isPaper || conn.bybit_testnet_configured;
+  const tradeFireMode = tradeFireModeLabel({
+    tradeFireMode: tradeFire?.mode,
+    tradingMode: conn.bybit_mode || tradingMode,
+    isPaper,
+  });
 
   const mergedLogs = [
     ...(actionLogs || []).map((row) => ({
@@ -355,16 +372,32 @@ export default function SystemLogModal({
             <div className="bg-[#161A1E] border border-cyan-800/50 rounded-xl p-2">
               <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Entry Engine</div>
               <StatusPill ok label="SPLIT" />
-              <p className="text-[11px] text-gray-500 mt-2">Unified 1m rulebook on every TF (5m→1D) · path SL/TP 0.5%/0.7%</p>
+              <p className="text-[11px] text-gray-500 mt-2">{EXIT_POLICY_SYSTEM_LOG}</p>
             </div>
-            <div className="bg-[#161A1E] border border-amber-700/40 rounded-xl p-2">
-              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Bybit TESTNET</div>
+            <div className="bg-[#161A1E] border border-emerald-700/40 rounded-xl p-2">
+              <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-1">
+                {isPaper ? 'Paper Trading' : isLive ? 'Live Mainnet' : 'Trading Mode'}
+              </div>
               <StatusPill
-                ok={bybitTestnetOk}
-                label={isPaper ? 'PAPER MODE' : bybitTestnetOk ? 'KEYS SET' : 'KEYS MISSING'}
+                ok={isPaper || isLive || conn.bybit_configured}
+                label={
+                  isPaper
+                    ? 'PAPER MODE'
+                    : isLive
+                      ? conn.bybit_connected
+                        ? 'MAINNET LIVE'
+                        : 'MAINNET'
+                      : conn.bybit_configured
+                        ? 'CONFIGURED'
+                        : 'NOT SET'
+                }
               />
               <p className="text-[11px] text-gray-500 mt-2">
-                {isPaper ? 'Paper ledger — same candle brain rules as TESTNET' : 'Bybit TESTNET — real orders, same rules as paper'}
+                {isPaper
+                  ? 'Simulated ledger — same brain + path exit rules as live.'
+                  : isLive
+                    ? 'Real Bybit mainnet orders. Testnet keys are optional and not used.'
+                    : 'Configure Bybit keys in Settings to trade.'}
               </p>
             </div>
           </section>
@@ -444,7 +477,12 @@ export default function SystemLogModal({
               <i className={`fas ${scanEngine === 'Candle Brain' ? 'fa-brain' : 'fa-wave-square'} text-cyan-400 mr-1.5`} />
               Last {scanEngine} Scan
               {scan?.timestamp ? (
-                <span className="text-gray-500 font-normal normal-case ml-2">{formatIso(scan.timestamp)}</span>
+                <span className="text-gray-500 font-normal normal-case ml-2" title="IST">
+                  {formatIso(scan.timestamp)}
+                  {scan?.pair ? (
+                    <span className="text-gray-600 ml-1">· {scan.pair}</span>
+                  ) : null}
+                </span>
               ) : null}
             </h3>
             {!scan ? (
@@ -544,7 +582,7 @@ export default function SystemLogModal({
           <section className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">
             <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-2">
               <i className="fas fa-bolt text-amber-400 mr-1.5" />
-              Last Trade Fire ({tradeFire?.mode || (isPaper ? 'PAPER_TRADING' : 'BYBIT_TESTNET')})
+              Last Trade Fire ({tradeFireMode})
             </h3>
             {!tradeFire ? (
               <p className="text-sm text-gray-500">No trade fire attempted yet this session.</p>
@@ -636,9 +674,9 @@ export default function SystemLogModal({
 
           {settingsStatus ? (
             <p className="text-[10px] text-gray-600 text-center pb-1">
-              Settings: Bybit mainnet {settingsStatus.bybit_configured ? 'configured' : 'not set'} · TESTNET{' '}
-              {conn.bybit_testnet_configured ? 'keys set' : 'keys missing'} · AI {settingsStatus.ai_provider} (
-              {settingsStatus.ai_configured ? 'ready' : 'key missing'})
+              Settings: {tradeFireMode}{' '}
+              {settingsStatus.bybit_configured ? '· Bybit mainnet configured' : '· Bybit mainnet not set'} · AI{' '}
+              {settingsStatus.ai_provider} ({settingsStatus.ai_configured ? 'ready' : 'key missing'})
             </p>
           ) : null}
           </div>

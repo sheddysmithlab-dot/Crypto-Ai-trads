@@ -378,6 +378,48 @@ def _notify_ai_health(ok: bool) -> None:
         pass
 
 
+def _normalize_brain_exit(
+    entry: Optional[float],
+    sl: Optional[float],
+    tp: Optional[float],
+    action: str,
+) -> tuple[Optional[float], Optional[float]]:
+    """Ensure stop/target sit on the correct side of entry for LONG/SHORT."""
+    if entry is None or sl is None or tp is None:
+        return sl, tp
+    try:
+        e, s, t = float(entry), float(sl), float(tp)
+    except (TypeError, ValueError):
+        return sl, tp
+    if e <= 0 or s <= 0 or t <= 0:
+        return sl, tp
+
+    def _valid(a: str) -> bool:
+        if a == "BUY":
+            return s < e and t > e
+        if a == "SELL":
+            return s > e and t < e
+        return True
+
+    if _valid(action):
+        return s, t
+
+    # Common inversion: stop/target swapped relative to entry.
+    s2, t2 = t, s
+    if action == "BUY" and s2 < e and t2 > e:
+        return s2, t2
+    if action == "SELL" and s2 > e and t2 < e:
+        return s2, t2
+
+    loss = 0.005
+    profit = 0.005
+    if action == "BUY":
+        return e * (1.0 - loss), e * (1.0 + profit)
+    if action == "SELL":
+        return e * (1.0 + loss), e * (1.0 - profit)
+    return sl, tp
+
+
 # ─── flatten brain result → backend dict ─────────────────────────────────────
 def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
              risk_pct_pct: float, equity: float,
@@ -398,6 +440,8 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
     entry_price = float(entry_src.entry) if entry_src else None
     sl = float(entry_src.stop) if entry_src else None
     tp = float(entry_src.target) if entry_src else None
+    if entry_price is not None and sl is not None and tp is not None and ai_action in ("BUY", "SELL"):
+        sl, tp = _normalize_brain_exit(entry_price, sl, tp, ai_action)
     rr = float(getattr(entry_src, "rr", 0) or 0) if entry_src else None
 
     # Risk plan

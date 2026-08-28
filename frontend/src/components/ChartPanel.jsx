@@ -3,6 +3,7 @@ import PairSelectorDropdown from './PairSelectorDropdown';
 import TradeLauncherPopup from './TradeLauncherPopup';
 import { fmtNum } from '../data/pairs';
 import { TIMEFRAME_PROFILES, getTimeframeProfile } from '../data/timeframeProfiles';
+import { EXIT_POLICY_CHART_OVERLAY, EXIT_POLICY_SHORT } from '../data/exitPolicyLabels';
 import { formatTfMoveLabel } from '../hooks/useTfMoveStats';
 
 const TIMEFRAMES = ['1M', '5M', '15M', '1H', '1D'];
@@ -15,6 +16,7 @@ export default function ChartPanel({
   switchTimeframe,
   readouts,
   botIsActive,
+  engineRiskPct = null,
   tfMovePct = null,
   tfMoveLabel = null,
   launcher,
@@ -43,7 +45,7 @@ export default function ChartPanel({
               className="flex items-center gap-1.5 px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-[10px] font-bold uppercase tracking-wide text-cyan-300"
               title={
                 timeframe === '1M' || timeframe === '5M' || timeframe === '15M' || timeframe === '1H' || timeframe === '1D'
-                  ? 'Unified 1m rulebook on all TFs — brain + order-flow + path 0.5/0.7 + flip-exit'
+                  ? `Unified 1m rulebook on all TFs — brain + order-flow + ${EXIT_POLICY_SHORT}`
                   : 'Unified candle brain engine'
               }
             >
@@ -121,9 +123,10 @@ export default function ChartPanel({
           Lose <span className="font-black">{displayProfile.loseRate}%</span>
         </span>
         <span className="text-amber-500">
-          Trade value <span className="font-black">{displayProfile.capitalPct}%</span>
+          Engine risk{' '}
+          <span className="font-black">{engineRiskPct ?? displayProfile.capitalPct}%</span>
           <span className="text-gray-500 dark:text-gray-400 font-normal normal-case tracking-normal ml-1">
-            of capital
+            at START · $5 Bybit min
           </span>
         </span>
         <span
@@ -146,7 +149,7 @@ export default function ChartPanel({
           </span>
         </span>
         <span className="text-gray-500 dark:text-gray-400 font-normal normal-case tracking-normal ml-auto">
-          Active {timeframe}: {activeProfile.capitalPct}% size · W{activeProfile.winRate}/L{activeProfile.loseRate}
+          Active {timeframe}: risk {engineRiskPct ?? activeProfile.capitalPct}% · W{activeProfile.winRate}/L{activeProfile.loseRate}
         </span>
       </div>
 
@@ -157,10 +160,10 @@ export default function ChartPanel({
             <div className="px-2 py-1 rounded-md bg-emerald-950/85 border border-emerald-500/40 text-[9px] font-black uppercase tracking-widest text-emerald-200 shadow-lg">
               AI Engine live
             </div>
-            <div className="text-[8px] text-emerald-200/80 font-mono text-right leading-tight">
-              TP 0.5%/0.7% · SL 0.5%/0.7%
+            <div className="text-[8px] text-emerald-200/80 font-mono text-right leading-tight max-w-[11rem]">
+              {EXIT_POLICY_CHART_OVERLAY}
               <br />
-              path exit · brain entry
+              brain + OF entry
             </div>
           </div>
         ) : null}

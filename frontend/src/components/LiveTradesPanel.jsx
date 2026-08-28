@@ -170,8 +170,11 @@ function TradeRowDesktop({ trade, onRequestClose, onSelectTrade }) {
       </td>
       <td className={`px-3 py-1.5 ${isSold ? 'text-white/80' : trade.side === 'LONG' ? 'text-green-500' : 'text-red-500'} font-bold text-[10px]`}>
         {trade.side} {isSold ? '(EXIT)' : isProtected ? '(MANUAL)' : ''}
+        {trade.exchange === 'bybit_linear' && !isSold ? (
+          <span className="text-green-400 font-bold ml-1" title="Live Bybit mainnet position">⛓</span>
+        ) : null}
         {trade.exchange === 'bybit_linear_testnet' && !isSold ? (
-          <span className="text-amber-400 font-bold ml-1" title="Real Bybit TESTNET position">⛓</span>
+          <span className="text-amber-400 font-bold ml-1" title="Bybit testnet position">⛓</span>
         ) : null}
         {trade.exchange === 'paper' && !isSold ? (
           <span className="text-blue-400 font-bold ml-1" title="Paper simulation (same rules as live)">📄</span>

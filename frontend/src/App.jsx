@@ -809,6 +809,7 @@ export default function App() {
           switchTimeframe={switchTimeframe}
           readouts={readouts}
           botIsActive={effectiveBotActive}
+          engineRiskPct={systemLogs?.agent?.risk_level_pct ?? null}
           tfMovePct={tfMoveStats.displayPct ?? tfMoveStats.totalPct ?? tfMoveStats.avgPct}
           tfMoveLabel={tfMoveStats.windowLabel}
           launcher={{

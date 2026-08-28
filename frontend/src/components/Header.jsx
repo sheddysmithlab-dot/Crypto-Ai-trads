@@ -84,13 +84,13 @@ export default function Header({
       <div className="flex-1 flex items-center justify-center gap-4 sm:gap-8 min-w-0">
         <div className="flex flex-col items-center min-w-0">
           <span className="text-gray-500 dark:text-gray-400 text-[9px] sm:text-[10px] uppercase tracking-wider whitespace-nowrap">
-            Exited (booked)
+            Closed this session
           </span>
           <span
             className={`font-bold text-sm sm:text-base tabular-nums ${
               exitedProfit ? 'text-green-500' : 'text-red-500'
             }`}
-            title="Closed trades this AI session — gross $ (fees not deducted)"
+            title="Realized P&L from trades closed during this AI engine run (gross $, fees not deducted)"
           >
             {exitedPnlStr}
           </span>
