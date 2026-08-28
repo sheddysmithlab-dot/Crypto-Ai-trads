@@ -16,9 +16,9 @@ const SECTIONS = [
   {
     title: 'Stop-loss (per trade)',
     items: [
-      'Continuous dump --- (3 adverse ticks, no bounce) → exit at −0.50%.',
-      'Choppy path -+-+ (bounce in loss) → hold past protect, exit on 0.20% recovery drawdown.',
-      'Hard floor −0.70%.',
+      '−0.50% LOCK; first trail 0.10% (floor band −0.40%); −+-+ choppy uses 0.20% recovery trail.',
+      'Continuous dump --- (3 adverse ticks) → emergency exit at −0.50%.',
+      'Recover to −0.20% or better → unlock; normal TP/SL starts again. Hard safety −0.60%.',
     ],
   },
   {
