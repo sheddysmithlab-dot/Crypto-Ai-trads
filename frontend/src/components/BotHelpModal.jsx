@@ -16,9 +16,10 @@ const SECTIONS = [
   {
     title: 'Stop-loss (per trade)',
     items: [
-      '−0.70% → LOSS LOCK + HOLD (no trail exit).',
-      'Sell only when price recovers inside −0.50% (gross ≥ −0.50%); otherwise keep holding.',
-      'No Bybit reconcile fake exits — positions only close via path SL or profit lock.',
+      '−0.70% → LOSS LOCK + HOLD (no instant sell).',
+      'Loss zone: 0.20% upward trail — sell line = best recovery + 0.20 (e.g. −0.66 → sell −0.46).',
+      'Recover to −0.20% or better → UNLOCK (no sell) → profit book @ +0.50%.',
+      'Deeper than −0.70% (−1%, −2%…) → HOLD until trail or unlock.',
     ],
   },
   {
