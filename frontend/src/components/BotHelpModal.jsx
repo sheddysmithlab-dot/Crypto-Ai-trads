@@ -16,9 +16,9 @@ const SECTIONS = [
   {
     title: 'Stop-loss (per trade)',
     items: [
-      '−0.50% LOCK; first trail 0.10% (floor band −0.40%); −+-+ choppy uses 0.20% recovery trail.',
-      'Continuous dump --- (3 adverse ticks) → emergency exit at −0.50%.',
-      'Recover to −0.20% or better → unlock; normal TP/SL starts again. Hard safety −0.60%.',
+      '−0.70% → LOSS LOCK + HOLD (no trail exit).',
+      'Sell only when price recovers inside −0.50% (gross ≥ −0.50%); otherwise keep holding.',
+      'No Bybit reconcile fake exits — positions only close via path SL or profit lock.',
     ],
   },
   {

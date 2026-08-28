@@ -914,15 +914,14 @@ FLIP_EXIT_MIN_GROSS_PCT = float(os.environ.get("FLIP_EXIT_MIN_GROSS_PCT", "0.25"
 # Do not wipe a brand-new local open just because Bybit position API lags a few seconds.
 RECONCILE_GRACE_SECONDS = float(os.environ.get("RECONCILE_GRACE_SECONDS", "30"))
 # Protective stop-loss (gross %, LONG/SHORT symmetric) — SL-only policy:
-#   −0.50% → LOSS LOCK; trail 0.20% (exits stay inside −0.70% band);
-#   recover to −0.20% or better → CLEAR lock;
-#   past −0.70% (deeper) → HOLD (no exit) until back inside −0.70%, then exit @ −0.70%.
+#   −0.70% → LOSS LOCK + HOLD (no trail exit);
+#   sell only when price recovers inside −0.50% (gross ≥ −0.50%); otherwise keep holding.
 # Profit book above is unchanged.
-LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.50"))
+LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.50"))  # recovery exit floor
 LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0.20"))
 LOSS_RECOVERY_RETRACE_CHOPPY_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_CHOPPY_PCT", "0.20"))
-LOSS_LOCK_CLEAR_PCT = float(os.environ.get("LOSS_LOCK_CLEAR_PCT", "0.20"))
-# Outer loss band: never book a loss exit worse than this; deeper = hold until back inside.
+LOSS_LOCK_CLEAR_PCT = float(os.environ.get("LOSS_LOCK_CLEAR_PCT", "0.20"))  # legacy alias
+# Loss lock arms here; deeper than this still holds until recovery inside −0.50%.
 LOSS_BAND_PCT = float(os.environ.get("LOSS_BAND_PCT", "0.70"))
 LOSS_EMERGENCY_PCT = LOSS_BAND_PCT  # alias — band edge, not instant kill
 # Small-coin loss multipliers (disabled).
@@ -1665,19 +1664,19 @@ class AITradingAgent:
                 )
                 continue
 
-            # Confirmed live fill earlier, now flat on exchange — settle local book.
-            m = self._trade_metrics(trade, for_close=True)
-            self._finalize_trade_history(
-                trade, m, "Bybit reconcile — position already flat on exchange"
-            )
+            # Confirmed fill but flat on exchange — drop silently (no fake EXITED / bad PnL).
+            tid = int(trade.get("id") or 0)
+            self.trade_history = [
+                r for r in self.trade_history if int(r.get("id") or 0) != tid
+            ]
+            try:
+                trade_db.delete_trade(tid)
+            except Exception:
+                pass
             settled += 1
             print(
-                f"[RECONCILE] Cleared phantom #{trade.get('id')} {trade.get('pair')} "
-                f"{side} (not on Bybit)"
-            )
-            notifications.push(
-                f"Synced: #{trade.get('id')} {trade.get('pair')} already flat on Bybit — cleared from open list.",
-                "info",
+                f"[RECONCILE] Dropped #{tid} {trade.get('pair')} {side} "
+                f"(already flat on Bybit — no booked exit)"
             )
         if settled:
             self.trades = still_open
@@ -1996,12 +1995,12 @@ class AITradingAgent:
         clean_tp = None
         # Probe loss tier from filled entry (trade dict not built yet).
         _probe = {"entry": filled_price}
-        protect_pct, _emerg_pct, _is_small, _tier = self._loss_policy_for_trade(_probe)
+        protect_pct, band_pct, _is_small, _tier = self._loss_policy_for_trade(_probe)
         if source == "auto":
             clean_sl, clean_tp = self._fixed_exit_prices(
                 filled_price,
                 side,
-                loss_pct=protect_pct,
+                loss_pct=band_pct,
                 profit_pct=PATH_TP_WIDE_PCT,
             )
         else:
@@ -2050,7 +2049,7 @@ class AITradingAgent:
             "exit_mode": "path_sl" if source == "auto" else "manual",
             "entry_pattern": ENTRY_PATTERN_NAME,
             # Path SL + profit lock/trail state (auto):
-            #   SL: −0.50% lock + 0.20% trail (exit inside −0.70%); deeper → hold until back inside
+            #   SL: −0.70% lock + HOLD; sell only when recovered inside −0.50%
             #   Profit: +0.50% lock (trail 0.10→floor 0.40); 1m also +0.65→floor 0.55 then +0.20
             "path_last_gross_pct": 0.0,
             "path_adverse_streak": 0,
@@ -2062,13 +2061,13 @@ class AITradingAgent:
             "profit_lock": False,
             "profit_lock_level": None,  # ratchet: 0.50 → (1m: 0.65) → +0.20 …
             "loss_protect": False,
-            "loss_deep_hold": False,  # True while gross worse than −0.70% band
+            "loss_deep_hold": False,  # True while −0.70% lock armed (hold until −0.50% recovery)
             "loss_adverse_extreme_gross": None,  # worst trough after protect (most negative)
             "loss_recovery_peak_gross": None,    # best recovery after trough
             "loss_adverse_extreme_price": None,
             "loss_recovery_peak_price": None,
-            "path_sl_pct": protect_pct,
-            "loss_protect_pct": protect_pct,
+            "path_sl_pct": band_pct,
+            "loss_protect_pct": band_pct,
             "path_tp_pct": PROFIT_LOCK_PCT,
         }
         self.trades.append(trade)
@@ -2334,71 +2333,39 @@ class AITradingAgent:
         )
 
     def _loss_policy_for_trade(self, trade: dict) -> tuple[float, float, bool, str]:
-        """Return (protect_pct, band_pct, is_small_coin, tier_label).
+        """Return (recovery_exit_pct, lock_pct, is_small_coin, tier_label).
 
-        All coins: −0.50% protect lock; 0.20% trail; −0.70% outer band (deep = hold).
+        All coins: −0.70% lock + HOLD; sell only when recovered inside −0.50%.
         """
         return LOSS_PROTECT_PCT, LOSS_BAND_PCT, False, "normal"
 
     def _loss_retrace_for_trade(self, trade: dict) -> float:
-        """Recovery-trail giveback fixed at 0.20% (SL band policy)."""
+        """Legacy — trail exits disabled; kept for env compatibility."""
         return float(LOSS_RECOVERY_RETRACE_PCT)
 
     def _loss_band_pct(self) -> float:
-        """Outer loss band (−0.70%): exits book at/inside this; deeper = hold."""
+        """Loss lock level (−0.70%): hold until recovery inside −0.50%."""
         return float(LOSS_BAND_PCT)
 
     def _update_path_sl_state(self, trade: dict, gross_pct: float, mark: float | None = None) -> None:
-        """Update path streaks + profit/loss protect UI levels.
-
-        Path control: --- dump → emergency in exit engine; −+-+ → normal protect trail.
-        Never widen UI SL past the protect floor.
-        """
-        protect_pct, _emerg_pct, _is_small, _tier = self._loss_policy_for_trade(trade)
-        last = float(trade.get("path_last_gross_pct") if trade.get("path_last_gross_pct") is not None else 0.0)
+        """Update profit/loss protect UI levels for open trades."""
+        protect_pct, band_pct, _is_small, _tier = self._loss_policy_for_trade(trade)
         if trade.get("path_seeded") is not True:
             trade["path_last_gross_pct"] = gross_pct
             trade["path_seeded"] = True
-            trade["path_adverse_streak"] = 0
-            trade["path_favorable_streak"] = 0
             return
-
-        eps = 1e-6
-        if gross_pct < last - eps:
-            streak = int(trade.get("path_adverse_streak") or 0) + 1
-            trade["path_adverse_streak"] = streak
-            trade["path_favorable_streak"] = 0
-            if streak >= PATH_SL_ADVERSE_STEPS:
-                trade["path_continuous_dump"] = True
-            if last > eps or gross_pct > eps:
-                trade["path_profit_choppy"] = True
-        elif gross_pct > last + eps:
-            fav = int(trade.get("path_favorable_streak") or 0) + 1
-            trade["path_favorable_streak"] = fav
-            trade["path_adverse_streak"] = 0
-            if fav >= PATH_TP_FAVORABLE_STEPS:
-                trade["path_continuous_run"] = True
-            if last < -eps or gross_pct < -eps:
-                trade["path_choppy"] = True
-        else:
-            trade["path_adverse_streak"] = 0
-            trade["path_favorable_streak"] = 0
 
         trade["path_last_gross_pct"] = gross_pct
 
-        # Loss protect activate + track extremes (price + gross)
-        if gross_pct <= -protect_pct:
+        # Loss lock arms at −0.70%; hold until recovery inside −0.50%.
+        if gross_pct <= -band_pct:
             trade["loss_protect"] = True
+            trade["loss_deep_hold"] = True
         if trade.get("loss_protect"):
-            # Recovered to −0.20% or better → clear protect lock (may still go to profit)
-            if gross_pct >= -LOSS_LOCK_CLEAR_PCT - 1e-9:
-                self._clear_loss_protect_lock(trade)
-            else:
-                self._update_loss_protect_extremes(trade, gross_pct, mark)
+            self._update_loss_protect_extremes(trade, gross_pct, mark)
 
-        # Never widen permitted risk for choppy — UI SL stays at protect level
-        trade["path_sl_pct"] = protect_pct
-        trade["loss_protect_pct"] = protect_pct
+        trade["path_sl_pct"] = band_pct
+        trade["loss_protect_pct"] = band_pct
 
         # Profit step-lock UI (1m: 0.50 then fee-pack 0.65+)
         lock_start = self._profit_lock_start_pct(trade)
@@ -2413,15 +2380,9 @@ class AITradingAgent:
             trade["lock_level_pct"] = lock_lvl
             trade["sell_trigger_pct"] = trail_stop
         elif trade.get("loss_protect"):
-            retrace = self._loss_retrace_for_trade(trade)
             trade["is_stop_active"] = True
-            trade["stop_level_pct"] = -protect_pct
-            rec = trade.get("loss_recovery_peak_gross")
-            if rec is not None:
-                trade["sell_trigger_pct"] = float(rec) - retrace
-            else:
-                # Fresh lock: mirror profit floor band (−0.50 + 0.10 → −0.40)
-                trade["sell_trigger_pct"] = -protect_pct + float(LOSS_RECOVERY_RETRACE_PCT)
+            trade["stop_level_pct"] = -band_pct
+            trade["sell_trigger_pct"] = -protect_pct
             trade["path_tp_pct"] = lock_start
             trade["is_lock_active"] = False
         else:
@@ -2448,9 +2409,8 @@ class AITradingAgent:
             trade["sl_price"] = round(sl, price_decimals_for_mark(entry))
             trade["tp_price"] = round(tp, price_decimals_for_mark(entry))
         elif trade.get("loss_protect"):
-            # SL display at protect level; --- dump / hard floor handled in exit engine
             sl, tp = self._fixed_exit_prices(
-                entry, side, loss_pct=protect_pct, profit_pct=lock_start
+                entry, side, loss_pct=band_pct, profit_pct=lock_start
             )
             if sl is not None:
                 trade["sl_price"] = sl
@@ -2458,7 +2418,7 @@ class AITradingAgent:
                 trade["tp_price"] = tp
         else:
             sl, tp = self._fixed_exit_prices(
-                entry, side, loss_pct=protect_pct, profit_pct=lock_start
+                entry, side, loss_pct=band_pct, profit_pct=lock_start
             )
             if sl is not None:
                 trade["sl_price"] = sl
@@ -2530,11 +2490,7 @@ class AITradingAgent:
         return float(trade.get("profit_lock_level") or start)
 
     def _clear_loss_protect_lock(self, trade: dict) -> None:
-        """Remove −0.50% loss LOCK after recovery to −0.20% or better.
-
-        Clears recovery anchors so a later re-dip to −0.50% can arm a fresh lock.
-        Does not touch profit_lock / peak_profit.
-        """
+        """Clear −0.70% loss lock after recovery exit or manual reset."""
         trade["loss_protect"] = False
         trade["loss_deep_hold"] = False
         trade["loss_recovery_peak_gross"] = None
@@ -2549,13 +2505,7 @@ class AITradingAgent:
     def _update_loss_protect_extremes(
         self, trade: dict, gross_pct: float, mark: float | None
     ) -> None:
-        """After −0.50% LOCK: track best recovery PnL (never move recovery backward).
-
-        best_recovery only improves (higher gross / less loss). New deeper troughs
-        do NOT reset the recovery anchor while the position stays open.
-        recovery_drawdown = best_recovery_pnl − current_pnl (evaluated in exit).
-        Lock clears separately when gross recovers to −LOSS_LOCK_CLEAR_PCT or better.
-        """
+        """While −0.70% lock is armed: track best recovery PnL (never move backward)."""
         side = trade.get("side")
         # Optional: still record worst adverse for logs (does not reset recovery)
         adv = trade.get("loss_adverse_extreme_gross")
@@ -2598,10 +2548,10 @@ class AITradingAgent:
         return entry * (1.0 - float(gross_pct) / 100.0)
 
     def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
-        """Single path-exit engine: stepped profit locks + band-aware loss protect.
+        """Single path-exit engine: stepped profit locks + hold-until-recovery loss protect.
 
-        Priority: (1) deep past −0.70% → HOLD until back inside, then exit @ −0.70%
-        (2) PROFIT LOCK (unchanged) (3) LOSS LOCK + 0.20% trail (exit clamped inside −0.70%).
+        Priority: (1) PROFIT LOCK (unchanged)
+        (2) −0.70% LOSS LOCK + HOLD until gross recovers inside −0.50%, then exit.
         LONG/SHORT symmetric on gross %. Fees stay out of the trigger.
         """
         trade.pop("_exit_fill_mark", None)
@@ -2635,30 +2585,7 @@ class AITradingAgent:
             elif target_gross < 0 and gross_pct < target_gross - 1e-9:
                 trade["_exit_fill_mark"] = self._mark_from_gross_pct(entry, side, target_gross)
 
-        # 1) Outer band −0.70%: deeper → HOLD (no exit). Back inside → exit @ −0.70%.
-        if gross_pct < -band_pct - 1e-12:
-            trade["loss_deep_hold"] = True
-            trade["loss_protect"] = True
-            trade["small_coin_emerg_streak"] = 0
-            trade.pop("small_coin_emerg_since", None)
-            # Still track recovery extremes while holding deep.
-            self._update_loss_protect_extremes(trade, gross_pct, mark)
-            return None  # HOLD — do not exit while past −0.70%
-
-        if trade.get("loss_deep_hold"):
-            # Recovered back inside the −0.70% band → book at band edge.
-            trade["loss_deep_hold"] = False
-            _arm_paper_fill(-band_pct)
-            return (
-                f"LOSS_BAND_EXIT | {side} back_inside band=−{band_pct:g}% "
-                f"now={gross_pct:.3f}% (held while deeper) "
-                f"tier={tier} mark={mark:.6f} entry={entry:.6f}"
-            )
-
-        trade["small_coin_emerg_streak"] = 0
-        trade.pop("small_coin_emerg_since", None)
-
-        # 2) Profit step-locks (unchanged)
+        # 1) Profit step-locks (unchanged)
         if gross_pct >= lock_start:
             self._ratchet_profit_lock_level(trade, gross_pct)
 
@@ -2686,38 +2613,22 @@ class AITradingAgent:
                 )
             return None
 
-        # 3) Loss LOCK @ −0.50% + 0.20% trail; fill clamped inside −0.70% band
-        if gross_pct <= -protect_pct:
+        # 2) Loss LOCK @ −0.70% + HOLD; sell only when recovered inside −0.50%.
+        if gross_pct <= -band_pct:
+            trade["loss_deep_hold"] = True
             trade["loss_protect"] = True
 
-        if trade.get("loss_protect"):
-            if gross_pct >= -LOSS_LOCK_CLEAR_PCT - 1e-9:
-                self._clear_loss_protect_lock(trade)
-                return None
-
+        if trade.get("loss_protect") or trade.get("loss_deep_hold"):
             self._update_loss_protect_extremes(trade, gross_pct, mark)
-            best_recovery = float(
-                trade.get("loss_recovery_peak_gross")
-                if trade.get("loss_recovery_peak_gross") is not None
-                else gross_pct
-            )
-            retrace_need = self._loss_retrace_for_trade(trade)
-            recovery_drawdown = best_recovery - gross_pct
-            if recovery_drawdown >= retrace_need - 1e-9:
-                fill_at = best_recovery - retrace_need
-                # Never book a loss exit worse than the −0.70% band.
-                fill_at = max(fill_at, -band_pct)
-                _arm_paper_fill(fill_at)
+            if gross_pct >= -protect_pct - 1e-9:
+                _arm_paper_fill(max(gross_pct, -protect_pct))
+                self._clear_loss_protect_lock(trade)
                 return (
-                    f"LOSS_PROTECT_TRAIL | {side} LOCK@−{protect_pct:g}% "
-                    f"best_recovery={best_recovery:.3f}% now={gross_pct:.3f}% "
-                    f"recovery_drawdown={recovery_drawdown:.3f}%≥{retrace_need:g}% "
-                    f"fill≥−{band_pct:g}% tier={tier} "
-                    f"worst={trade.get('loss_adverse_extreme_gross')} "
-                    f"rec_px={trade.get('loss_recovery_peak_price')} "
-                    f"mark={mark:.6f} entry={entry:.6f}"
+                    f"LOSS_RECOVERY_EXIT | {side} recovered inside −{protect_pct:g}% "
+                    f"now={gross_pct:.3f}% (held from −{band_pct:g}% lock) "
+                    f"tier={tier} mark={mark:.6f} entry={entry:.6f}"
                 )
-            return None
+            return None  # HOLD — wait for recovery inside −0.50%
 
         return None
 
@@ -4111,8 +4022,7 @@ def agent_policy_summary() -> str:
         f"(floor +{PROFIT_LOCK_PCT - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%); "
         f"1m also +{PROFIT_LOCK_PCT_1M:g}%→floor +{PROFIT_LOCK_PCT_1M - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%; "
         f"above steps +{PROFIT_LOCK_STEP_PCT:g} trail−{PROFIT_TRAIL_GIVEBACK_PCT:g}% | "
-        f"loss PROTECT −{LOSS_PROTECT_PCT:g}% trail −{LOSS_RECOVERY_RETRACE_PCT:g}% "
-        f"(clear @−{LOSS_LOCK_CLEAR_PCT:g}%+; band −{LOSS_BAND_PCT:g}% deep=hold) | "
+        f"loss LOCK −{LOSS_BAND_PCT:g}% + HOLD; sell inside −{LOSS_PROTECT_PCT:g}% recovery | "
         "manual BUY/SELL + emergency sell-all"
     )
 
@@ -4538,11 +4448,10 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         else:
             lock_pct = PROFIT_LOCK_PCT
             sl_price, tp_price = agent._fixed_exit_prices(
-                float(mark_px), side, loss_pct=LOSS_PROTECT_PCT, profit_pct=lock_pct
+                float(mark_px), side, loss_pct=LOSS_BAND_PCT, profit_pct=lock_pct
             )
             exit_label = (
-                f"loss protect −{LOSS_PROTECT_PCT:g}%/trail −{LOSS_RECOVERY_RETRACE_PCT:g}% "
-                f"clear@−{LOSS_LOCK_CLEAR_PCT:g}%+ band −{LOSS_BAND_PCT:g}% (deep=hold) | "
+                f"loss lock −{LOSS_BAND_PCT:g}% + HOLD; sell inside −{LOSS_PROTECT_PCT:g}% recovery | "
                 f"profit lock +{lock_pct:g}%/−{PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}% "
                 f"(floor +{lock_pct - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%); "
                 f"above +{PROFIT_LOCK_STEP_PCT:g}/−{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
@@ -5325,8 +5234,7 @@ async def auto_exit_watchdog():
         f"(profit +{PROFIT_LOCK_PCT:g}%/−{PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}% "
         f"floor +{PROFIT_LOCK_PCT - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%; "
         f"above −{PROFIT_TRAIL_GIVEBACK_PCT:g}% | "
-        f"loss protect −{LOSS_PROTECT_PCT:g}%/trail −{LOSS_RECOVERY_RETRACE_PCT:g}% | "
-        f"clear@−{LOSS_LOCK_CLEAR_PCT:g}%+ | band −{LOSS_BAND_PCT:g}% deep=hold)."
+        f"loss lock −{LOSS_BAND_PCT:g}% + HOLD; sell inside −{LOSS_PROTECT_PCT:g}% recovery)."
     )
     while True:
         try:
