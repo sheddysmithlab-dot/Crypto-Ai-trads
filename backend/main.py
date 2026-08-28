@@ -899,13 +899,11 @@ MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", 
 AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path lock/trail profit + protective SL (same engine)
 INVERT_AUTO_TRADE_FIRE = False
 # Profit book (gross %, LONG/SHORT symmetric):
-#   Default: +0.50% first LOCK; trail 0.10% → floor +0.40%; then +0.20 steps / 0.10 trail.
-#   1m dual lock:
-#     (1) +0.50% → trail 0.10% → floor +0.40%  (same as other TFs while under +0.65%)
-#     (2) +0.65%+ → fee-pack lock; trail 0.10% → floor +0.55%; then +0.20 steps / 0.10 trail
+#   Arm @ +0.50%; lock = peak gross (continuous); trail 0.10% → floor peak−0.10
+#   (e.g. peak +0.73% → exit floor +0.63%; peak +0.58% → floor +0.48%).
 PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.50"))
-PROFIT_LOCK_PCT_1M = float(os.environ.get("PROFIT_LOCK_PCT_1M", "0.65"))
-PROFIT_LOCK_STEP_PCT = float(os.environ.get("PROFIT_LOCK_STEP_PCT", "0.20"))
+PROFIT_LOCK_PCT_1M = float(os.environ.get("PROFIT_LOCK_PCT_1M", "0.65"))  # legacy UI label
+PROFIT_LOCK_STEP_PCT = float(os.environ.get("PROFIT_LOCK_STEP_PCT", "0.20"))  # unused — continuous trail
 PROFIT_TRAIL_FIRST_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "0.10"))
 PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.10"))
 # Opposite-signal flip: only exit old auto trade when unrealized gross > this %;
@@ -2438,56 +2436,22 @@ class AITradingAgent:
         return self._is_scalp_trade(trade)
 
     def _profit_giveback_for_lock(self, lock_lvl: float, trade: dict | None = None) -> float:
-        """Giveback band for the active lock level.
-
-        Default / 1m under fee-pack: first lock (+0.50) → 0.10% giveback (floor +0.40).
-        1m fee-pack lock (+0.65): also 0.10% giveback (floor +0.55).
-        Higher stepped locks (+0.85…): 0.10% giveback.
-        """
-        lvl = float(lock_lvl)
-        if self._is_1m_trade(trade):
-            fee_lock = float(PROFIT_LOCK_PCT_1M)
-            # Both 0.50 and 0.65 use the tight first trail on 1m.
-            if lvl <= fee_lock + 1e-9:
-                return float(PROFIT_TRAIL_FIRST_GIVEBACK_PCT)
-            return float(PROFIT_TRAIL_GIVEBACK_PCT)
-        start = self._profit_lock_start_pct(trade)
-        if lvl <= float(start) + 1e-9:
-            return float(PROFIT_TRAIL_FIRST_GIVEBACK_PCT)
+        """Trail giveback from peak lock — always 0.10% (floor = lock − 0.10)."""
         return float(PROFIT_TRAIL_GIVEBACK_PCT)
 
     def _ratchet_profit_lock_level(self, trade: dict, gross_pct: float) -> float:
-        """Step profit locks; never move lock backward.
+        """Continuous profit trail: lock ratchets with peak gross (never backward).
 
-        Other TFs: 0.50 → 0.70 → 0.90 …
-        1m dual:   0.50 (while < 0.65) → 0.65 → 0.85 → 1.05 …
+        Examples: peak +0.73% → floor +0.63%; peak +0.58% → floor +0.48%.
         """
         trade["profit_lock"] = True
         start = self._profit_lock_start_pct(trade)
-        step = float(PROFIT_LOCK_STEP_PCT)
-        if step <= 0:
-            step = 0.20
         g = float(gross_pct)
-
-        if self._is_1m_trade(trade):
-            fee_lock = float(PROFIT_LOCK_PCT_1M)
-            if g + 1e-12 >= fee_lock:
-                n = int((g - fee_lock + 1e-12) // step)
-                if n < 0:
-                    n = 0
-                level = fee_lock + n * step
-            else:
-                level = start  # +0.50 while still under fee-pack lock
-        else:
-            n = int((g - start + 1e-12) // step)
-            if n < 0:
-                n = 0
-            level = start + n * step
-
         prev = trade.get("profit_lock_level")
-        if prev is None or level > float(prev) + 1e-9:
-            trade["profit_lock_level"] = float(level)
-        return float(trade.get("profit_lock_level") or start)
+        base = float(prev) if prev is not None else start
+        level = max(base, g)
+        trade["profit_lock_level"] = float(level)
+        return float(trade["profit_lock_level"])
 
     def _clear_loss_protect_lock(self, trade: dict) -> None:
         """Clear −0.70% loss lock after recovery exit or manual reset."""
@@ -2596,19 +2560,11 @@ class AITradingAgent:
             if lock_giveback >= giveback_need - 1e-9:
                 fill_at = lock_lvl - giveback_need
                 _arm_paper_fill(fill_at)
-                fee_note = ""
-                if self._is_1m_trade(trade):
-                    fee_note = (
-                        f" scalp dual: +{PROFIT_LOCK_PCT:g}→+{PROFIT_LOCK_PCT - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g} "
-                        f"then +{PROFIT_LOCK_PCT_1M:g}→+{PROFIT_LOCK_PCT_1M - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g};"
-                    )
+                floor_pct = lock_lvl - giveback_need
                 return (
-                    f"PROFIT_LOCK_EXIT | {side} upper_lock={lock_lvl:.3f}% now={gross_pct:.3f}% "
+                    f"PROFIT_LOCK_EXIT | {side} peak_lock={lock_lvl:.3f}% now={gross_pct:.3f}% "
                     f"giveback={lock_giveback:.3f}%≥{giveback_need:g}% "
-                    f"(first@{lock_start:g}% trail {PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}% "
-                    f"→ floor +{lock_start - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%;"
-                    f"{fee_note} "
-                    f"above trail {PROFIT_TRAIL_GIVEBACK_PCT:g}%) "
+                    f"(trail {giveback_need:g}% → floor +{floor_pct:.3f}%) "
                     f"mark={mark:.6f} entry={entry:.6f}"
                 )
             return None
@@ -4018,10 +3974,8 @@ def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
         "CANDLESTICK BRAIN + path exit | "
-        f"profit LOCK +{PROFIT_LOCK_PCT:g}% trail−{PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}% "
-        f"(floor +{PROFIT_LOCK_PCT - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%); "
-        f"1m also +{PROFIT_LOCK_PCT_1M:g}%→floor +{PROFIT_LOCK_PCT_1M - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%; "
-        f"above steps +{PROFIT_LOCK_STEP_PCT:g} trail−{PROFIT_TRAIL_GIVEBACK_PCT:g}% | "
+        f"profit arm +{PROFIT_LOCK_PCT:g}% peak-trail −{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
+        f"(e.g. +0.73→floor +0.63); "
         f"loss LOCK −{LOSS_BAND_PCT:g}% + HOLD; sell inside −{LOSS_PROTECT_PCT:g}% recovery | "
         "manual BUY/SELL + emergency sell-all"
     )
@@ -4452,9 +4406,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             )
             exit_label = (
                 f"loss lock −{LOSS_BAND_PCT:g}% + HOLD; sell inside −{LOSS_PROTECT_PCT:g}% recovery | "
-                f"profit lock +{lock_pct:g}%/−{PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}% "
-                f"(floor +{lock_pct - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%); "
-                f"above +{PROFIT_LOCK_STEP_PCT:g}/−{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
+                f"profit peak-trail arm +{lock_pct:g}%/−{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
+                f"(floor = peak − {PROFIT_TRAIL_GIVEBACK_PCT:g}%) "
                 f"SL={sl_price} TP={tp_price}"
             )
 
@@ -5231,9 +5184,7 @@ async def auto_exit_watchdog():
     """Re-check path-SL / path-TP even if a ticker tick was skipped or failed."""
     print(
         f"[AUTO-EXIT] Watchdog online "
-        f"(profit +{PROFIT_LOCK_PCT:g}%/−{PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}% "
-        f"floor +{PROFIT_LOCK_PCT - PROFIT_TRAIL_FIRST_GIVEBACK_PCT:g}%; "
-        f"above −{PROFIT_TRAIL_GIVEBACK_PCT:g}% | "
+        f"(profit arm +{PROFIT_LOCK_PCT:g}% peak-trail −{PROFIT_TRAIL_GIVEBACK_PCT:g}% | "
         f"loss lock −{LOSS_BAND_PCT:g}% + HOLD; sell inside −{LOSS_PROTECT_PCT:g}% recovery)."
     )
     while True:

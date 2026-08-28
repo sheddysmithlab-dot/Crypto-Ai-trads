@@ -24,8 +24,8 @@ const SECTIONS = [
   {
     title: 'Take-profit (per trade)',
     items: [
-      '1m/5m dual lock: +0.50%→exit floor +0.40%; if run continues, +0.65%→floor +0.55%; then +0.20 steps / 0.10 trail.',
-      'Other TFs (15m+): +0.50% lock → floor +0.40%; then +0.20 steps / 0.10 trail.',
+      'Arm @ +0.50%; lock follows peak profit; trail 0.10% (peak +0.73% → floor +0.63%).',
+      'All TFs: continuous ratchet — bottom lock always peak − 0.10%.',
       'Hard ceiling not fixed — stepped locks keep trailing while trend runs.',
     ],
   },
