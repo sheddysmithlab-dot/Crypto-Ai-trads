@@ -909,17 +909,21 @@ PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0
 FLIP_EXIT_MIN_GROSS_PCT = float(os.environ.get("FLIP_EXIT_MIN_GROSS_PCT", "0.25"))
 # Do not wipe a brand-new local open just because Bybit position API lags a few seconds.
 RECONCILE_GRACE_SECONDS = float(os.environ.get("RECONCILE_GRACE_SECONDS", "30"))
-# Protective stop-loss (gross %, LONG/SHORT symmetric) — SL-only policy:
+# Protective stop-loss (gross %, LONG/SHORT symmetric) — default (5m+):
 #   −0.50% → soft LOSS LOCK arms;
 #   −0.50…−0.70% zone: 0.20% upward trail (sell line = best_recovery + 0.20);
 #   −0.70% → hard exit (LOSS_BAND_EXIT);
 #   recover to −0.20% or better → UNLOCK (no sell) → profit book @ +0.50%.
-# Profit book above is unchanged.
+# 1m-only tighter band (below). Profit book unchanged on all TFs.
 LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.50"))  # soft lock arm
 LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0.20"))
 LOSS_RECOVERY_RETRACE_CHOPPY_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_CHOPPY_PCT", "0.20"))
 LOSS_LOCK_CLEAR_PCT = float(os.environ.get("LOSS_LOCK_CLEAR_PCT", "0.20"))  # unlock → profit book
 LOSS_BAND_PCT = float(os.environ.get("LOSS_BAND_PCT", "0.70"))  # hard floor / instant exit
+# 1m-only SL: soft −0.30% · hard −0.40% · unlock −0.10% → profit book
+LOSS_PROTECT_PCT_1M = float(os.environ.get("LOSS_PROTECT_PCT_1M", "0.30"))
+LOSS_BAND_PCT_1M = float(os.environ.get("LOSS_BAND_PCT_1M", "0.40"))
+LOSS_LOCK_CLEAR_PCT_1M = float(os.environ.get("LOSS_LOCK_CLEAR_PCT_1M", "0.10"))
 
 
 def _brain_exit_prices_valid(entry: float, side: str, sl: float, tp: float) -> bool:
@@ -991,7 +995,7 @@ class AITradingAgent:
     # TF hard stop (gross % loss) — tightened after trail losses to −1%+.
     HARD_STOP_PCT_BY_TF: dict[str, float] = {
         "30s": float(os.environ.get("HARD_STOP_30S", "0.30")),
-        "1m": float(os.environ.get("HARD_STOP_1M", "0.35")),
+        "1m": float(os.environ.get("HARD_STOP_1M", "0.40")),  # align with 1m hard band
         "3m": float(os.environ.get("HARD_STOP_3M", "0.40")),
         "5m": float(os.environ.get("HARD_STOP_5M", "0.35")),  # same as 1m scalp
         "10m": float(os.environ.get("HARD_STOP_10M", "0.45")),
@@ -2074,7 +2078,7 @@ class AITradingAgent:
             "exit_mode": "path_sl" if source == "auto" else "manual",
             "entry_pattern": ENTRY_PATTERN_NAME,
             # Path SL + profit lock/trail state (auto):
-            #   SL: −0.50% soft lock, trail in −0.50…−0.70%, hard exit @ −0.70%
+            #   Default SL: −0.50% soft / −0.70% hard; 1m: −0.30% / −0.40%
             "path_last_gross_pct": 0.0,
             "path_adverse_streak": 0,
             "path_favorable_streak": 0,
@@ -2085,7 +2089,7 @@ class AITradingAgent:
             "profit_lock": False,
             "profit_lock_level": None,  # ratchet: 0.50 → (1m: 0.65) → +0.20 …
             "loss_protect": False,
-            "loss_deep_hold": False,  # True once gross ≤ −0.70% (hard floor band)
+            "loss_deep_hold": False,  # True once gross ≤ hard floor band
             "loss_adverse_extreme_gross": None,  # worst trough after protect (most negative)
             "loss_recovery_peak_gross": None,    # best recovery after trough
             "loss_adverse_extreme_price": None,
@@ -2360,6 +2364,7 @@ class AITradingAgent:
         """Return (trail_pct, arm_pct, band_pct, is_small_coin, tier_label).
 
         Micro-cap pairs: soft lock @ −0.25%, hard exit @ −0.35%.
+        1m: soft lock @ −0.30%, hard exit @ −0.40%.
         Others: soft lock @ −0.50%, trail, hard exit @ −0.70%.
         """
         if self._is_micro_cap_pair(trade):
@@ -2370,7 +2375,21 @@ class AITradingAgent:
                 True,
                 "micro_cap",
             )
+        if self._is_1m_trade(trade):
+            return (
+                LOSS_RECOVERY_RETRACE_PCT,
+                LOSS_PROTECT_PCT_1M,
+                LOSS_BAND_PCT_1M,
+                False,
+                "1m",
+            )
         return LOSS_RECOVERY_RETRACE_PCT, LOSS_PROTECT_PCT, LOSS_BAND_PCT, False, "normal"
+
+    def _loss_lock_clear_pct_for_trade(self, trade: dict) -> float:
+        """Unlock threshold (recover to −X% or better). 1m: −0.10%; else −0.20%."""
+        if self._is_1m_trade(trade):
+            return float(LOSS_LOCK_CLEAR_PCT_1M)
+        return float(LOSS_LOCK_CLEAR_PCT)
 
     def _loss_retrace_for_trade(self, trade: dict) -> float:
         """Upward recovery trail in loss zone (sell line = best_recovery + this)."""
@@ -2398,14 +2417,15 @@ class AITradingAgent:
 
         trade["path_last_gross_pct"] = gross_pct
 
-        # Soft lock @ −0.50%; trail in −0.50…−0.70%; hard floor @ −0.70%.
+        # Soft lock @ arm%; trail in arm…band; hard floor @ band%.
         if gross_pct <= -arm_pct:
             trade["loss_protect"] = True
         if gross_pct <= -band_pct:
             trade["loss_deep_hold"] = True
         if trade.get("loss_protect"):
             self._update_loss_protect_extremes(trade, gross_pct, mark)
-            if gross_pct >= -LOSS_LOCK_CLEAR_PCT - 1e-9:
+            clear_pct = self._loss_lock_clear_pct_for_trade(trade)
+            if gross_pct >= -clear_pct - 1e-9:
                 self._clear_loss_protect_lock(trade)
 
         trade["path_sl_pct"] = band_pct
@@ -2476,12 +2496,15 @@ class AITradingAgent:
         return float(PROFIT_LOCK_PCT)
 
     def _is_scalp_trade(self, trade: dict | None = None) -> bool:
-        """1m and 5m share the same scalp profit/entry policy."""
+        """1m and 5m share the same scalp entry/confirm pipeline (exit may differ on 1m)."""
         return is_scalp_tf((trade or {}).get("timeframe_key"))
 
     def _is_1m_trade(self, trade: dict | None = None) -> bool:
-        # Back-compat alias — scalp policy covers 1m + 5m.
-        return self._is_scalp_trade(trade)
+        """True only for 1m trades (not 5m scalp)."""
+        tf = str((trade or {}).get("timeframe_key") or "").strip().lower()
+        if not tf:
+            tf = str(SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")).strip().lower()
+        return tf == "1m"
 
     def _profit_giveback_for_lock(self, lock_lvl: float, trade: dict | None = None) -> float:
         """Trail giveback from peak lock — always 0.10% (floor = lock − 0.10)."""
@@ -2502,7 +2525,7 @@ class AITradingAgent:
         return float(trade["profit_lock_level"])
 
     def _clear_loss_protect_lock(self, trade: dict) -> None:
-        """Clear soft loss lock after −0.20% unlock, trail exit, or hard band exit."""
+        """Clear soft loss lock after unlock, trail exit, or hard band exit."""
         trade["loss_protect"] = False
         trade["loss_deep_hold"] = False
         trade["loss_recovery_peak_gross"] = None
@@ -2562,9 +2585,10 @@ class AITradingAgent:
     def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
         """Single path-exit engine: profit locks + two-tier loss stop.
 
-        Priority: (1) PROFIT LOCK (2) soft lock @ −0.50% with +0.20% trail in
-        −0.50…−0.70% zone; hard exit @ −0.70%; unlock @ −0.20% (no sell).
-        LONG/SHORT symmetric on gross %. Fees stay out of the trigger.
+        Priority: (1) PROFIT LOCK (2) soft lock with recovery trail in arm…band zone;
+        hard exit @ band; unlock @ clear (no sell). 1m uses −0.30/−0.40/−0.10;
+        other TFs use −0.50/−0.70/−0.20. LONG/SHORT symmetric on gross %.
+        Fees stay out of the trigger.
         """
         trade.pop("_exit_fill_mark", None)
         entry = float(trade.get("entry") or 0)
@@ -2575,6 +2599,7 @@ class AITradingAgent:
             return None
 
         trail_pct, arm_pct, band_pct, is_small, tier = self._loss_policy_for_trade(trade)
+        clear_pct = self._loss_lock_clear_pct_for_trade(trade)
         lock_start = self._profit_lock_start_pct(trade)
 
         if side == "LONG":
@@ -2617,7 +2642,7 @@ class AITradingAgent:
                 )
             return None
 
-        # 2) Soft lock @ −0.50%; trail in −0.50…−0.70%; hard exit @ −0.70%.
+        # 2) Soft lock @ arm%; trail in arm…band; hard exit @ band%.
         if gross_pct <= -arm_pct:
             trade["loss_protect"] = True
         if gross_pct <= -band_pct:
@@ -2626,12 +2651,12 @@ class AITradingAgent:
         if trade.get("loss_protect"):
             self._update_loss_protect_extremes(trade, gross_pct, mark)
 
-            # Recover to −0.20% or better → unlock, no sell; profit book takes over.
-            if gross_pct >= -LOSS_LOCK_CLEAR_PCT - 1e-9:
+            # Recover to −clear% or better → unlock, no sell; profit book takes over.
+            if gross_pct >= -clear_pct - 1e-9:
                 self._clear_loss_protect_lock(trade)
                 return None
 
-            # Hard floor @ −0.70% — instant exit (prevents deep bleed).
+            # Hard floor @ band% — instant exit (prevents deep bleed).
             if gross_pct <= -band_pct - 1e-9:
                 _arm_paper_fill(-band_pct)
                 self._clear_loss_protect_lock(trade)
@@ -2641,7 +2666,7 @@ class AITradingAgent:
                     f"tier={tier} mark={mark:.6f} entry={entry:.6f}"
                 )
 
-            # Recovery trail while still above hard floor (−0.50…−0.70% band).
+            # Recovery trail while still above hard floor.
             best = float(
                 trade.get("loss_recovery_peak_gross")
                 if trade.get("loss_recovery_peak_gross") is not None
@@ -2899,9 +2924,9 @@ class AITradingAgent:
         return max(times) if times else None
 
     def one_m_earliest_next_fire_ms(self, pair: str, interval_ms: int) -> int | None:
-        """1m-only: after a fire on candle N, next fire earliest at candle N+5.
+        """1m-only: after a fire on candle N, next fire earliest at candle N+3.
 
-        Example: trade on candle 1 → no fire on 2–5; detect may land on 5 → fire on 6.
+        Example: trade on candle 1 → no fire on 2–3; detect may land on 3 → fire on 4.
         """
         last = LAST_AUTO_FIRE_CANDLE_MS.get(pair)
         hist = self.last_auto_entry_candle_time(pair)
@@ -3085,8 +3110,8 @@ class AITradingAgent:
             f"[AI ENGINE] Armed — trading READY now "
             f"(boot UI scan-driven, max {ENGINE_BOOT_MAX_SEC:g}s). "
             f"Momentum watchlist gate pending. "
-            f"Detect on closed candle → 1m/5m: lock then fire on first green/red "
-            f"tick of next bar (max {ONE_M_CONFIRM_MAX_BARS} bars, no candle-close wait); "
+            f"Detect on closed candle → 1m: lock, skip 1st green/red tick, fire on 2nd "
+            f"(max {ONE_M_CONFIRM_MAX_BARS} bars); 5m: fire on 1st green/red tick; "
             f"other TFs: fire at next candle open. "
             f"First detect per pair is skipped."
         )
@@ -3493,13 +3518,16 @@ TIMEFRAME_KEY_TO_BYBIT_KLINE = {
 # different candle granularities.
 LAST_CANDLE_TIMESTAMPS = {}
 
-# Detect on last closed candle → queue → fire (1m/5m: first green/red tick; else next open).
+# Detect on last closed candle → queue → fire
+# (1m: skip 1st green/red tick, fire on 2nd; 5m: first green/red tick; else next open).
 PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
 # 1m only: last auto fire candle open-time per pair (blocks fires after a gap).
 LAST_AUTO_FIRE_CANDLE_MS: dict[str, int] = {}
-ONE_M_MIN_BARS_BETWEEN_FIRES = 5  # fire on N → next fire earliest N+5 (was 3)
+ONE_M_MIN_BARS_BETWEEN_FIRES = 3  # fire on N → next fire earliest N+3 (was 5)
 # 1m/5m: after pattern+AI lock, wait up to N bars for live green/red START (not candle close).
-ONE_M_CONFIRM_MAX_BARS = 5
+ONE_M_CONFIRM_MAX_BARS = 3
+# 1m only: skip this many matching color ticks before fire (1 = pehla skip, dusra pe fire).
+ONE_M_CONFIRM_SKIP_TICKS = int(os.environ.get("ONE_M_CONFIRM_SKIP_TICKS", "1"))
 ONE_M_MAX_CONCURRENT = 3  # hard cap PER PAIR while chart TF is 1m (fee control)
 # Hold new scalp entries when broker fees eat the session book (disabled by default).
 ONE_M_FEE_HOLD_ENABLED = os.environ.get("ONE_M_FEE_HOLD_ENABLED", "0").strip().lower() in (
@@ -4052,7 +4080,9 @@ def agent_policy_summary() -> str:
         "CANDLESTICK BRAIN + path exit | "
         f"profit arm +{PROFIT_LOCK_PCT:g}% peak-trail −{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
         f"(e.g. +0.73→floor +0.63); "
-        f"loss LOCK −{LOSS_PROTECT_PCT:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
+        f"1m loss LOCK −{LOSS_PROTECT_PCT_1M:g}%…−{LOSS_BAND_PCT_1M:g}% "
+        f"unlock @−{LOSS_LOCK_CLEAR_PCT_1M:g}%; "
+        f"else LOCK −{LOSS_PROTECT_PCT:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
         f"in −{LOSS_PROTECT_PCT:g}…−{LOSS_BAND_PCT:g}% (hard @ −{LOSS_BAND_PCT:g}%); "
         f"unlock @−{LOSS_LOCK_CLEAR_PCT:g}% → profit +{PROFIT_LOCK_PCT:g}% | "
         "manual BUY/SELL + emergency sell-all"
@@ -4485,6 +4515,19 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         brain_sl = detect.get("sl")
         brain_tp = detect.get("tp")
         lock_pct = PROFIT_LOCK_PCT
+        tf_key = str(pending.get("timeframe_key") or timeframe_key or "").strip().lower()
+        if tf_key == "1m":
+            arm_pct, band_pct, clear_pct = (
+                LOSS_PROTECT_PCT_1M,
+                LOSS_BAND_PCT_1M,
+                LOSS_LOCK_CLEAR_PCT_1M,
+            )
+        else:
+            arm_pct, band_pct, clear_pct = (
+                LOSS_PROTECT_PCT,
+                LOSS_BAND_PCT,
+                LOSS_LOCK_CLEAR_PCT,
+            )
         if (
             brain_sl
             and brain_tp
@@ -4497,12 +4540,12 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             exit_label = f"brain SL={sl_price} TP={tp_price}"
         else:
             sl_price, tp_price = agent._fixed_exit_prices(
-                float(mark_px), side, loss_pct=LOSS_PROTECT_PCT, profit_pct=lock_pct
+                float(mark_px), side, loss_pct=arm_pct, profit_pct=lock_pct
             )
             exit_label = (
-                f"loss lock −{LOSS_PROTECT_PCT:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
-                f"in −{LOSS_PROTECT_PCT:g}…−{LOSS_BAND_PCT:g}% (hard @ −{LOSS_BAND_PCT:g}%); "
-                f"unlock @−{LOSS_LOCK_CLEAR_PCT:g}% → profit +{lock_pct:g}% | "
+                f"loss lock −{arm_pct:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
+                f"in −{arm_pct:g}…−{band_pct:g}% (hard @ −{band_pct:g}%); "
+                f"unlock @−{clear_pct:g}% → profit +{lock_pct:g}% | "
                 f"profit peak-trail arm +{lock_pct:g}%/−{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
                 f"(floor = peak − {PROFIT_TRAIL_GIVEBACK_PCT:g}%) "
                 f"SL={sl_price} TP={tp_price}"
@@ -4590,9 +4633,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         )
         return True
 
-    # --- 1a) Scalp confirm-lock: fire on FIRST green/red tick of forming candle ---
-    # LONG → as soon as live > open (green starts); SHORT → live < open (red starts).
-    # Do not wait for candle close; first matching tick is enough even if it later flips.
+    # --- 1a) Scalp confirm-lock: fire on green/red tick of forming candle ---
+    # 5m: first matching tick. 1m: skip 1st matching tick, fire on 2nd.
+    # LONG → live > open (green); SHORT → live < open (red). No candle-close wait.
     pending = PENDING_ENTRY_SIGNALS.get(pair)
     if (
         pending
@@ -4604,6 +4647,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         detect_ms = int(pending.get("signal_candle_time") or 0)
         want = "green" if side == "LONG" else "red"
         max_bars = int(ONE_M_CONFIRM_MAX_BARS)
+        tf_l = str(timeframe_key or "").strip().lower()
+        is_1m_confirm = tf_l == "1m"
+        skip_ticks_needed = int(ONE_M_CONFIRM_SKIP_TICKS) if is_1m_confirm else 0
 
         # Matched earlier during warmup — fire when trading ready.
         if pending.get("confirm_matched") and int(pending.get("fire_candle_time") or 0) > 0:
@@ -4676,6 +4722,41 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
         matched = _candle_body_confirms_side(side, open_px, live_px)
         if matched:
+            skipped = int(pending.get("confirm_match_skips") or 0)
+            # 1m: pehla green/red tick skip → dusra pe fire
+            if skipped < skip_ticks_needed:
+                pending["confirm_match_skips"] = skipped + 1
+                PENDING_ENTRY_SIGNALS[pair] = pending
+                _push_pattern_neon(
+                    pair=pair,
+                    candle_time_ms=bar_start,
+                    stage="confirming",
+                    side=side,
+                    action=detect.get("action"),
+                    pattern=detect.get("pattern"),
+                    reason=f"{want} tick #{skipped + 1} skipped — wait next {want} tick",
+                )
+                system_log.push_agent_chat(
+                    f"CONFIRM {side} on {pair}: 1m skip {want} tick #{skipped + 1}/"
+                    f"{skip_ticks_needed} @ live={live_px} open={open_px} "
+                    f"(bar {bars_into}/{max_bars}) — wait 2nd tick",
+                    status="match",
+                    details={
+                        "pair": pair,
+                        "side": side,
+                        "confirm_bar": bar_start,
+                        "live": live_px,
+                        "open": open_px,
+                        "seen": bars_into,
+                        "skipped": skipped + 1,
+                    },
+                )
+                print(
+                    f"[BRAIN] {side} {pair} 1m skip {want} tick #{skipped + 1}: "
+                    f"live={live_px} open={open_px} bar@{bar_start} — wait next"
+                )
+                return False
+
             pending["fire_candle_time"] = bar_start
             pending["confirm_matched"] = True
             PENDING_ENTRY_SIGNALS[pair] = pending
@@ -4703,6 +4784,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                     },
                 )
                 return False
+            tick_note = "2nd tick" if is_1m_confirm else "1st tick"
             _push_pattern_neon(
                 pair=pair,
                 candle_time_ms=bar_start,
@@ -4710,10 +4792,10 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 side=side,
                 action=detect.get("action"),
                 pattern=detect.get("pattern"),
-                reason=f"{want} started → firing now",
+                reason=f"{want} {tick_note} → firing now",
             )
             system_log.push_agent_chat(
-                f"CONFIRM {side} on {pair}: {want} started @ live={live_px} "
+                f"CONFIRM {side} on {pair}: {want} {tick_note} @ live={live_px} "
                 f"open={open_px} (bar {bars_into}/{max_bars}) → fire NOW",
                 status="match",
                 details={
@@ -4726,8 +4808,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 },
             )
             print(
-                f"[BRAIN] {side} {pair} {want}-start confirm: live={live_px} open={open_px} "
-                f"bar@{bar_start} → fire (no candle-close wait)"
+                f"[BRAIN] {side} {pair} {want}-start confirm ({tick_note}): "
+                f"live={live_px} open={open_px} bar@{bar_start} → fire"
             )
             return await _execute_queued_fire(pending)
 
@@ -4994,6 +5076,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
     detect = dict(detect)
     use_confirm_scalp = is_scalp_tf(tf_l)
+    is_1m_lock = tf_l == "1m"
     want = "green" if side == "LONG" else "red"
     PENDING_ENTRY_SIGNALS[pair] = {
         "detect": detect,
@@ -5007,6 +5090,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         "confirm_bars_seen": 0,
         "last_confirm_candle_ms": close_time,
         "confirm_matched": False,
+        "confirm_match_skips": 0,
     }
     _push_pattern_neon(
         pair=pair,
@@ -5018,6 +5102,11 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         reason=detect.get("reason"),
     )
     if use_confirm_scalp:
+        wait_reason = (
+            f"Lock {side} — skip 1st {want} tick, fire on 2nd"
+            if is_1m_lock
+            else f"Lock {side} — wait {want} start (live tick)"
+        )
         _push_pattern_neon(
             pair=pair,
             candle_time_ms=fire_candle_ms,
@@ -5025,26 +5114,42 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             side=side,
             action=detect.get("action"),
             pattern=detect.get("pattern"),
-            reason=f"Lock {side} — wait {want} start (live tick)",
+            reason=wait_reason,
         )
-        system_log.push_agent_chat(
-            f"LOCKED {side} on {pair}: {detect.get('pattern')} — fire on first {want} tick "
-            f"(max {ONE_M_CONFIRM_MAX_BARS} bars, no close wait) | AI={detect.get('ai_confirmation', 'SKIP')}",
-            status="match",
-            details={
-                "pair": pair,
-                "detect_candle": close_time,
-                "pattern": detect.get("pattern"),
-                "mode": "confirm_scalp",
-                "max_bars": ONE_M_CONFIRM_MAX_BARS,
-            },
-        )
-        print(
-            f"[BRAIN] LOCKED {side} {pair} pattern={detect.get('pattern')} "
-            f"on closed@{close_time} → fire on first {want} tick "
-            f"(max {ONE_M_CONFIRM_MAX_BARS} bars, no candle-close wait) "
-            f"(AI={detect.get('ai_confirmation', 'SKIP')})"
-        )
+        if is_1m_lock:
+            system_log.push_agent_chat(
+                f"LOCKED {side} on {pair}: {detect.get('pattern')} — skip 1st {want} tick, "
+                f"fire on 2nd (max {ONE_M_CONFIRM_MAX_BARS} bars) | AI={detect.get('ai_confirmation', 'SKIP')}",
+                status="detect",
+                details={
+                    "pair": pair,
+                    "side": side,
+                    "mode": "confirm_scalp",
+                    "max_bars": ONE_M_CONFIRM_MAX_BARS,
+                    "skip_ticks": ONE_M_CONFIRM_SKIP_TICKS,
+                },
+            )
+            print(
+                f"[BRAIN] LOCKED {side} on {pair}: {detect.get('pattern')} — "
+                f"1m skip 1st {want} tick, fire on 2nd "
+                f"(max {ONE_M_CONFIRM_MAX_BARS} bars) | AI={detect.get('ai_confirmation', 'SKIP')}"
+            )
+        else:
+            system_log.push_agent_chat(
+                f"LOCKED {side} on {pair}: {detect.get('pattern')} — fire on first {want} tick "
+                f"(max {ONE_M_CONFIRM_MAX_BARS} bars, no close wait) | AI={detect.get('ai_confirmation', 'SKIP')}",
+                status="detect",
+                details={
+                    "pair": pair,
+                    "side": side,
+                    "mode": "confirm_scalp",
+                    "max_bars": ONE_M_CONFIRM_MAX_BARS,
+                },
+            )
+            print(
+                f"[BRAIN] LOCKED {side} on {pair}: {detect.get('pattern')} — fire on first {want} tick "
+                f"(max {ONE_M_CONFIRM_MAX_BARS} bars, no close wait) | AI={detect.get('ai_confirmation', 'SKIP')}"
+            )
         return False
 
     _push_pattern_neon(
@@ -5297,7 +5402,8 @@ async def auto_exit_watchdog():
     print(
         f"[AUTO-EXIT] Watchdog online "
         f"(profit arm +{PROFIT_LOCK_PCT:g}% peak-trail −{PROFIT_TRAIL_GIVEBACK_PCT:g}% | "
-        f"loss lock −{LOSS_PROTECT_PCT:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
+        f"1m loss −{LOSS_PROTECT_PCT_1M:g}%…−{LOSS_BAND_PCT_1M:g}% unlock @−{LOSS_LOCK_CLEAR_PCT_1M:g}% | "
+        f"else loss lock −{LOSS_PROTECT_PCT:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
         f"in −{LOSS_PROTECT_PCT:g}…−{LOSS_BAND_PCT:g}% (hard @ −{LOSS_BAND_PCT:g}%); "
         f"unlock @−{LOSS_LOCK_CLEAR_PCT:g}%)."
     )

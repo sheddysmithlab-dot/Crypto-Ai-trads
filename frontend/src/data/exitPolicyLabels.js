@@ -1,15 +1,15 @@
 /** Shared exit-policy copy — matches backend path engine (main.py). */
 export const EXIT_POLICY_SHORT =
-  'Profit +0.5% peak-trail · Loss lock −0.5%…−0.7%';
+  'Profit +0.5% peak-trail · 1m loss −0.3%…−0.4% · else −0.5%…−0.7%';
 
 export const EXIT_POLICY_CHART_OVERLAY =
-  'Path exit · profit +0.5% trail · loss −0.5%…−0.7%';
+  'Path exit · profit +0.5% trail · 1m loss −0.3%…−0.4%';
 
 export const EXIT_POLICY_SYSTEM_LOG =
-  'Path exit: profit arm +0.5% peak-trail −0.1%; loss soft lock −0.5%, trail +0.2% in band, hard @ −0.7%';
+  'Path exit: profit arm +0.5% peak-trail −0.1%; 1m soft −0.3% hard −0.4% unlock −0.1%; else soft −0.5% hard −0.7% unlock −0.2%';
 
 export const EXIT_POLICY_MODAL =
-  'Path exit on every open trade — profit arm +0.5% with peak trail; loss soft lock −0.5% with trail in −0.5…−0.7% band (hard exit @ −0.7%).';
+  'Path exit — profit arm +0.5% with peak trail. 1m: soft lock −0.3%, hard −0.4%, unlock −0.1%. Other TFs: soft −0.5%, hard −0.7%, unlock −0.2%.';
 
 /** Human label for trading mode in logs (never imply testnet when live). */
 export function tradeFireModeLabel({ tradeFireMode, tradingMode, isPaper }) {
