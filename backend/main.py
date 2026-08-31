@@ -5535,26 +5535,26 @@ async def start_background_tasks():
             )
     except Exception as exc:
         print(f"[INSTRUMENTS] startup note: {exc}")
-    # Restore Bybit LIVE mode if keys are on disk (keys = LIVE, no keys = PAPER).
+    # Restore mode from header preference (live_trading flag), NOT from keys alone.
+    # Keys are required for LIVE; mode is chosen via LIVE/PAPER button → /trading-mode.
     try:
-        if settings_store.is_bybit_configured():
+        want_live = bool(settings_store.live_trading_preferred) and settings_store.is_bybit_configured()
+        if want_live:
             bybit_api.mode = "LIVE_TRADING"
             bybit_api.connected = True
-            settings_store.live_trading_preferred = True
-            _persist_live_trading(True)
             # Wipe paper capital — LIVE mode uses Bybit balance exclusively.
             agent.current_capital = 0.0
             agent.starting_capital = 0.0
             print(
                 f"[SETTINGS] Restoring LIVE_TRADING "
-                f"({settings_store.bybit_environment}) from saved Bybit keys. "
+                f"({settings_store.bybit_environment}) — header preference + Bybit keys. "
                 f"Paper capital wiped — using Bybit balance only."
             )
             notifications.push(
-                f"Bybit keys restored — LIVE trading resumed ({settings_store.bybit_environment}).",
+                f"LIVE trading resumed ({settings_store.bybit_environment}). "
+                f"Switch via header Live/Paper button anytime (engine off).",
                 "warning",
             )
-            # Await first equity sync so portfolio never flashes $0 after restart.
             try:
                 equity = await bybit_api.fetch_real_balance()
                 if equity is not None:
@@ -5577,15 +5577,22 @@ async def start_background_tasks():
 
             asyncio.create_task(_startup_reconcile())
         else:
-            # No keys → PAPER mode. Seed paper capital if not restored.
             bybit_api.mode = "PAPER_TRADING"
             bybit_api.connected = False
+            if settings_store.live_trading_preferred and not settings_store.is_bybit_configured():
+                settings_store.live_trading_preferred = False
+                _persist_live_trading(False)
+                print("[SETTINGS] LIVE preferred but no Bybit keys — forced PAPER.")
             if agent.current_capital <= 0:
                 agent.starting_capital = 100_000.0
                 agent.current_capital = agent.starting_capital
-                print("[SETTINGS] No Bybit keys — PAPER mode (capital seeded $100,000).")
+                print("[SETTINGS] PAPER mode (capital seeded $100,000). Use header button for LIVE.")
             else:
-                print("[SETTINGS] No Bybit keys — PAPER mode (restored capital).")
+                keys_note = "keys on disk" if settings_store.is_bybit_configured() else "no keys"
+                print(
+                    f"[SETTINGS] PAPER mode ({keys_note}, restored capital). "
+                    f"Header button controls LIVE."
+                )
     except Exception as exc:
         print(f"[SETTINGS] Bybit restore note: {exc}")
     asyncio.create_task(market_simulator())
@@ -5854,6 +5861,13 @@ async def continue_trading():
 
 @app.post("/connect-bybit")
 async def connect_bybit():
+    """Legacy endpoint — prefer POST /trading-mode {mode: LIVE_TRADING} from header button."""
+    if not settings_store.is_bybit_configured():
+        return {
+            "status": "error",
+            "message": "Add Bybit API keys in Settings before enabling LIVE TRADING.",
+            "trading_mode": bybit_api.mode,
+        }
     print("[PILLAR 2: BACKEND] Switching from Paper Trading to Live Real Trading...")
     reset_bybit_executor_agent()
     bybit_api.connect_real_api()
@@ -6596,31 +6610,20 @@ async def save_settings(payload: SettingsPayload):
     print(f"[SETTINGS] Bybit credentials {'updated' if payload.bybit_api_key else 'unchanged'} "
           f"(env={settings_store.bybit_environment}). AI provider set to '{settings_store.ai_provider}'.")
 
-    # AUTO-SWITCH: keys present → LIVE trading; keys absent → PAPER trading
-    if settings_store.is_bybit_configured():
-        if bybit_api.mode != "LIVE_TRADING":
-            bybit_api.connect_real_api()
-            equity = await bybit_api.fetch_real_balance()
-            if equity is not None:
-                agent.on_live_connected(equity)
-                return {
-                    "status": "success",
-                    "trading_mode": "LIVE_TRADING",
-                    "equity": equity,
-                    "message": (
-                        f"Keys saved → LIVE trading ACTIVE ({settings_store.bybit_environment}). "
-                        f"Balance: ${equity:,.2f}. Keys stay until you Remove them."
-                    ),
-                }
-            return {
-                "status": "success",
-                "trading_mode": "LIVE_TRADING",
-                "message": (
-                    "Keys saved → LIVE trading ACTIVE, but balance sync failed. "
-                    f"Error: {bybit_api.last_error or 'unknown'}. Keys stay until you Remove them."
-                ),
-            }
-        # Already LIVE — just refresh balance
+    # Mode is controlled by header Live/Paper button (/trading-mode), not by saving keys.
+    # Saving keys only enables LIVE as an option; removing keys forces PAPER.
+    if not settings_store.is_bybit_configured():
+        bybit_api.disconnect_real_api(reason="No Bybit keys saved")
+        return {
+            "status": "success",
+            "trading_mode": "PAPER_TRADING",
+            "message": (
+                "Settings saved. No Bybit keys → PAPER mode. "
+                "Add keys, then use the header Live/Paper button to go LIVE."
+            ),
+        }
+
+    if bybit_api.mode == "LIVE_TRADING":
         equity = await bybit_api.fetch_real_balance()
         return {
             "status": "success",
@@ -6632,12 +6635,14 @@ async def save_settings(payload: SettingsPayload):
                 "Settings saved. LIVE trading active (balance sync pending)."
             ),
         }
-    # No keys → PAPER
-    bybit_api.disconnect_real_api(reason="No Bybit keys saved")
+
     return {
         "status": "success",
         "trading_mode": "PAPER_TRADING",
-        "message": "Settings saved. No Bybit keys → PAPER trading mode.",
+        "message": (
+            f"Settings saved. Bybit keys stored ({settings_store.bybit_environment}). "
+            "Still on PAPER — use the header Live/Paper button to switch to LIVE."
+        ),
     }
 
 @app.post("/settings/test-bybit")

@@ -160,14 +160,13 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
 
       const res = await authFetch('/settings/test-bybit', { method: 'POST' });
       const data = await res.json();
-      setBanner({ tone: data.success ? 'success' : 'error', message: data.message });
-
-      if (data.success) {
-        const connectRes = await authFetch('/connect-bybit', { method: 'POST' });
-        const connectData = await connectRes.json();
-        setBanner({ tone: 'success', message: `${data.message} ${connectData.message}` });
-        onLiveTradingConnected?.();
-      }
+      // Do not auto-switch to LIVE — header Live/Paper button controls mode.
+      setBanner({
+        tone: data.success ? 'success' : 'error',
+        message: data.success
+          ? `${data.message} Use the header Live/Paper button to enable LIVE trading.`
+          : data.message,
+      });
       await refreshStatus();
     } catch {
       setBanner({ tone: 'error', message: 'Could not test Bybit. Please try again.' });
@@ -248,7 +247,7 @@ export default function SettingsModal({ open, onClose, onLiveTradingConnected })
           <div>
             <div className="mb-3 flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-blue-400">
               Bybit API
-              <InfoTip text="Paste once, Save + Test. Fields stay filled (masked) after refresh until you press Remove keys." />
+              <InfoTip text="Paste once, Save + Test. Keys do not auto-start LIVE — use the header Live/Paper button. Fields stay filled (masked) until Remove keys." />
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
