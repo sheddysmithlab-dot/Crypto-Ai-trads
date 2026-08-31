@@ -21,6 +21,7 @@ import ChartPanel from './components/ChartPanel';
 import LiveTradesPanel from './components/LiveTradesPanel';
 import ControlBar from './components/ControlBar';
 import PaperTradingModal from './components/PaperTradingModal';
+import TradingModeModal from './components/TradingModeModal';
 import SessionMomentumModal from './components/SessionMomentumModal';
 import AlertModal from './components/AlertModal';
 import SettingsModal from './components/SettingsModal';
@@ -77,6 +78,10 @@ export default function App() {
 
   const [alertOpen, setAlertOpen] = useState(false);
   const [paperModalOpen, setPaperModalOpen] = useState(false);
+  const [paperModalForcePaper, setPaperModalForcePaper] = useState(false);
+  const [tradingModeModalOpen, setTradingModeModalOpen] = useState(false);
+  const [tradingModeSwitching, setTradingModeSwitching] = useState(false);
+  const [tradingModeError, setTradingModeError] = useState(null);
   const [sessionModalOpen, setSessionModalOpen] = useState(false);
   const [sessionStopConfirmOpen, setSessionStopConfirmOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -138,6 +143,44 @@ export default function App() {
       console.warn('Failed to fetch settings status for log modal:', err);
     }
   }
+
+  const switchTradingMode = useCallback(
+    async (mode) => {
+      if (effectiveBotActive) {
+        setTradingModeError('Stop AI Engine before switching Live / Paper trading.');
+        return;
+      }
+      setTradingModeSwitching(true);
+      setTradingModeError(null);
+      try {
+        const res = await authFetch('/trading-mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.status === 'error') {
+          setTradingModeError(data.message || 'Failed to switch trading mode.');
+          if (data.needs_keys) {
+            setTradingModeModalOpen(false);
+            setSettingsOpen(true);
+          }
+          return;
+        }
+        setTradingModeModalOpen(false);
+        await refreshPaperStatus();
+        if (mode === 'PAPER_TRADING') {
+          setPaperModalForcePaper(true);
+          setPaperModalOpen(true);
+        }
+      } catch (err) {
+        setTradingModeError(err?.message || 'Network error switching trading mode.');
+      } finally {
+        setTradingModeSwitching(false);
+      }
+    },
+    [effectiveBotActive, refreshPaperStatus]
+  );
 
   const fetchSystemLogs = useCallback(async () => {
     try {
@@ -789,9 +832,12 @@ export default function App() {
         notifications={notifications}
         unreadCount={unreadCount}
         markAllRead={markAllRead}
-        onOpenPaperModal={() => {
-          if (portfolio.tradingMode === 'LIVE_TRADING') return;
-          setPaperModalOpen(true);
+        engineActive={effectiveBotActive}
+        onOpenTradingMode={() => {
+          if (effectiveBotActive) return;
+          setTradingModeError(null);
+          setTradingModeModalOpen(true);
+          fetchSettingsStatus();
         }}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenLog={() => setLogModalOpen(true)}
@@ -895,10 +941,31 @@ export default function App() {
         cancelLoading={botLoading}
       />
 
+      <TradingModeModal
+        open={tradingModeModalOpen}
+        onClose={() => {
+          if (tradingModeSwitching) return;
+          setTradingModeModalOpen(false);
+          setTradingModeError(null);
+        }}
+        tradingMode={portfolio.tradingMode}
+        engineActive={effectiveBotActive}
+        bybitConfigured={
+          settingsStatus == null ? null : Boolean(settingsStatus.bybit_configured)
+        }
+        switching={tradingModeSwitching}
+        error={tradingModeError}
+        onSelectPaper={() => switchTradingMode('PAPER_TRADING')}
+        onSelectLive={() => switchTradingMode('LIVE_TRADING')}
+      />
+
       <PaperTradingModal
         open={paperModalOpen}
-        onClose={() => setPaperModalOpen(false)}
-        isLive={portfolio.tradingMode === 'LIVE_TRADING'}
+        onClose={() => {
+          setPaperModalOpen(false);
+          setPaperModalForcePaper(false);
+        }}
+        isLive={paperModalForcePaper ? false : portfolio.tradingMode === 'LIVE_TRADING'}
         paperCapital={paperCapital}
         paperLoading={paperLoading}
         onRefreshStatus={refreshPaperStatus}

@@ -5877,6 +5877,105 @@ async def get_trading_mode():
     """ Trading mode for order execution. Chart + signals always use public Bybit linear data. """
     return {"mode": bybit_api.mode, "market_data": "bybit_public_linear"}
 
+
+class TradingModePayload(BaseModel):
+    mode: str  # PAPER_TRADING | LIVE_TRADING
+
+
+@app.post("/trading-mode")
+async def set_trading_mode(payload: TradingModePayload):
+    """Header Live/Paper swap. Blocked while AI Engine is ON or open positions exist."""
+    want = (payload.mode or "").strip().upper()
+    if want not in ("PAPER_TRADING", "LIVE_TRADING"):
+        return {
+            "status": "error",
+            "message": "mode must be PAPER_TRADING or LIVE_TRADING",
+            "trading_mode": bybit_api.mode,
+        }
+
+    if agent.is_active:
+        return {
+            "status": "error",
+            "message": "Stop AI Engine before switching Live / Paper trading.",
+            "trading_mode": bybit_api.mode,
+            "engine_active": True,
+        }
+    if agent.trades:
+        return {
+            "status": "error",
+            "message": "Close all open positions before switching Live / Paper trading.",
+            "trading_mode": bybit_api.mode,
+            "open_trades": len(agent.trades),
+        }
+    if agent.emergency_triggered:
+        return {
+            "status": "error",
+            "message": "Clear emergency halt before switching trading mode.",
+            "trading_mode": bybit_api.mode,
+        }
+
+    if want == bybit_api.mode:
+        return {
+            "status": "success",
+            "message": f"Already on {want}.",
+            "trading_mode": bybit_api.mode,
+            "unchanged": True,
+        }
+
+    if want == "PAPER_TRADING":
+        reset_bybit_executor_agent()
+        bybit_api.disconnect_real_api(reason="User switched to Paper Trading")
+        # Keep existing paper capital if set; otherwise seed a safe default.
+        if float(agent.current_capital or 0) < 100:
+            agent.set_paper_capital(100000.0)
+        notifications.push("Switched to PAPER TRADING (simulated capital).", "success")
+        system_log.push(
+            "ai",
+            "Trading mode → PAPER_TRADING",
+            {"mode": "PAPER_TRADING", "capital": float(agent.current_capital or 0)},
+        )
+        return {
+            "status": "success",
+            "message": "PAPER TRADING active — virtual capital, no real orders.",
+            "trading_mode": "PAPER_TRADING",
+            "capital": round(float(agent.current_capital or 0), 2),
+        }
+
+    # LIVE_TRADING
+    if not settings_store.is_bybit_configured():
+        return {
+            "status": "error",
+            "message": "Add Bybit API keys in Settings before enabling LIVE TRADING.",
+            "trading_mode": bybit_api.mode,
+            "needs_keys": True,
+        }
+    reset_bybit_executor_agent()
+    bybit_api.connect_real_api()
+    equity = await bybit_api.fetch_real_balance()
+    if equity is not None:
+        agent.on_live_connected(equity)
+    system_log.push(
+        "ai",
+        "Trading mode → LIVE_TRADING",
+        {"mode": "LIVE_TRADING", "equity": equity},
+    )
+    if equity is None:
+        return {
+            "status": "success",
+            "message": (
+                "LIVE TRADING enabled, but balance sync failed. "
+                f"{bybit_api.last_error or 'Check keys / network.'}"
+            ),
+            "trading_mode": "LIVE_TRADING",
+            "equity": None,
+        }
+    return {
+        "status": "success",
+        "message": f"LIVE TRADING active — Bybit equity ${equity:,.2f}.",
+        "trading_mode": "LIVE_TRADING",
+        "equity": equity,
+    }
+
 # ==========================================
 # SINGLE-COIN, MULTI-TRADE WIRING
 # ==========================================

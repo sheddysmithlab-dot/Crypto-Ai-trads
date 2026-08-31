@@ -29,7 +29,8 @@ export default function Header({
   notifications,
   unreadCount,
   markAllRead,
-  onOpenPaperModal,
+  onOpenTradingMode,
+  engineActive = false,
   onOpenSettings,
   onOpenLog,
   onOpenStatement,
@@ -43,6 +44,7 @@ export default function Header({
   useClickOutside(profileRef, () => setProfileOpen(false), profileOpen);
 
   const isLive = tradingMode === 'LIVE_TRADING';
+  const modeLocked = Boolean(engineActive);
   const exitedPnl = Number(exitedPnlUsd) || 0;
   const exitedProfit = exitedPnl >= 0;
   const exitedPnlStr = `${exitedProfit ? '+' : '-'}$${Math.abs(exitedPnl).toLocaleString('en-US', {
@@ -125,8 +127,22 @@ export default function Header({
 
         <button
           id="trading-mode-badge"
-          onClick={onOpenPaperModal}
-          className={`hidden md:flex items-center px-2 py-1 rounded-full text-[10px] font-bold border hover:opacity-80 transition ${
+          type="button"
+          onClick={() => {
+            if (modeLocked) return;
+            onOpenTradingMode?.();
+          }}
+          disabled={modeLocked}
+          title={
+            modeLocked
+              ? 'Stop AI Engine to switch Live / Paper'
+              : 'Switch Live Trading / Paper Trading'
+          }
+          className={`hidden md:flex items-center px-2 py-1 rounded-full text-[10px] font-bold border transition ${
+            modeLocked
+              ? 'opacity-50 cursor-not-allowed'
+              : 'hover:opacity-80 cursor-pointer'
+          } ${
             isLive
               ? 'bg-green-100 dark:bg-green-900/30 border-green-200 dark:border-green-700 text-green-700 dark:text-green-400'
               : 'bg-yellow-100 dark:bg-yellow-900/30 border-yellow-200 dark:border-yellow-700 text-yellow-700 dark:text-yellow-400'
