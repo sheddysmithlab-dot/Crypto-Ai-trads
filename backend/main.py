@@ -5914,10 +5914,15 @@ async def set_trading_mode(payload: TradingModePayload):
             "trading_mode": bybit_api.mode,
             "engine_active": True,
         }
+    # Open trades block only when leaving LIVE (real money) → PAPER, or entering LIVE
+    # while paper positions exist — keep both blocked for safety.
     if agent.trades:
         return {
             "status": "error",
-            "message": "Close all open positions before switching Live / Paper trading.",
+            "message": (
+                f"Close all open positions ({len(agent.trades)}) before switching "
+                f"Live / Paper trading."
+            ),
             "trading_mode": bybit_api.mode,
             "open_trades": len(agent.trades),
         }

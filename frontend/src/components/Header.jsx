@@ -44,7 +44,6 @@ export default function Header({
   useClickOutside(profileRef, () => setProfileOpen(false), profileOpen);
 
   const isLive = tradingMode === 'LIVE_TRADING';
-  const modeLocked = Boolean(engineActive);
   const exitedPnl = Number(exitedPnlUsd) || 0;
   const exitedProfit = exitedPnl >= 0;
   const exitedPnlStr = `${exitedProfit ? '+' : '-'}$${Math.abs(exitedPnl).toLocaleString('en-US', {
@@ -129,27 +128,23 @@ export default function Header({
           id="trading-mode-badge"
           type="button"
           onClick={() => {
-            if (modeLocked) return;
             onOpenTradingMode?.();
           }}
-          disabled={modeLocked}
+          disabled={false}
           title={
-            modeLocked
-              ? 'Stop AI Engine to switch Live / Paper'
+            engineActive
+              ? 'AI Engine ON — open to see Live/Paper options (stop engine to switch)'
               : 'Switch Live Trading / Paper Trading'
           }
-          className={`hidden md:flex items-center px-2 py-1 rounded-full text-[10px] font-bold border transition ${
-            modeLocked
-              ? 'opacity-50 cursor-not-allowed'
-              : 'hover:opacity-80 cursor-pointer'
-          } ${
+          className={`flex items-center px-2 py-1 rounded-full text-[10px] font-bold border transition hover:opacity-80 cursor-pointer ${
             isLive
               ? 'bg-green-100 dark:bg-green-900/30 border-green-200 dark:border-green-700 text-green-700 dark:text-green-400'
               : 'bg-yellow-100 dark:bg-yellow-900/30 border-yellow-200 dark:border-yellow-700 text-yellow-700 dark:text-yellow-400'
           }`}
         >
           <i className={`fas ${isLive ? 'fa-bolt' : 'fa-file-invoice-dollar'} mr-1.5`}></i>
-          <span>{isLive ? 'LIVE TRADING' : 'PAPER TRADING'}</span>
+          <span className="hidden sm:inline">{isLive ? 'LIVE TRADING' : 'PAPER TRADING'}</span>
+          <span className="sm:hidden">{isLive ? 'LIVE' : 'PAPER'}</span>
         </button>
 
         <NotificationsDropdown notifications={notifications} unreadCount={unreadCount} markAllRead={markAllRead} />

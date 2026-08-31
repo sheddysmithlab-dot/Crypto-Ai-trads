@@ -82,6 +82,7 @@ export default function App() {
   const [tradingModeModalOpen, setTradingModeModalOpen] = useState(false);
   const [tradingModeSwitching, setTradingModeSwitching] = useState(false);
   const [tradingModeError, setTradingModeError] = useState(null);
+  const [tradingModeOverride, setTradingModeOverride] = useState(null);
   const [sessionModalOpen, setSessionModalOpen] = useState(false);
   const [sessionStopConfirmOpen, setSessionStopConfirmOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -101,6 +102,13 @@ export default function App() {
   const [launcherEditingId, setLauncherEditingId] = useState(null);
 
   const portfolio = usePortfolio(setConnected);
+  const effectiveTradingMode = tradingModeOverride || portfolio.tradingMode;
+
+  useEffect(() => {
+    if (tradingModeOverride && portfolio.tradingMode === tradingModeOverride) {
+      setTradingModeOverride(null);
+    }
+  }, [portfolio.tradingMode, tradingModeOverride]);
   const {
     capital: paperCapital,
     loading: paperLoading,
@@ -167,9 +175,11 @@ export default function App() {
           }
           return;
         }
+        const nextMode = data.trading_mode || mode;
+        setTradingModeOverride(nextMode);
         setTradingModeModalOpen(false);
         await refreshPaperStatus();
-        if (mode === 'PAPER_TRADING') {
+        if (nextMode === 'PAPER_TRADING') {
           setPaperModalForcePaper(true);
           setPaperModalOpen(true);
         }
@@ -207,7 +217,7 @@ export default function App() {
     volumeContainerRef,
     pairLabel: pairSelector.activePairLabel,
     pairPrice: pairSelector.activePair.price,
-    externalTradingMode: portfolio.tradingMode,
+    externalTradingMode: effectiveTradingMode,
     setConnected,
     botIsActive: effectiveBotActive,
     blueBoxOverlay: portfolio.blueBoxOverlay,
@@ -823,7 +833,7 @@ export default function App() {
         tradesCount={sessionOpenPositions}
         exitedPnlUsd={Number(portfolio.exitedBookedUsd) || 0}
         apiStatus={apiStatus}
-        tradingMode={portfolio.tradingMode}
+        tradingMode={effectiveTradingMode}
         dayHigh={dayStats.high}
         dayLow={dayStats.low}
         tfMovePct={tfMoveStats.displayPct ?? tfMoveStats.totalPct ?? tfMoveStats.avgPct}
@@ -834,7 +844,7 @@ export default function App() {
         markAllRead={markAllRead}
         engineActive={effectiveBotActive}
         onOpenTradingMode={() => {
-          if (effectiveBotActive) return;
+          // Always open modal — if engine is ON, modal shows why switch is locked.
           setTradingModeError(null);
           setTradingModeModalOpen(true);
           fetchSettingsStatus();
@@ -948,7 +958,7 @@ export default function App() {
           setTradingModeModalOpen(false);
           setTradingModeError(null);
         }}
-        tradingMode={portfolio.tradingMode}
+        tradingMode={effectiveTradingMode}
         engineActive={effectiveBotActive}
         bybitConfigured={
           settingsStatus == null ? null : Boolean(settingsStatus.bybit_configured)
@@ -965,7 +975,7 @@ export default function App() {
           setPaperModalOpen(false);
           setPaperModalForcePaper(false);
         }}
-        isLive={paperModalForcePaper ? false : portfolio.tradingMode === 'LIVE_TRADING'}
+        isLive={paperModalForcePaper ? false : effectiveTradingMode === 'LIVE_TRADING'}
         paperCapital={paperCapital}
         paperLoading={paperLoading}
         onRefreshStatus={refreshPaperStatus}
@@ -1043,7 +1053,7 @@ export default function App() {
         open={logModalOpen}
         onClose={() => setLogModalOpen(false)}
         apiStatus={apiStatus}
-        tradingMode={portfolio.tradingMode}
+        tradingMode={effectiveTradingMode}
         chartSourceMode={chartSourceMode}
         chartHistorySource={chartHistorySource}
         chartLiveSource={chartLiveSource}
