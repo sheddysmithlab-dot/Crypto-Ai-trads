@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Header, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import asyncio
 import hashlib
@@ -6940,6 +6941,26 @@ async def trades_feed(websocket: WebSocket):
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         print("POLICY 4: Trades WS Client Disconnected. System tracking preserved.")
+
+
+# --- Dashboard SPA (served when Hostinger public_html is stale) ---------------
+_FRONTEND_DIR = Path(__file__).resolve().parent / "static_frontend"
+if _FRONTEND_DIR.is_dir() and (_FRONTEND_DIR / "index.html").is_file():
+    _assets = _FRONTEND_DIR / "assets"
+    if _assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(_assets)), name="frontend_assets")
+
+    @app.get("/app")
+    @app.get("/app/")
+    async def frontend_app():
+        return FileResponse(_FRONTEND_DIR / "index.html")
+
+    fav = _FRONTEND_DIR / "favicon.svg"
+    if fav.is_file():
+        @app.get("/favicon.svg")
+        async def frontend_favicon():
+            return FileResponse(fav)
+
 
 if __name__ == "__main__":
     import os
