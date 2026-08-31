@@ -9,14 +9,14 @@ const SECTIONS = [
       'Brain patterns + structure traps + order-flow trap (1M exec / 5M bias) → AI BUY/SELL/HOLD.',
       'Pattern scan uses the last closed candle. On 1m: lock after AI confirm, skip 1st green/red tick, fire on 2nd (max 3 bars). On 5m: fire on 1st green/red tick. On 15m+: fire at next candle open. First detect per pair is skipped. 1m next fire earliest N+3.',
       'Size: engine risk % set at START (typical 7%) · Bybit $5 minimum notional per trade.',
-      '1m path exit: hard TP +0.34% / hard SL −0.20% (no trail). 5m+: profit +0.5% peak-trail · loss soft −0.5%…−0.7%.',
+      '1m path exit: hard TP +0.34% / hard SL −0.40% (no trail). 5m+: profit +0.5% peak-trail · loss soft −0.5%…−0.7%.',
       '1m/5m: AI Engine soft-restarts every 1 hour (fresh momentum scan + confirm pipeline; open trades kept).',
     ],
   },
   {
     title: 'Stop-loss (per trade)',
     items: [
-      '1m: hard exit @ −0.20% (no soft lock / trail / unlock).',
+      '1m: hard exit @ −0.40% (no soft lock / trail / unlock).',
       'Other TFs: soft lock @ −0.50%; hard exit @ −0.70%; unlock @ −0.20%.',
       'Other TFs loss zone: 0.20% upward trail — sell line = best recovery + 0.20.',
       'Deeper than hard floor → HOLD until trail or unlock (hard exit fires at band).',

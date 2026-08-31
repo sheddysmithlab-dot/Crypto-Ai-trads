@@ -914,15 +914,15 @@ RECONCILE_GRACE_SECONDS = float(os.environ.get("RECONCILE_GRACE_SECONDS", "30"))
 #   −0.50…−0.70% zone: 0.20% upward trail (sell line = best_recovery + 0.20);
 #   −0.70% → hard exit (LOSS_BAND_EXIT);
 #   recover to −0.20% or better → UNLOCK (no sell) → profit book @ +0.50%.
-# 1m-only: fixed hard exits (no trail / unlock) — SL −0.20% · TP +0.34%.
+# 1m-only: fixed hard exits (no trail / unlock) — SL −0.40% · TP +0.34%.
 LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.50"))  # soft lock arm
 LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0.20"))
 LOSS_RECOVERY_RETRACE_CHOPPY_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_CHOPPY_PCT", "0.20"))
 LOSS_LOCK_CLEAR_PCT = float(os.environ.get("LOSS_LOCK_CLEAR_PCT", "0.20"))  # unlock → profit book
 LOSS_BAND_PCT = float(os.environ.get("LOSS_BAND_PCT", "0.70"))  # hard floor / instant exit
 # 1m-only fixed exits (no soft lock / trail / unlock)
-LOSS_PROTECT_PCT_1M = float(os.environ.get("LOSS_PROTECT_PCT_1M", "0.20"))  # hard SL
-LOSS_BAND_PCT_1M = float(os.environ.get("LOSS_BAND_PCT_1M", "0.20"))  # same = instant hard
+LOSS_PROTECT_PCT_1M = float(os.environ.get("LOSS_PROTECT_PCT_1M", "0.40"))  # hard SL
+LOSS_BAND_PCT_1M = float(os.environ.get("LOSS_BAND_PCT_1M", "0.40"))  # same = instant hard
 LOSS_LOCK_CLEAR_PCT_1M = float(os.environ.get("LOSS_LOCK_CLEAR_PCT_1M", "0.20"))  # unused on 1m hard
 PROFIT_HARD_PCT_1M = float(os.environ.get("PROFIT_HARD_PCT_1M", "0.34"))  # hard TP, no trail
 PROFIT_LOCK_PCT_1M = float(os.environ.get("PROFIT_LOCK_PCT_1M", str(PROFIT_HARD_PCT_1M)))  # alias
@@ -997,9 +997,9 @@ class AITradingAgent:
     # TF hard stop (gross % loss) — tightened after trail losses to −1%+.
     HARD_STOP_PCT_BY_TF: dict[str, float] = {
         "30s": float(os.environ.get("HARD_STOP_30S", "0.30")),
-        "1m": float(os.environ.get("HARD_STOP_1M", "0.20")),  # align with 1m hard SL
+        "1m": float(os.environ.get("HARD_STOP_1M", "0.40")),  # align with 1m hard SL
         "3m": float(os.environ.get("HARD_STOP_3M", "0.40")),
-        "5m": float(os.environ.get("HARD_STOP_5M", "0.35")),  # same as 1m scalp
+        "5m": float(os.environ.get("HARD_STOP_5M", "0.40")),  # scalp hard SL align
         "10m": float(os.environ.get("HARD_STOP_10M", "0.45")),
         "15m": float(os.environ.get("HARD_STOP_15M", "0.50")),
         "30m": float(os.environ.get("HARD_STOP_30M", "0.55")),
