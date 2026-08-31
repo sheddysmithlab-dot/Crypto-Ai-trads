@@ -138,12 +138,22 @@ class BotStopPayload(BaseModel):
     mode: str = "hold"  # hold | emergency
 
 
-PUBLIC_HTTP_PATHS = {"/health", "/auth/login", "/docs", "/openapi.json", "/redoc"}
+PUBLIC_HTTP_PATHS = {"/health", "/auth/login", "/docs", "/openapi.json", "/redoc", "/app", "/app/", "/favicon.svg"}
+
+
+def _is_public_http_path(path: str) -> bool:
+    if path in PUBLIC_HTTP_PATHS:
+        return True
+    # Dashboard SPA assets (Live/Paper button build) — public read, API still authed.
+    if path.startswith("/assets/"):
+        return True
+    return False
+
 
 @app.middleware("http")
 async def require_auth_middleware(request: Request, call_next):
     path = request.url.path
-    if request.method == "OPTIONS" or path in PUBLIC_HTTP_PATHS:
+    if request.method == "OPTIONS" or _is_public_http_path(path):
         return await call_next(request)
     token = extract_bearer_token(request.headers.get("Authorization"))
     if not verify_token(token):
