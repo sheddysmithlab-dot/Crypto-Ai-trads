@@ -525,9 +525,11 @@ class BybitAPIWrapper:
         self.connected = False
         self.last_known_balance = None
         settings_store.live_trading_preferred = False
-        # Only update disk if keys still exist (reset() already wiped the file).
-        if settings_store.is_bybit_configured():
+        # Always clear the disk preference so restarts / env keys cannot revive LIVE.
+        try:
             _persist_live_trading(False)
+        except Exception as exc:
+            print(f"[SETTINGS] persist paper preference note: {exc}")
 
     def _sign(self, timestamp, recv_window, query_string):
         payload = f"{timestamp}{settings_store.bybit_api_key}{recv_window}{query_string}"
@@ -5872,27 +5874,34 @@ async def continue_trading():
 
 @app.post("/connect-bybit")
 async def connect_bybit():
-    """Legacy endpoint — prefer POST /trading-mode {mode: LIVE_TRADING} from header button."""
+    """Legacy probe only — NEVER flips LIVE/PAPER.
+
+    Old frontends called this after Settings → Test Bybit and it forced LIVE.
+    Mode is controlled solely by POST /trading-mode (header Live/Paper button).
+    """
     if not settings_store.is_bybit_configured():
         return {
             "status": "error",
             "message": "Add Bybit API keys in Settings before enabling LIVE TRADING.",
             "trading_mode": bybit_api.mode,
         }
-    print("[PILLAR 2: BACKEND] Switching from Paper Trading to Live Real Trading...")
-    reset_bybit_executor_agent()
-    bybit_api.connect_real_api()
     equity = await bybit_api.fetch_real_balance()
-    if equity is not None:
-        agent.on_live_connected(equity)
-    else:
-        notifications.push(
-            f"Bybit connected but balance sync failed: {bybit_api.last_error or 'unknown error'}.",
-            "error",
-        )
+    if equity is None:
+        return {
+            "status": "error",
+            "message": (
+                f"Bybit key check failed: {bybit_api.last_error or 'unknown error'}. "
+                "Trading mode was not changed."
+            ),
+            "equity": None,
+            "trading_mode": bybit_api.mode,
+        }
     return {
         "status": "success",
-        "message": "SUCCESS: Bybit API Connected. Real Money Trading is ACTIVE.",
+        "message": (
+            f"Bybit keys OK (${equity:,.2f}). "
+            "Trading mode unchanged — use the header Live/Paper button to switch."
+        ),
         "equity": equity,
         "trading_mode": bybit_api.mode,
     }
