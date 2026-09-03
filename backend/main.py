@@ -910,10 +910,10 @@ MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", 
 AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path lock/trail profit + protective SL (same engine)
 INVERT_AUTO_TRADE_FIRE = False
 # Profit book (gross %, LONG/SHORT symmetric) — default (5m+):
-#   Arm @ +0.50%; lock = peak gross (continuous); trail 0.10% → floor peak−0.10
-#   (e.g. peak +0.73% → exit floor +0.63%; peak +0.58% → floor +0.48%).
-# 1m: hard TP @ +0.34% (no trail) — see PROFIT_HARD_PCT_1M below.
-PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.50"))
+#   Arm @ +0.65%; lock = peak gross (continuous); trail 0.10% → floor peak−0.10
+#   (e.g. peak +0.85% → exit floor +0.75%; peak +0.73% → floor +0.63%).
+# 1m: hard TP @ +0.50% (no trail) — see PROFIT_HARD_PCT_1M below.
+PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.65"))
 PROFIT_LOCK_STEP_PCT = float(os.environ.get("PROFIT_LOCK_STEP_PCT", "0.20"))  # unused — continuous trail
 PROFIT_TRAIL_FIRST_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "0.10"))
 PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.10"))
@@ -923,21 +923,21 @@ FLIP_EXIT_MIN_GROSS_PCT = float(os.environ.get("FLIP_EXIT_MIN_GROSS_PCT", "0.25"
 # Do not wipe a brand-new local open just because Bybit position API lags a few seconds.
 RECONCILE_GRACE_SECONDS = float(os.environ.get("RECONCILE_GRACE_SECONDS", "30"))
 # Protective stop-loss (gross %, LONG/SHORT symmetric) — default (5m+):
-#   −0.50% → soft LOSS LOCK arms;
-#   −0.50…−0.70% zone: 0.20% upward trail (sell line = best_recovery + 0.20);
-#   −0.70% → hard exit (LOSS_BAND_EXIT);
-#   recover to −0.20% or better → UNLOCK (no sell) → profit book @ +0.50%.
-# 1m-only: fixed hard exits (no trail / unlock) — SL −0.40% · TP +0.34%.
-LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.50"))  # soft lock arm
+#   −0.60% → soft LOSS LOCK arms;
+#   −0.60…−0.80% zone: 0.20% upward trail (sell line = best_recovery + 0.20);
+#   −0.80% → hard exit (LOSS_BAND_EXIT);
+#   recover to −0.20% or better → UNLOCK (no sell) → profit book @ +0.65%.
+# 1m-only: fixed hard exits (no trail / unlock) — SL −0.55% · TP +0.50%.
+LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.60"))  # soft lock arm
 LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0.20"))
 LOSS_RECOVERY_RETRACE_CHOPPY_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_CHOPPY_PCT", "0.20"))
 LOSS_LOCK_CLEAR_PCT = float(os.environ.get("LOSS_LOCK_CLEAR_PCT", "0.20"))  # unlock → profit book
-LOSS_BAND_PCT = float(os.environ.get("LOSS_BAND_PCT", "0.70"))  # hard floor / instant exit
+LOSS_BAND_PCT = float(os.environ.get("LOSS_BAND_PCT", "0.80"))  # hard floor / instant exit
 # 1m-only fixed exits (no soft lock / trail / unlock)
-LOSS_PROTECT_PCT_1M = float(os.environ.get("LOSS_PROTECT_PCT_1M", "0.40"))  # hard SL
-LOSS_BAND_PCT_1M = float(os.environ.get("LOSS_BAND_PCT_1M", "0.40"))  # same = instant hard
+LOSS_PROTECT_PCT_1M = float(os.environ.get("LOSS_PROTECT_PCT_1M", "0.55"))  # hard SL
+LOSS_BAND_PCT_1M = float(os.environ.get("LOSS_BAND_PCT_1M", "0.55"))  # same = instant hard
 LOSS_LOCK_CLEAR_PCT_1M = float(os.environ.get("LOSS_LOCK_CLEAR_PCT_1M", "0.20"))  # unused on 1m hard
-PROFIT_HARD_PCT_1M = float(os.environ.get("PROFIT_HARD_PCT_1M", "0.34"))  # hard TP, no trail
+PROFIT_HARD_PCT_1M = float(os.environ.get("PROFIT_HARD_PCT_1M", "0.50"))  # hard TP, no trail
 PROFIT_LOCK_PCT_1M = float(os.environ.get("PROFIT_LOCK_PCT_1M", str(PROFIT_HARD_PCT_1M)))  # alias
 
 
@@ -997,7 +997,7 @@ class AITradingAgent:
     STRICT_EXIT_FLUCTUATION_X_PCT = float(os.environ.get("STRICT_EXIT_FLUCTUATION_X", "0.10"))
     STRICT_EXIT_TRAIL_MULTIPLIER = float(os.environ.get("STRICT_EXIT_TRAIL_MULT", "1.5"))
     # Absolute max loss (gross %) — never let a trade bleed past this, any TF.
-    STRICT_EXIT_MAX_LOSS_PCT = float(os.environ.get("STRICT_EXIT_MAX_LOSS", "0.40"))
+    STRICT_EXIT_MAX_LOSS_PCT = float(os.environ.get("STRICT_EXIT_MAX_LOSS", "0.55"))
     # Upside "strong move" velocity: peak jump within this window raises profit book.
     UPSIDE_VELOCITY_WINDOW_SEC = float(os.environ.get("UPSIDE_VELOCITY_WINDOW_SEC", "8"))
     UPSIDE_VELOCITY_JUMP_PCT = float(os.environ.get("UPSIDE_VELOCITY_JUMP_PCT", "0.20"))
@@ -1010,9 +1010,9 @@ class AITradingAgent:
     # TF hard stop (gross % loss) — tightened after trail losses to −1%+.
     HARD_STOP_PCT_BY_TF: dict[str, float] = {
         "30s": float(os.environ.get("HARD_STOP_30S", "0.30")),
-        "1m": float(os.environ.get("HARD_STOP_1M", "0.40")),  # align with 1m hard SL
-        "3m": float(os.environ.get("HARD_STOP_3M", "0.40")),
-        "5m": float(os.environ.get("HARD_STOP_5M", "0.40")),  # scalp hard SL align
+        "1m": float(os.environ.get("HARD_STOP_1M", "0.55")),  # align with 1m hard SL
+        "3m": float(os.environ.get("HARD_STOP_3M", "0.55")),
+        "5m": float(os.environ.get("HARD_STOP_5M", "0.60")),  # scalp hard SL align
         "10m": float(os.environ.get("HARD_STOP_10M", "0.45")),
         "15m": float(os.environ.get("HARD_STOP_15M", "0.50")),
         "30m": float(os.environ.get("HARD_STOP_30M", "0.55")),
@@ -2093,7 +2093,7 @@ class AITradingAgent:
             "exit_mode": "path_sl" if source == "auto" else "manual",
             "entry_pattern": ENTRY_PATTERN_NAME,
             # Path SL + profit lock/trail state (auto):
-            #   Default SL: −0.50% soft / −0.70% hard; 1m hard: SL −0.20% / TP +0.34%
+            #   Default SL: −0.60% soft / −0.80% hard; 1m hard: SL −0.55% / TP +0.50%
             "path_last_gross_pct": 0.0,
             "path_adverse_streak": 0,
             "path_favorable_streak": 0,
@@ -2544,7 +2544,7 @@ class AITradingAgent:
                 trade["tp_price"] = tp
 
     def _profit_lock_start_pct(self, trade: dict | None = None) -> float:
-        """Profit arm: 1m hard +0.34%; other TFs +0.50% trail book."""
+        """Profit arm: 1m hard +0.50%; other TFs +0.65% trail book."""
         if self._is_1m_trade(trade):
             return float(PROFIT_HARD_PCT_1M)
         return float(PROFIT_LOCK_PCT)
@@ -2641,7 +2641,7 @@ class AITradingAgent:
     def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
         """Single path-exit engine: profit locks + two-tier loss stop.
 
-        1m: hard TP @ +0.34% and hard SL @ −0.20% (no trail / unlock).
+        1m: hard TP @ +0.50% and hard SL @ −0.55% (no trail / unlock).
         Other TFs: profit trail book + soft lock / recovery trail / hard band.
         LONG/SHORT symmetric on gross %. Fees stay out of the trigger.
         """
