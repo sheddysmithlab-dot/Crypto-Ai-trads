@@ -4257,6 +4257,11 @@ async def engine_hourly_restart_loop():
                 agent.momentum_gate_ready = True
                 agent.boot_ui_until = 0.0
             agent.persist_runtime(force=True)
+            # Timeline complete → read system log, build train result, one MySQL batch.
+            try:
+                await flush_training_timeline(reason=f"hourly_restart_{tf}")
+            except Exception as flush_exc:
+                print(f"[FAMILY-TRAIN] timeline flush note: {flush_exc}")
         except Exception as exc:
             print(f"[AI ENGINE] hourly restart loop note: {exc}")
             await asyncio.sleep(30)
@@ -5849,6 +5854,33 @@ async def start_background_tasks():
     asyncio.create_task(session_schedule_loop())
     asyncio.create_task(engine_runtime_checkpoint_loop())
     asyncio.create_task(mysql_reconnect_loop())
+    asyncio.create_task(train_flush_loop())
+
+
+async def flush_training_timeline(*, reason: str = "timeline") -> dict:
+    """Read full system log + agent chat, build training result, one MySQL batch write."""
+    digest = trade_db.build_training_result_from_system_log(
+        list(getattr(system_log, "entries", []) or []),
+        list(getattr(system_log, "agent_chat", []) or []),
+    )
+    result = await asyncio.to_thread(
+        trade_db.flush_train_batch,
+        system_digest=digest,
+        reason=reason,
+    )
+    if result.get("ok") and not result.get("empty"):
+        system_log.push(
+            "ai",
+            (
+                f"Training flush ({reason}): "
+                f"{result.get('wrote_events', 0)} events, "
+                f"{result.get('wrote_finalizes', 0)} closes — "
+                f"F{digest.get('fire', 0)}/S{digest.get('skip', 0)} "
+                f"W{digest.get('wins', 0)}/L{digest.get('losses', 0)}"
+            ),
+            {**result, "digest": digest},
+        )
+    return result
 
 
 async def mysql_reconnect_loop():
@@ -5871,8 +5903,39 @@ async def mysql_reconnect_loop():
                 except Exception as eng_exc:
                     print(f"[ENGINE-DB] recover apply note: {eng_exc}")
                 system_log.push("ai", f"MySQL recovered: {s.get('message')}", s)
+                # Same MySQL window → flush any buffered training in one write.
+                try:
+                    await flush_training_timeline(reason="mysql_recover")
+                except Exception as flush_exc:
+                    print(f"[FAMILY-TRAIN] recover flush note: {flush_exc}")
         except Exception as exc:
             print(f"[MYSQL] reconnect loop note: {exc}")
+
+
+async def train_flush_loop():
+    """Flush train buffer on the MySQL call timeline (aligned with reconnect cadence).
+
+    Events stay in RAM during the window; when MySQL is healthy we open one
+    connection, read system log, and write the full training batch together.
+    """
+    interval = max(60.0, float(os.environ.get("TRAIN_FLUSH_SEC", "300")))
+    print(f"[FAMILY-TRAIN] Batch flush loop online — every {interval / 60:.0f} min when MySQL up.")
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            st = trade_db.status_dict()
+            pending = st.get("pending_train_events", 0) + st.get("pending_train_finalizes", 0)
+            if pending <= 0:
+                continue
+            if not st.get("ok"):
+                print(f"[FAMILY-TRAIN] flush deferred — MySQL not ready ({pending} pending)")
+                continue
+            if getattr(trade_db, "_circuit_open", lambda: False)():
+                continue
+            await flush_training_timeline(reason="train_timeline")
+        except Exception as exc:
+            print(f"[FAMILY-TRAIN] flush loop note: {exc}")
+            await asyncio.sleep(30)
 
 
 @app.on_event("shutdown")
@@ -6833,6 +6896,8 @@ async def ai_training_feed(
                 "losses": loss_n,
                 "observations": len(observations),
                 "rules": len(rules or []),
+                "pending": (st.get("pending_train_events") or 0)
+                + (st.get("pending_train_finalizes") or 0),
             },
             "observations": observations,
             "events": events,

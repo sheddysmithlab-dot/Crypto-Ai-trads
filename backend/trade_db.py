@@ -470,8 +470,418 @@ def init_db() -> dict:
         return _db_status
 
 
+_train_buf_lock = threading.Lock()
+_pending_train_events: list[dict] = []
+_pending_train_finalizes: list[dict] = []
+_MAX_PENDING_TRAIN = 2500
+
+
 def status_dict() -> dict:
-    return dict(_db_status)
+    out = dict(_db_status)
+    with _train_buf_lock:
+        out["pending_train_events"] = len(_pending_train_events)
+        out["pending_train_finalizes"] = len(_pending_train_finalizes)
+    return out
+
+
+# ── Batched training buffer (one MySQL write when timeline / reconnect fires) ──
+
+
+def pending_train_counts() -> dict:
+    with _train_buf_lock:
+        return {
+            "events": len(_pending_train_events),
+            "finalizes": len(_pending_train_finalizes),
+        }
+
+
+def _pending_as_rows(
+    *,
+    family: str | None = None,
+    decision: str | None = None,
+) -> list[dict]:
+    """Shape queued rows like DB fetch results for the training UI."""
+    fam = (family or "").strip().lower() or None
+    dec = (decision or "").strip().upper() or None
+    rows: list[dict] = []
+    with _train_buf_lock:
+        for e in _pending_train_events:
+            if fam and str(e.get("family") or "").lower() != fam:
+                continue
+            if dec and str(e.get("decision") or "").upper() != dec:
+                continue
+            rows.append(
+                {
+                    "event_uid": e.get("event_uid"),
+                    "family": e.get("family"),
+                    "pattern": e.get("pattern"),
+                    "pair": e.get("pair"),
+                    "tf": e.get("tf"),
+                    "side": e.get("side"),
+                    "decision": e.get("decision"),
+                    "score": e.get("score"),
+                    "confidence": e.get("confidence"),
+                    "strategy": e.get("strategy"),
+                    "context_json": e.get("context"),
+                    "trade_id": e.get("trade_id"),
+                    "outcome": e.get("outcome"),
+                    "closed_reason": e.get("closed_reason"),
+                    "mfe_pct": e.get("mfe_pct"),
+                    "mae_pct": e.get("mae_pct"),
+                    "net_pnl_usd": e.get("net_pnl_usd"),
+                    "fault_tags": e.get("fault_tags"),
+                    "lesson": e.get("lesson"),
+                    "created_at": e.get("created_at"),
+                    "closed_at": e.get("closed_at"),
+                    "pending": True,
+                }
+            )
+    return rows
+
+
+def insert_train_event(
+    *,
+    family: str,
+    decision: str,
+    pattern: str | None = None,
+    pair: str | None = None,
+    tf: str | None = None,
+    side: str | None = None,
+    score: float | None = None,
+    confidence: float | None = None,
+    strategy: str | None = None,
+    context: dict | None = None,
+    trade_id: int | None = None,
+    outcome: str | None = None,
+    event_uid: str | None = None,
+) -> str | None:
+    """Queue a FIRE/SKIP/DELAY event in RAM — flushed to MySQL on timeline batch."""
+    if not family:
+        return None
+    uid = event_uid or uuid.uuid4().hex
+    dec = (decision or "SKIP").strip().upper()
+    if dec not in ("FIRE", "SKIP", "DELAY"):
+        dec = "SKIP"
+    out = (outcome or "").strip().lower() or None
+    if out and out not in ("win", "loss", "breakeven", "unknown", "skipped"):
+        out = "unknown"
+    row = {
+        "event_uid": uid,
+        "family": family,
+        "pattern": (pattern or "")[:128] or None,
+        "pair": (pair or "")[:32] or None,
+        "tf": (tf or "")[:16] or None,
+        "side": (side or "")[:8] or None,
+        "decision": dec,
+        "score": score,
+        "confidence": confidence,
+        "strategy": (strategy or "")[:64] or None,
+        "context": context or {},
+        "trade_id": trade_id,
+        "outcome": out if dec != "FIRE" else None,
+        "created_at": time.time(),
+    }
+    with _train_buf_lock:
+        _pending_train_events.append(row)
+        overflow = len(_pending_train_events) - _MAX_PENDING_TRAIN
+        if overflow > 0:
+            del _pending_train_events[:overflow]
+    return uid
+
+
+def finalize_train_event_for_trade(
+    trade_id: int,
+    *,
+    outcome: str,
+    closed_reason: str | None = None,
+    mfe_pct: float | None = None,
+    mae_pct: float | None = None,
+    net_pnl_usd: float | None = None,
+    fault_tags: list | None = None,
+    lesson: str | None = None,
+) -> bool:
+    """Queue close outcome; patch in-memory FIRE row if not yet flushed."""
+    if trade_id is None:
+        return False
+    out = (outcome or "unknown").strip().lower()
+    if out not in ("win", "loss", "breakeven", "unknown", "skipped"):
+        out = "unknown"
+    patch = {
+        "trade_id": int(trade_id),
+        "outcome": out,
+        "closed_reason": (closed_reason or "")[:512] or None,
+        "mfe_pct": mfe_pct,
+        "mae_pct": mae_pct,
+        "net_pnl_usd": net_pnl_usd,
+        "fault_tags": fault_tags or [],
+        "lesson": lesson,
+        "closed_at": time.time(),
+    }
+    with _train_buf_lock:
+        for e in _pending_train_events:
+            if e.get("trade_id") == int(trade_id) and e.get("decision") == "FIRE":
+                e["outcome"] = patch["outcome"]
+                e["closed_reason"] = patch["closed_reason"]
+                e["mfe_pct"] = patch["mfe_pct"]
+                e["mae_pct"] = patch["mae_pct"]
+                e["net_pnl_usd"] = patch["net_pnl_usd"]
+                e["fault_tags"] = patch["fault_tags"]
+                e["lesson"] = patch["lesson"]
+                e["closed_at"] = patch["closed_at"]
+                return True
+        _pending_train_finalizes.append(patch)
+        overflow = len(_pending_train_finalizes) - _MAX_PENDING_TRAIN
+        if overflow > 0:
+            del _pending_train_finalizes[:overflow]
+    return True
+
+
+def build_training_result_from_system_log(
+    entries: list | None = None,
+    agent_chat: list | None = None,
+) -> dict:
+    """Summarize system log + pending train buffer into one training result."""
+    with _train_buf_lock:
+        pending = list(_pending_train_events)
+        finals = list(_pending_train_finalizes)
+    fires = sum(1 for e in pending if e.get("decision") == "FIRE")
+    skips = sum(1 for e in pending if e.get("decision") == "SKIP")
+    delays = sum(1 for e in pending if e.get("decision") == "DELAY")
+    wins = sum(1 for e in pending if str(e.get("outcome") or "").lower() == "win")
+    losses = sum(1 for e in pending if str(e.get("outcome") or "").lower() == "loss")
+    entries = list(entries or [])
+    chat = list(agent_chat or [])
+    families: dict[str, int] = {}
+    for e in pending:
+        fam = str(e.get("family") or "?").lower()
+        families[fam] = families.get(fam, 0) + 1
+    top_chat = [
+        {"message": c.get("message"), "status": c.get("status"), "ts": c.get("timestamp")}
+        for c in chat[-20:]
+    ]
+    top_log = [
+        {"category": x.get("category"), "message": x.get("message"), "ts": x.get("timestamp")}
+        for x in entries[-30:]
+    ]
+    return {
+        "built_at": time.time(),
+        "pending_events": len(pending),
+        "pending_finalizes": len(finals),
+        "fire": fires,
+        "skip": skips,
+        "delay": delays,
+        "wins": wins,
+        "losses": losses,
+        "families": families,
+        "system_log_lines": len(entries),
+        "agent_chat_lines": len(chat),
+        "recent_chat": top_chat,
+        "recent_log": top_log,
+    }
+
+
+def flush_train_batch(
+    *,
+    system_digest: dict | None = None,
+    reason: str = "timeline",
+) -> dict:
+    """One MySQL connection: write all queued train events + finalizes together.
+
+    Call only when the training timeline completes or MySQL reconnect window opens.
+    """
+    with _train_buf_lock:
+        events = list(_pending_train_events)
+        finals = list(_pending_train_finalizes)
+        if not events and not finals and not system_digest:
+            return {"ok": True, "wrote_events": 0, "wrote_finalizes": 0, "reason": reason, "empty": True}
+        # Keep buffer until write succeeds — drain after success.
+    if not _mysql_enabled():
+        return {
+            "ok": False,
+            "message": "MySQL unavailable — train buffer kept in RAM",
+            "wrote_events": 0,
+            "wrote_finalizes": 0,
+            "pending": pending_train_counts(),
+            "reason": reason,
+        }
+    wrote_e = 0
+    wrote_f = 0
+    try:
+        conn = _connect()
+        with conn.cursor() as cur:
+            for e in events:
+                ctx = e.get("context") or {}
+                if system_digest and e is events[-1]:
+                    # Attach batch digest on the last event of this flush.
+                    ctx = {**ctx, "batch_digest": {
+                        "reason": reason,
+                        "fire": system_digest.get("fire"),
+                        "skip": system_digest.get("skip"),
+                        "wins": system_digest.get("wins"),
+                        "losses": system_digest.get("losses"),
+                        "families": system_digest.get("families"),
+                        "system_log_lines": system_digest.get("system_log_lines"),
+                        "agent_chat_lines": system_digest.get("agent_chat_lines"),
+                    }}
+                cur.execute(
+                    """INSERT INTO family_train_events
+                       (event_uid, family, pattern, pair, tf, side, decision,
+                        score, confidence, strategy, context_json, trade_id,
+                        outcome, closed_reason, mfe_pct, mae_pct, net_pnl_usd,
+                        fault_tags, lesson, created_at, closed_at)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       ON DUPLICATE KEY UPDATE
+                         outcome=COALESCE(VALUES(outcome), outcome),
+                         closed_reason=COALESCE(VALUES(closed_reason), closed_reason),
+                         mfe_pct=COALESCE(VALUES(mfe_pct), mfe_pct),
+                         mae_pct=COALESCE(VALUES(mae_pct), mae_pct),
+                         net_pnl_usd=COALESCE(VALUES(net_pnl_usd), net_pnl_usd),
+                         fault_tags=COALESCE(VALUES(fault_tags), fault_tags),
+                         lesson=COALESCE(VALUES(lesson), lesson),
+                         closed_at=COALESCE(VALUES(closed_at), closed_at)""",
+                    (
+                        e.get("event_uid"),
+                        e.get("family"),
+                        e.get("pattern"),
+                        e.get("pair"),
+                        e.get("tf"),
+                        e.get("side"),
+                        e.get("decision"),
+                        e.get("score"),
+                        e.get("confidence"),
+                        e.get("strategy"),
+                        json.dumps(ctx, default=str) if ctx else None,
+                        e.get("trade_id"),
+                        e.get("outcome"),
+                        e.get("closed_reason"),
+                        e.get("mfe_pct"),
+                        e.get("mae_pct"),
+                        e.get("net_pnl_usd"),
+                        json.dumps(e.get("fault_tags") or [], default=str)
+                        if e.get("fault_tags") is not None
+                        else None,
+                        e.get("lesson"),
+                        e.get("created_at") or time.time(),
+                        e.get("closed_at"),
+                    ),
+                )
+                wrote_e += 1
+            for f in finals:
+                cur.execute(
+                    """UPDATE family_train_events
+                       SET outcome=%s, closed_reason=%s, mfe_pct=%s, mae_pct=%s,
+                           net_pnl_usd=%s, fault_tags=%s, lesson=%s, closed_at=%s
+                       WHERE trade_id=%s AND decision='FIRE'""",
+                    (
+                        f.get("outcome"),
+                        f.get("closed_reason"),
+                        f.get("mfe_pct"),
+                        f.get("mae_pct"),
+                        f.get("net_pnl_usd"),
+                        json.dumps(f.get("fault_tags") or [], default=str),
+                        f.get("lesson"),
+                        f.get("closed_at") or time.time(),
+                        int(f["trade_id"]),
+                    ),
+                )
+                wrote_f += 1
+        conn.close()
+        with _train_buf_lock:
+            # Drop only what we wrote (prefix) — new events may have arrived mid-flush.
+            if events:
+                drop_uids = {e.get("event_uid") for e in events}
+                _pending_train_events[:] = [
+                    e for e in _pending_train_events if e.get("event_uid") not in drop_uids
+                ]
+            if finals:
+                drop_tids = {int(f["trade_id"]) for f in finals}
+                _pending_train_finalizes[:] = [
+                    f for f in _pending_train_finalizes
+                    if int(f.get("trade_id") or -1) not in drop_tids
+                ]
+        print(
+            f"[TRADE_DB] train flush ({reason}): events={wrote_e} finalizes={wrote_f}"
+        )
+        return {
+            "ok": True,
+            "wrote_events": wrote_e,
+            "wrote_finalizes": wrote_f,
+            "reason": reason,
+            "digest": system_digest,
+        }
+    except Exception as exc:
+        _trip_circuit(exc)
+        print(f"[TRADE_DB] flush_train_batch error: {exc}")
+        return {
+            "ok": False,
+            "message": str(exc),
+            "wrote_events": 0,
+            "wrote_finalizes": 0,
+            "pending": pending_train_counts(),
+            "reason": reason,
+        }
+
+
+def fetch_recent_train_events(
+    *,
+    family: str | None = None,
+    decision: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    """Dashboard feed: pending RAM rows + recent MySQL rows."""
+    lim = max(1, min(int(limit or 100), 500))
+    pending = _pending_as_rows(family=family, decision=decision)
+    rows: list[dict] = []
+    if _mysql_enabled():
+        try:
+            conn = _connect()
+            with conn.cursor() as cur:
+                clauses = []
+                args: list[Any] = []
+                if family:
+                    clauses.append("family=%s")
+                    args.append(family)
+                if decision:
+                    clauses.append("decision=%s")
+                    args.append(decision.strip().upper())
+                where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+                cur.execute(
+                    f"""SELECT * FROM family_train_events{where}
+                        ORDER BY created_at DESC LIMIT %s""",
+                    (*args, lim),
+                )
+                rows = list(cur.fetchall() or [])
+            conn.close()
+            parsed: list[dict] = []
+            for row in rows:
+                item = dict(row)
+                for key in ("context_json", "fault_tags"):
+                    val = item.get(key)
+                    if isinstance(val, str) and val.strip():
+                        try:
+                            item[key] = json.loads(val)
+                        except Exception:
+                            pass
+                parsed.append(item)
+            rows = parsed
+        except Exception as exc:
+            print(f"[TRADE_DB] fetch_recent_train_events error: {exc}")
+            _trip_circuit(exc)
+            rows = []
+    # Pending first (newest activity), then DB — dedupe by event_uid
+    seen = set()
+    merged: list[dict] = []
+    for e in sorted(pending, key=lambda x: float(x.get("created_at") or 0), reverse=True):
+        uid = e.get("event_uid")
+        if uid:
+            seen.add(uid)
+        merged.append(e)
+    for e in rows:
+        uid = e.get("event_uid")
+        if uid and uid in seen:
+            continue
+        merged.append(e)
+    return merged[:lim]
 
 
 def fetch_engine_formulas(*, group: str | None = None) -> list[dict]:
@@ -619,108 +1029,6 @@ def update_family_rule(family: str, timeframe_key: str, **fields: Any) -> bool:
         return False
 
 
-def insert_train_event(
-    *,
-    family: str,
-    decision: str,
-    pattern: str | None = None,
-    pair: str | None = None,
-    tf: str | None = None,
-    side: str | None = None,
-    score: float | None = None,
-    confidence: float | None = None,
-    strategy: str | None = None,
-    context: dict | None = None,
-    trade_id: int | None = None,
-    outcome: str | None = None,
-    event_uid: str | None = None,
-) -> str | None:
-    """Append a FIRE/SKIP/DELAY training event. Returns event_uid or None."""
-    if not _mysql_enabled() or not family:
-        return None
-    uid = event_uid or uuid.uuid4().hex
-    dec = (decision or "SKIP").strip().upper()
-    if dec not in ("FIRE", "SKIP", "DELAY"):
-        dec = "SKIP"
-    out = (outcome or "").strip().lower() or None
-    if out and out not in ("win", "loss", "breakeven", "unknown", "skipped"):
-        out = "unknown"
-    try:
-        conn = _connect()
-        with conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO family_train_events
-                   (event_uid, family, pattern, pair, tf, side, decision,
-                    score, confidence, strategy, context_json, trade_id,
-                    outcome, created_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (
-                    uid,
-                    family,
-                    (pattern or "")[:128] or None,
-                    (pair or "")[:32] or None,
-                    (tf or "")[:16] or None,
-                    (side or "")[:8] or None,
-                    dec,
-                    score,
-                    confidence,
-                    (strategy or "")[:64] or None,
-                    json.dumps(context or {}, default=str) if context else None,
-                    trade_id,
-                    out if dec != "FIRE" else None,
-                    time.time(),
-                ),
-            )
-        conn.close()
-        return uid
-    except Exception as exc:
-        print(f"[TRADE_DB] insert_train_event error: {exc}")
-        return None
-
-
-def finalize_train_event_for_trade(
-    trade_id: int,
-    *,
-    outcome: str,
-    closed_reason: str | None = None,
-    mfe_pct: float | None = None,
-    mae_pct: float | None = None,
-    net_pnl_usd: float | None = None,
-    fault_tags: list | None = None,
-    lesson: str | None = None,
-) -> bool:
-    if not _mysql_enabled() or trade_id is None:
-        return False
-    out = (outcome or "unknown").strip().lower()
-    if out not in ("win", "loss", "breakeven", "unknown", "skipped"):
-        out = "unknown"
-    try:
-        conn = _connect()
-        with conn.cursor() as cur:
-            cur.execute(
-                """UPDATE family_train_events
-                   SET outcome=%s, closed_reason=%s, mfe_pct=%s, mae_pct=%s,
-                       net_pnl_usd=%s, fault_tags=%s, lesson=%s, closed_at=%s
-                   WHERE trade_id=%s AND decision='FIRE'""",
-                (
-                    out,
-                    (closed_reason or "")[:512] or None,
-                    mfe_pct,
-                    mae_pct,
-                    net_pnl_usd,
-                    json.dumps(fault_tags or [], default=str),
-                    lesson,
-                    time.time(),
-                    int(trade_id),
-                ),
-            )
-        conn.close()
-        return True
-    except Exception as exc:
-        print(f"[TRADE_DB] finalize_train_event_for_trade error: {exc}")
-        return False
-
-
 def fetch_closed_train_events(
     *,
     family: str,
@@ -755,54 +1063,6 @@ def fetch_closed_train_events(
         print(f"[TRADE_DB] fetch_closed_train_events error: {exc}")
         return []
 
-
-def fetch_recent_train_events(
-    *,
-    family: str | None = None,
-    decision: str | None = None,
-    limit: int = 100,
-) -> list[dict]:
-    """Dashboard feed: recent FIRE/SKIP/DELAY rows (open + closed)."""
-    if not _mysql_enabled():
-        return []
-    lim = max(1, min(int(limit or 100), 500))
-    try:
-        conn = _connect()
-        with conn.cursor() as cur:
-            clauses: list[str] = []
-            args: list[Any] = []
-            if family:
-                clauses.append("family=%s")
-                args.append(family.strip().lower())
-            if decision:
-                dec = decision.strip().upper()
-                if dec in ("FIRE", "SKIP", "DELAY"):
-                    clauses.append("decision=%s")
-                    args.append(dec)
-            where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-            args.append(lim)
-            cur.execute(
-                f"""SELECT * FROM family_train_events{where}
-                    ORDER BY id DESC LIMIT %s""",
-                tuple(args),
-            )
-            rows = cur.fetchall()
-        conn.close()
-        out: list[dict] = []
-        for row in rows or []:
-            item = dict(row)
-            for key in ("context_json", "fault_tags"):
-                val = item.get(key)
-                if isinstance(val, str) and val.strip():
-                    try:
-                        item[key] = json.loads(val)
-                    except Exception:
-                        pass
-            out.append(item)
-        return out
-    except Exception as exc:
-        print(f"[TRADE_DB] fetch_recent_train_events error: {exc}")
-        return []
 
 def count_closed_since_version(
     *,
