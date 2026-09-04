@@ -5,3 +5,4 @@ python-dotenv
 pydantic
 pymysql
 pybit
+cursor-sdk

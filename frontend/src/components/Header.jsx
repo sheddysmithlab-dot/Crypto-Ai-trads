@@ -33,6 +33,7 @@ export default function Header({
   engineActive = false,
   onOpenSettings,
   onOpenLog,
+  onOpenAiTraining,
   onOpenStatement,
   onLogout,
   username,
@@ -148,6 +149,17 @@ export default function Header({
         </button>
 
         <NotificationsDropdown notifications={notifications} unreadCount={unreadCount} markAllRead={markAllRead} />
+
+        <button
+          id="ai-training-btn"
+          type="button"
+          onClick={onOpenAiTraining}
+          className="p-2 rounded-full hover:bg-violet-100 dark:hover:bg-violet-900/40 transition relative"
+          title="AI observation & training log"
+          aria-label="AI observation and training log"
+        >
+          <i className="fas fa-brain text-lg text-violet-600 dark:text-violet-400" />
+        </button>
 
         <button
           id="settings-gear-btn"

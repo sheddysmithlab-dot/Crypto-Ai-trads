@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import httpx
 
 import brain as _b
+import family_rules
 from trap_orderflow_engine import (
     evaluate_trap_orderflow,
     is_candle_soft_strategy,
@@ -89,9 +90,11 @@ _CONFIRM_SYSTEM = (
     "A pattern/trap was already detected; LONG/SHORT direction is fixed — never invent BUY/SELL. "
     "Analyze under agent candle-read policy: market structure, LONG vs SHORT, "
     "classic traps, inverse/fake-breakout/absorption/exhaustion, order-flow scores, confluence, R:R. "
+    "UNLIMITED mode: you may use tools, read this project, and outside research to "
+    "maximize expected profit / minimize loss / avoid late entries before deciding. "
     "Only reply YES if judged confidence meets the TF floor in the brief "
     "(overall ≥75%; 5m named traps ≥80%; other named traps ≥90%). Otherwise reply NO. "
-    "Reply with exactly one word: YES or NO. No other text."
+    "Final answer line must be exactly one word: YES or NO."
 )
 
 
@@ -115,6 +118,22 @@ def _matching_side_score(of_trap: Optional[dict], action: str) -> float:
     return max(float(of_trap.get("long_score") or 0), float(of_trap.get("short_score") or 0))
 
 
+def _family_from_think(think: dict, of_trap: Optional[dict] = None) -> Optional[str]:
+    """Resolve pattern family from brain signal / OF for playbook + floors."""
+    sig = think.get("signal") if think else None
+    pat = None
+    strat = None
+    if sig is not None:
+        pats = getattr(sig, "patterns", None) or []
+        pat = pats[0] if pats else None
+        strat = getattr(sig, "strategy", None)
+    if not pat and of_trap:
+        pat = of_trap.get("pattern")
+    if not strat:
+        strat = _brain_strategy_from_think(think)
+    return family_rules.resolve_family(pat, strat)
+
+
 def _brain_side_ok(
     think: dict,
     action: str,
@@ -127,6 +146,14 @@ def _brain_side_ok(
     tf_cfg = _b.TIMEFRAMES.get(tf, _b.TIMEFRAMES["1h"])
     min_sc = float(tf_cfg.min_score)
     min_rr = float(tf_cfg.min_rr)
+    fam = _family_from_think(think)
+    ov_sc, ov_rr = family_rules.effective_brain_floors(
+        timeframe_key, family=fam, brain_strategy=_brain_strategy_from_think(think)
+    )
+    if ov_sc is not None:
+        min_sc = float(ov_sc)
+    if ov_rr is not None:
+        min_rr = float(ov_rr)
 
     sig = think.get("signal")
     if sig is not None:
@@ -173,10 +200,13 @@ def _of_side_ok(
     of_sig = (of_trap or {}).get("final_signal")
     strategy = _brain_strategy_from_think(think)
     pattern = (of_trap or {}).get("pattern") or ""
+    family = _family_from_think(think, of_trap)
     side_sc = _matching_side_score(of_trap, action)
     tf = _norm_tf(timeframe_key)
-    thr = thr_score_for_setup(tf, pattern, brain_strategy=strategy)
-    candle_soft = is_candle_soft_strategy(strategy)
+    thr = thr_score_for_setup(tf, pattern, brain_strategy=strategy, family=family)
+    candle_soft = is_candle_soft_strategy(
+        strategy, family=family, pattern=pattern, timeframe_key=tf
+    )
 
     if of_sig == want_sig:
         if score_below_floor(side_sc, thr):
@@ -215,8 +245,13 @@ def _ai_yes_thr_for_tf(
     pattern: str | None = None,
     *,
     brain_strategy: str | None = None,
+    family: str | None = None,
 ) -> float:
-    return float(thr_score_for_setup(timeframe_key, pattern, brain_strategy=brain_strategy))
+    return float(
+        thr_score_for_setup(
+            timeframe_key, pattern, brain_strategy=brain_strategy, family=family
+        )
+    )
 
 
 def _setup_meets_ai_confirm_threshold(
@@ -284,10 +319,16 @@ def _build_confirm_user_prompt(
     """After pattern detect: policy analysis brief; answer YES/NO only at TF confidence floor."""
     side = "LONG" if action == "BUY" else "SHORT"
     tf = _norm_tf(timeframe)
-    thr = _ai_yes_thr_for_tf(tf)
     tf_cfg = _b.TIMEFRAMES.get(tf, _b.TIMEFRAMES["1h"])
     pattern, trap_score = _setup_label_and_score(think, of_trap, action)
-    thr = _ai_yes_thr_for_tf(tf, pattern)
+    strategy = _brain_strategy_from_think(think)
+    family = _family_from_think(think, of_trap)
+    thr = _ai_yes_thr_for_tf(tf, pattern, brain_strategy=strategy, family=family)
+    ov_sc, ov_rr = family_rules.effective_brain_floors(
+        timeframe, family=family, pattern=pattern, brain_strategy=strategy
+    )
+    brain_floor = float(ov_sc) if ov_sc is not None else float(tf_cfg.min_score)
+    rr_floor = float(ov_rr) if ov_rr is not None else float(tf_cfg.min_rr)
     ms = think.get("structure")
     sig = think.get("signal")
     trap = think.get("trap")
@@ -298,7 +339,7 @@ def _build_confirm_user_prompt(
     lines = [
         f"PATTERN DETECTED → confirm {side} {pattern}.",
         f"Pair={pair} TF={timeframe} ({tf_cfg.label}).",
-        f"HARD RULE: reply YES only if BOTH brain confluence ≥ {tf_cfg.min_score} "
+        f"HARD RULE: reply YES only if BOTH brain confluence ≥ {brain_floor} "
         f"AND order-flow side_score ≥ {thr:.0f} on this TF. Otherwise NO.",
         "",
         "ANALYZE (policy):",
@@ -309,14 +350,18 @@ def _build_confirm_user_prompt(
         "",
         "POLICY FLOORS:",
         f"- AI YES confidence floor this TF: {thr:.0f}%",
-        f"- Brain confluence min: {tf_cfg.min_score} · min R:R: {tf_cfg.min_rr}",
+        f"- Brain confluence min: {brain_floor} · min R:R: {rr_floor}",
         f"- Direction already set as {side}; you only YES/NO — do not invent BUY/SELL",
         f"- Note: {tf_cfg.note}",
         "",
         "SETUP FACTS:",
-        f"- Detected side: {side} · pattern={pattern} · "
-        f"OF={side_score:.1f} (≥{thr:.0f}) · brain≥{tf_cfg.min_score} required",
+        f"- Detected side: {side} · pattern={pattern} · family={family or '?'} · "
+        f"OF={side_score:.1f} (≥{thr:.0f}) · brain≥{brain_floor} required",
     ]
+    for pl in family_rules.playbook_lines(
+        family=family, timeframe_key=timeframe, pattern=pattern
+    ):
+        lines.append(pl)
     if trap_score is not None and trap_score != side_score:
         lines.append(f"- Trap/pattern score field: {trap_score}")
     if ms is not None:
@@ -395,21 +440,8 @@ async def _confirm_setup_with_ai(
     except Exception:
         pass
 
-    messages = [
-        {"role": "system", "content": _CONFIRM_SYSTEM},
-        {
-            "role": "user",
-            "content": _build_confirm_user_prompt(
-                pair=pair,
-                timeframe=timeframe,
-                action=action,
-                think=think,
-                of_trap=of_trap,
-            ),
-        },
-    ]
-
     _DEFAULTS = {
+        "cursor": {"base_url": None, "model": "composer-2.5", "auth": "bearer"},
         "z-ai": {"base_url": "https://api.z.ai/api/paas/v4", "model": "glm-4.5-flash", "auth": "bearer"},
         "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini", "auth": "bearer"},
         "zhipu-glm": {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4.5-flash", "auth": "bearer"},
@@ -417,6 +449,62 @@ async def _confirm_setup_with_ai(
         "custom": {"base_url": None, "model": "glm-4.5-flash", "auth": "bearer"},
     }
     cfg = _DEFAULTS.get(provider, _DEFAULTS["custom"])
+    user_prompt = _build_confirm_user_prompt(
+        pair=pair,
+        timeframe=timeframe,
+        action=action,
+        think=think,
+        of_trap=of_trap,
+    )
+
+    if provider in ("cursor", "cursor-ai", "cursor_sdk"):
+        try:
+            import cursor_ai
+            # Prefer settings key; fall back to env CURSOR_API_KEY
+            if api_key and not os.environ.get("CURSOR_API_KEY"):
+                os.environ["CURSOR_API_KEY"] = api_key
+            decision = await cursor_ai.confirm_yes_no(
+                system=_CONFIRM_SYSTEM,
+                user=user_prompt,
+                name="trade-confirm",
+            )
+            if decision is None:
+                _notify_ai_health(False)
+                print("[AI-CONFIRM] 'cursor' unreachable — skip trade.")
+                return None
+            _notify_ai_health(True)
+            if decision is False:
+                print("[AI-CONFIRM] 'cursor' → NO — skip trade.")
+                return False
+            strategy = _brain_strategy_from_think(think)
+            fam = _family_from_think(think, of_trap)
+            thr = _ai_yes_thr_for_tf(
+                timeframe,
+                (of_trap or {}).get("pattern"),
+                brain_strategy=strategy,
+                family=fam,
+            )
+            side_score = _matching_side_score(of_trap, action)
+            if side_score < thr:
+                print(
+                    f"[AI-CONFIRM] 'cursor' YES ignored — "
+                    f"OF side_score {side_score:.1f} < floor {thr:.0f}"
+                )
+                return False
+            b_ok, _, b_sc, o_sc = _dual_score_passes(action, of_trap, think, timeframe)
+            if not b_ok:
+                print("[AI-CONFIRM] 'cursor' YES ignored — dual score failed after YES")
+                return False
+            print(
+                f"[AI-CONFIRM] 'cursor' → YES  "
+                f"(brain={b_sc:.1f} OF={o_sc:.1f}≥{thr:.0f})"
+            )
+            return True
+        except Exception as exc:
+            print(f"[AI-CONFIRM] Cursor AI error ({exc}) — skip trade.")
+            _notify_ai_health(False)
+            return None
+
     base_url = (getattr(settings, "ai_base_url", None) or cfg["base_url"] or "").rstrip("/")
     if not base_url:
         print(f"[AI-CONFIRM] No base_url for '{provider}' — skip trade.")
@@ -428,6 +516,11 @@ async def _confirm_setup_with_ai(
         headers["api-key"] = api_key
     else:
         headers["Authorization"] = f"Bearer {api_key}"
+
+    messages = [
+        {"role": "system", "content": _CONFIRM_SYSTEM},
+        {"role": "user", "content": user_prompt},
+    ]
 
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
@@ -453,7 +546,13 @@ async def _confirm_setup_with_ai(
             return False
         if token.startswith("YES"):
             strategy = _brain_strategy_from_think(think)
-            thr = _ai_yes_thr_for_tf(timeframe, (of_trap or {}).get("pattern"), brain_strategy=strategy)
+            fam = _family_from_think(think, of_trap)
+            thr = _ai_yes_thr_for_tf(
+                timeframe,
+                (of_trap or {}).get("pattern"),
+                brain_strategy=strategy,
+                family=fam,
+            )
             side_score = _matching_side_score(of_trap, action)
             if side_score < thr:
                 print(
@@ -588,6 +687,12 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
         strategy_name = None
         confluences = []
 
+    family_name = family_rules.resolve_family(pattern_name, strategy_name)
+    if not family_name and sig is not None:
+        family_name = family_rules.resolve_family(
+            (sig.patterns[0] if sig.patterns else None), sig.strategy
+        )
+
     detail = think.get("verdict_detail", "")
     if stance and stance.narrative:
         detail = stance.narrative
@@ -611,6 +716,7 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
         "engine": ENGINE_NAME,
         "entry_pattern": ENTRY_PATTERN_NAME,
         "pattern": pattern_name,
+        "family": family_name,
         "strategy": strategy_name,
         "entry": entry_price,
         "sl": sl,

@@ -74,3 +74,73 @@ CREATE TABLE IF NOT EXISTS trades (
   KEY idx_closed (closed_at),
   KEY idx_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Self-improving engine (also created by trade_db.init_db inline _SCHEMA)
+CREATE TABLE IF NOT EXISTS family_engine_rules (
+  id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  family            VARCHAR(64) NOT NULL,
+  timeframe_key     VARCHAR(16) NOT NULL,
+  min_of_score      DOUBLE NULL,
+  min_brain_score   DOUBLE NULL,
+  min_rr            DOUBLE NULL,
+  sl_pct            DOUBLE NULL,
+  tp_pct            DOUBLE NULL,
+  candle_soft       TINYINT(1) NOT NULL DEFAULT 1,
+  skip_when_json    JSON NULL,
+  fire_when_json    JSON NULL,
+  lesson_text       TEXT NULL,
+  sample_count      INT UNSIGNED NOT NULL DEFAULT 0,
+  win_rate          DOUBLE NULL,
+  avg_r             DOUBLE NULL,
+  version           INT UNSIGNED NOT NULL DEFAULT 1,
+  locked            TINYINT(1) NOT NULL DEFAULT 0,
+  prev_min_of_score DOUBLE NULL,
+  prev_win_rate     DOUBLE NULL,
+  updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_family_tf (family, timeframe_key),
+  KEY idx_family (family)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS family_train_events (
+  id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  event_uid      VARCHAR(64) NOT NULL,
+  family         VARCHAR(64) NOT NULL,
+  pattern        VARCHAR(128) NULL,
+  pair           VARCHAR(32) NULL,
+  tf             VARCHAR(16) NULL,
+  side           VARCHAR(8) NULL,
+  decision       ENUM('FIRE','SKIP','DELAY') NOT NULL,
+  score          DOUBLE NULL,
+  confidence     DOUBLE NULL,
+  strategy       VARCHAR(64) NULL,
+  context_json   JSON NULL,
+  trade_id       INT NULL,
+  outcome        ENUM('win','loss','breakeven','unknown','skipped') NULL,
+  closed_reason  VARCHAR(512) NULL,
+  mfe_pct        DOUBLE NULL,
+  mae_pct        DOUBLE NULL,
+  net_pnl_usd    DOUBLE NULL,
+  fault_tags     JSON NULL,
+  lesson         TEXT NULL,
+  created_at     DOUBLE NOT NULL,
+  closed_at      DOUBLE NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_event_uid (event_uid),
+  KEY idx_family_tf (family, tf),
+  KEY idx_trade_id (trade_id),
+  KEY idx_decision_created (decision, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS engine_formulas (
+  formula_key   VARCHAR(96) NOT NULL,
+  group_name    VARCHAR(48) NOT NULL DEFAULT 'general',
+  value_type    ENUM('number','bool','text','json') NOT NULL DEFAULT 'number',
+  value_num     DOUBLE NULL,
+  value_text    TEXT NULL,
+  value_json    JSON NULL,
+  note          VARCHAR(512) NULL,
+  updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (formula_key),
+  KEY idx_group (group_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

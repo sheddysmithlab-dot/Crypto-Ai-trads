@@ -224,30 +224,74 @@ class SettingsStore:
 
     Secrets persist on disk under backend/data/api_credentials.json (Docker volume)
     until the user explicitly Resets. Never logged or echoed to the frontend.
-    Z.ai defaults still load from ZAI_API_KEY env on every start.
+    Cursor AI defaults load from CURSOR_API_KEY / AI_PROVIDER=cursor on every start.
     """
     def __init__(self):
         self.bybit_api_key = ""
         self.bybit_api_secret = ""
         self.bybit_environment = "mainnet"
         self.live_trading_preferred = False
-        self.ai_provider = "z-ai"
+        self.ai_provider = "cursor"
         self.ai_api_key = ""
-        self.ai_model = "glm-4.5-flash"
-        self.ai_base_url = "https://api.z.ai/api/paas/v4"
+        self.ai_model = "composer-2.5"
+        self.ai_base_url = ""
         self._load_from_env()
         self._load_from_disk()
+        # Env Cursor key always wins when present (self-train / confirm path).
+        self._apply_cursor_env_override()
+
+    def _apply_cursor_env_override(self):
+        try:
+            import cursor_ai
+            if cursor_ai.is_cursor_configured():
+                provider = (os.environ.get("AI_PROVIDER") or "cursor").strip() or "cursor"
+                if provider in ("cursor", "cursor-ai", "cursor_sdk"):
+                    self.ai_provider = "cursor"
+                    self.ai_api_key = cursor_ai.cursor_api_key()
+                    self.ai_model = (
+                        os.environ.get("CURSOR_AI_MODEL")
+                        or os.environ.get("AI_MODEL")
+                        or "composer-2.5"
+                    ).strip() or "composer-2.5"
+                    self.ai_base_url = ""  # SDK path — no chat/completions URL
+                    print(
+                        f"[SETTINGS] Cursor AI loaded (model={self.ai_model}, provider=cursor)."
+                    )
+                    return
+        except Exception as exc:
+            print(f"[SETTINGS] Cursor AI override skipped: {exc}")
 
     def _load_from_env(self):
-        """ Apply permanent Z.ai defaults + any secrets from .env / Render env vars. """
+        """Apply AI + Bybit secrets from .env / process env."""
+        cursor_key = (os.environ.get("CURSOR_API_KEY") or "").strip()
         zai_key = get_zai_api_key()
-        if zai_key:
+        provider = (os.environ.get("AI_PROVIDER") or "").strip()
+        if cursor_key and (not provider or provider in ("cursor", "cursor-ai", "cursor_sdk")):
+            self.ai_provider = "cursor"
+            self.ai_api_key = cursor_key
+            self.ai_model = (
+                os.environ.get("CURSOR_AI_MODEL")
+                or os.environ.get("AI_MODEL")
+                or "composer-2.5"
+            ).strip() or "composer-2.5"
+            self.ai_base_url = ""
+        elif zai_key:
             self.ai_api_key = zai_key
-        self.ai_provider = (os.environ.get("AI_PROVIDER") or "z-ai").strip() or "z-ai"
-        self.ai_model = (os.environ.get("ZAI_MODEL") or os.environ.get("AI_MODEL") or "glm-4.5-flash").strip()
-        self.ai_base_url = (
-            os.environ.get("ZAI_BASE_URL") or os.environ.get("AI_BASE_URL") or "https://api.z.ai/api/paas/v4"
-        ).strip().rstrip("/")
+            self.ai_provider = provider or "z-ai"
+            self.ai_model = (
+                os.environ.get("ZAI_MODEL") or os.environ.get("AI_MODEL") or "glm-4.5-flash"
+            ).strip()
+            self.ai_base_url = (
+                os.environ.get("ZAI_BASE_URL")
+                or os.environ.get("AI_BASE_URL")
+                or "https://api.z.ai/api/paas/v4"
+            ).strip().rstrip("/")
+        else:
+            self.ai_provider = provider or "cursor"
+            self.ai_model = (
+                os.environ.get("AI_MODEL") or os.environ.get("CURSOR_AI_MODEL") or "composer-2.5"
+            ).strip()
+            self.ai_base_url = (os.environ.get("AI_BASE_URL") or "").strip().rstrip("/")
 
         bybit_key = (os.environ.get("BYBIT_API_KEY") or "").strip()
         bybit_secret = (os.environ.get("BYBIT_API_SECRET") or "").strip()
@@ -259,10 +303,12 @@ class SettingsStore:
         if env_mode in ("mainnet", "testnet"):
             self.bybit_environment = env_mode
 
-        if is_zai_configured():
+        if self.ai_provider == "cursor" and self.ai_api_key:
+            print(f"[SETTINGS] Cursor AI configured (model={self.ai_model}).")
+        elif is_zai_configured():
             print(f"[SETTINGS] Z.ai AI loaded (model={self.ai_model}, provider={self.ai_provider}).")
         else:
-            print("[SETTINGS] Z.ai is the default AI provider — set ZAI_API_KEY to enable.")
+            print("[SETTINGS] Set CURSOR_API_KEY (preferred) or ZAI_API_KEY to enable AI confirm.")
         print("[SETTINGS] Entry engines: 1m/5m SCALP + 15m/1h/1D BIBLE.")
 
     def _load_from_disk(self):
@@ -300,9 +346,11 @@ class SettingsStore:
 
         # Non-secret fields are always safe to overwrite
         self.bybit_environment = payload.bybit_environment or "mainnet"
-        self.ai_provider = payload.ai_provider or "z-ai"
-        self.ai_model = payload.ai_model or "glm-4.5-flash"
-        if payload.ai_base_url:
+        self.ai_provider = payload.ai_provider or "cursor"
+        self.ai_model = payload.ai_model or "composer-2.5"
+        if payload.ai_provider in ("cursor", "cursor-ai", "cursor_sdk"):
+            self.ai_base_url = ""
+        elif payload.ai_base_url:
             self.ai_base_url = payload.ai_base_url.rstrip("/")
         elif not self.ai_base_url:
             self.ai_base_url = "https://api.z.ai/api/paas/v4"
@@ -378,6 +426,7 @@ settings_store = SettingsStore()
 # be overridden from the Settings form. Azure OpenAI has no universal base
 # URL (it's resource-specific), so it always requires ai_base_url to be set.
 AI_PROVIDER_DEFAULTS = {
+    "cursor": {"base_url": None, "model": "composer-2.5", "auth_header": "bearer"},
     "z-ai": {"base_url": "https://api.z.ai/api/paas/v4", "model": "glm-4.5-flash", "auth_header": "bearer"},
     "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini", "auth_header": "bearer"},
     "zhipu-glm": {"base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4.5-flash", "auth_header": "bearer"},
@@ -394,19 +443,6 @@ async def consult_ai_provider(context):
     provider = settings_store.ai_provider
     if provider == "none" or not settings_store.ai_api_key:
         return None
-
-    defaults = AI_PROVIDER_DEFAULTS.get(provider, AI_PROVIDER_DEFAULTS["custom"])
-    base_url = (settings_store.ai_base_url or defaults["base_url"] or "").rstrip("/")
-    if not base_url:
-        print(f"[AI AGENT] No base URL configured for provider '{provider}' - skipping AI confirmation this tick.")
-        return None
-    model = settings_store.ai_model or defaults["model"]
-
-    headers = {"Content-Type": "application/json"}
-    if defaults["auth_header"] == "api-key":
-        headers["api-key"] = settings_store.ai_api_key
-    else:
-        headers["Authorization"] = f"Bearer {settings_store.ai_api_key}"
 
     pair = str(context.get("pair") or "unknown")
     timeframe = str(context.get("timeframe") or "unknown")
@@ -432,16 +468,45 @@ async def consult_ai_provider(context):
         f"Reply YES only if confidence ≥ {thr}% (overall ≥75; 5m traps ≥80; other traps ≥90); else NO. "
         f"One word only: YES or NO."
     )
+    system = (
+        "You confirm trading setups only after policy analysis "
+        "(structure, long/short, trap/inverse). "
+        "Never invent BUY/SELL. Reply YES or NO only."
+    )
+
+    if provider in ("cursor", "cursor-ai", "cursor_sdk"):
+        try:
+            import cursor_ai
+            decision = await cursor_ai.confirm_yes_no(system=system, user=prompt, name="trade-confirm")
+            if decision is None:
+                agent.note_ai_result(False)
+                return None
+            agent.note_ai_result(True)
+            print(
+                f"[AI AGENT] Provider 'cursor' confirmation → "
+                f"{'PROCEED' if decision else 'REJECTED'}"
+            )
+            return decision
+        except Exception as exc:
+            print(f"[AI AGENT] Cursor AI failed ({exc}) - failing open.")
+            agent.note_ai_result(False)
+            return None
+
+    defaults = AI_PROVIDER_DEFAULTS.get(provider, AI_PROVIDER_DEFAULTS["custom"])
+    base_url = (settings_store.ai_base_url or defaults["base_url"] or "").rstrip("/")
+    if not base_url:
+        print(f"[AI AGENT] No base URL configured for provider '{provider}' - skipping AI confirmation this tick.")
+        return None
+    model = settings_store.ai_model or defaults["model"]
+
+    headers = {"Content-Type": "application/json"}
+    if defaults["auth_header"] == "api-key":
+        headers["api-key"] = settings_store.ai_api_key
+    else:
+        headers["Authorization"] = f"Bearer {settings_store.ai_api_key}"
 
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You confirm trading setups only after policy analysis "
-                "(structure, long/short, trap/inverse). "
-                "Never invent BUY/SELL. Reply YES or NO only."
-            ),
-        },
+        {"role": "system", "content": system},
         {"role": "user", "content": prompt},
     ]
 
@@ -901,6 +966,73 @@ class BybitAPIWrapper:
 
 bybit_api = BybitAPIWrapper()
 
+
+async def _cursor_refresh_family_lesson(info: dict) -> None:
+    """After auto rule bump, run unlimited Cursor agent to improve profit logic."""
+    try:
+        import cursor_ai
+        if not cursor_ai.is_cursor_configured():
+            return
+        family = str(info.get("family") or "")
+        tf = str(info.get("timeframe_key") or "1m")
+        blurb = (
+            f"sample_count={info.get('sample_count')} win_rate={info.get('win_rate')} "
+            f"min_of_score {info.get('old_min_of_score')}→{info.get('new_min_of_score')} "
+            f"note={info.get('lesson_extra') or ''}"
+        )
+        summary = await cursor_ai.self_improve_for_profit(
+            family=family,
+            timeframe=tf,
+            stats_blurb=blurb,
+            trigger="family_rule_bump",
+        )
+        if summary:
+            # Keep a short lesson_text mirror for LLM playbook inject
+            trade_db.update_family_rule(family, tf, lesson_text=summary[:800])
+            try:
+                import family_rules
+                family_rules.invalidate_cache()
+            except Exception:
+                pass
+            print(f"[CURSOR-AI] unlimited improve finished for {family}/{tf}")
+            system_log.push(
+                "ai",
+                f"Cursor UNLIMITED improve {family}/{tf}",
+                {"summary": summary[:400], "unlimited": True},
+            )
+    except Exception as exc:
+        print(f"[CURSOR-AI] unlimited improve skipped: {exc}")
+
+
+async def _cursor_improve_after_close(trade: dict, metrics: dict, reason: str) -> None:
+    """On closed trade (esp. loss), let unlimited Cursor agent fix engine for profit."""
+    try:
+        import cursor_ai
+        if not cursor_ai.is_cursor_configured() or not cursor_ai.is_unlimited():
+            return
+        try:
+            gross = float(metrics.get("gross_pct") or 0)
+        except (TypeError, ValueError):
+            gross = 0.0
+        if gross >= -0.05:
+            return
+        t = dict(trade)
+        t["closed_reason"] = reason
+        await cursor_ai.report_bot_issue(
+            reason=f"LOSS trade closed gross={gross}% reason={reason}",
+            category="loss",
+            pair=trade.get("pair"),
+            timeframe=trade.get("timeframe_key") or "1m",
+            family=trade.get("family"),
+            pattern=trade.get("pattern"),
+            side=trade.get("side"),
+            trade=t,
+            extra={"gross_pct": gross, "net_usd": metrics.get("net_usd")},
+        )
+    except Exception as exc:
+        print(f"[CURSOR-AI] post-loss improve skipped: {exc}")
+
+
 # ==========================================
 # PILLAR 3: CORE AI AGENT LOGIC (State & Rules)
 # ==========================================
@@ -960,6 +1092,13 @@ MICRO_CAP_PAIRS = frozenset({
 MICRO_CAP_LOSS_ARM_PCT = float(os.environ.get("MICRO_CAP_LOSS_ARM_PCT", "0.25"))
 MICRO_CAP_LOSS_BAND_PCT = float(os.environ.get("MICRO_CAP_LOSS_BAND_PCT", "0.35"))
 MICRO_CAP_HARD_STOP_PCT = float(os.environ.get("MICRO_CAP_HARD_STOP_PCT", "0.25"))
+# First-detect skip flags — overridable from MySQL `engine_formulas` via engine_config.
+SKIP_FIRST_DETECT = os.environ.get("SKIP_FIRST_DETECT", "1").strip().lower() not in (
+    "0", "false", "no",
+)
+SKIP_FIRST_DETECT_SCALP = os.environ.get("SKIP_FIRST_DETECT_SCALP", "0").strip().lower() in (
+    "1", "true", "yes",
+)
 # Small-coin loss multipliers (disabled).
 # Kept for optional env re-enable without code change.
 SMALL_COIN_MID_USD = float(os.environ.get("SMALL_COIN_MID_USD", "1.0"))
@@ -1474,6 +1613,31 @@ class AITradingAgent:
             )
         except Exception as exc:
             print(f"[MYSQL] close persist skipped: {exc}")
+        try:
+            import family_analyzer
+            info = family_analyzer.on_trade_closed(trade, metrics, reason)
+            if info and info.get("bumped"):
+                system_log.push(
+                    "ai",
+                    (
+                        f"Family train: {info.get('family')}/{info.get('timeframe_key')} "
+                        f"min_of_score {info.get('old_min_of_score')}→{info.get('new_min_of_score')} "
+                        f"v{info.get('version')}"
+                    ),
+                    info,
+                )
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_cursor_refresh_family_lesson(info))
+                except RuntimeError:
+                    pass
+        except Exception as exc:
+            print(f"[FAMILY-TRAIN] close analyze skipped: {exc}")
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_cursor_improve_after_close(dict(trade), dict(metrics), reason))
+        except RuntimeError:
+            pass
 
     def get_unrealized_net_usd(self):
         return sum(self._trade_metrics(t)["net_usd"] for t in self.trades)
@@ -1911,6 +2075,12 @@ class AITradingAgent:
         target_mult=None,
         pair=None,
         timeframe_key=None,
+        family=None,
+        score=None,
+        confidence=None,
+        strategy=None,
+        brain_verdict=None,
+        train_context=None,
     ):
         """ RULE 1: Opens a position as a Market Order (RULE 7) with simulated minor slippage.
         Manual entries default to 1% margin x 100x leverage. Auto entries pass
@@ -2031,19 +2201,41 @@ class AITradingAgent:
         entry_fee_pct = bybit_api.get_taker_fee_pct()
         entry_fee_usd = round(position_size * (entry_fee_pct / 100), 4)
 
+        tf_key = timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
+        resolved_family = family
+        if not resolved_family:
+            try:
+                import family_rules as _fr
+                resolved_family = _fr.resolve_family(pattern, strategy)
+            except Exception:
+                resolved_family = None
+
         # Manual: keep SL+TP from signal when provided.
-        # Auto: path SL (protect floor, small-coin aware) + path TP.
+        # Auto: path SL/TP; pilot families may override % from family_engine_rules.
         clean_sl = None
         clean_tp = None
         # Probe loss tier from filled entry (trade dict not built yet).
         _probe = {"entry": filled_price}
         trail_pct, arm_pct, band_pct, _is_small, _tier = self._loss_policy_for_trade(_probe)
         if source == "auto":
+            loss_pct = arm_pct
+            profit_pct = PATH_TP_WIDE_PCT
+            try:
+                import family_rules as _fr
+                fam_sl, fam_tp = _fr.effective_sl_tp_pct(
+                    family=resolved_family, timeframe_key=tf_key
+                )
+                if fam_sl is not None and fam_sl > 0:
+                    loss_pct = float(fam_sl)
+                if fam_tp is not None and fam_tp > 0:
+                    profit_pct = float(fam_tp)
+            except Exception:
+                pass
             clean_sl, clean_tp = self._fixed_exit_prices(
                 filled_price,
                 side,
-                loss_pct=arm_pct,
-                profit_pct=PATH_TP_WIDE_PCT,
+                loss_pct=loss_pct,
+                profit_pct=profit_pct,
             )
         else:
             if sl_price is not None:
@@ -2080,6 +2272,11 @@ class AITradingAgent:
             "exchange": exchange,
             "bybit_symbol": bybit_symbol,
             "pattern": pattern,
+            "family": resolved_family,
+            "score": score,
+            "confidence": confidence,
+            "strategy": strategy,
+            "brain_verdict": brain_verdict,
             "signal_candle_time": signal_candle_time,
             "taapi_action": taapi_action,
             "sl_price": clean_sl,
@@ -2087,7 +2284,7 @@ class AITradingAgent:
             "target_mult": target_mult,
             "capital_reserved": capital_reserved,
             "season_id": self.ai_season_id,
-            "timeframe_key": timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m"),
+            "timeframe_key": tf_key,
             "exit_mode": "path_sl" if source == "auto" else "manual",
             "entry_pattern": ENTRY_PATTERN_NAME,
             # Path SL + profit lock/trail state (auto):
@@ -2121,6 +2318,34 @@ class AITradingAgent:
                 f"(available ${self.current_capital:,.2f}, notional ${position_size:,.2f})."
             )
         self._append_trade_history(trade)
+        try:
+            if resolved_family:
+                import family_rules as _fr
+                ctx = dict(train_context or {})
+                ctx.update(_fr.event_context_from_detect({
+                    "pattern": pattern,
+                    "family": resolved_family,
+                    "strategy": strategy,
+                    "score": score,
+                    "confidence": confidence,
+                    "brain_verdict": brain_verdict,
+                    "reason": reason,
+                }))
+                trade_db.insert_train_event(
+                    family=resolved_family,
+                    decision="FIRE",
+                    pattern=pattern,
+                    pair=trade_pair,
+                    tf=tf_key,
+                    side=side,
+                    score=float(score) if score is not None else None,
+                    confidence=float(confidence) if confidence is not None else None,
+                    strategy=strategy,
+                    context=ctx,
+                    trade_id=int(trade["id"]),
+                )
+        except Exception as exc:
+            print(f"[FAMILY-TRAIN] FIRE log skipped: {exc}")
         qty_label = f" | qty={qty}" if qty is not None else ""
         if not skip_exchange_open:
             if bybit_api.mode == "LIVE_TRADING" and qty is not None and qty > 0:
@@ -3209,6 +3434,15 @@ class AITradingAgent:
                 f"Engine frozen ({label}). Open positions stay live; new trades pause until connectivity returns.",
                 "warning",
             )
+            try:
+                import cursor_ai
+                cursor_ai.schedule_bot_issue(
+                    reason=f"Engine freeze: {label}",
+                    category="freeze",
+                    extra={"freeze_reason": reason, "open_positions": len(self.trades)},
+                )
+            except Exception as exc:
+                print(f"[CURSOR-AI] freeze issue schedule note: {exc}")
 
     def unfreeze_connectivity(self, detail: str = "Connectivity restored") -> None:
         if not self.connectivity_frozen:
@@ -4402,6 +4636,27 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             pattern=detect.get("pattern"),
             reason=reason,
         )
+        try:
+            import family_rules as _fr
+            fam = detect.get("family") or _fr.resolve_family(
+                detect.get("pattern"), detect.get("strategy")
+            )
+            if fam:
+                trade_db.insert_train_event(
+                    family=fam,
+                    decision="SKIP",
+                    pattern=detect.get("pattern"),
+                    pair=pair,
+                    tf=timeframe_key,
+                    side=side,
+                    score=detect.get("score"),
+                    confidence=detect.get("confidence"),
+                    strategy=detect.get("strategy"),
+                    context={**_fr.event_context_from_detect(detect), "skip_reason": reason},
+                    outcome="skipped",
+                )
+        except Exception as exc:
+            print(f"[FAMILY-TRAIN] SKIP log skipped: {exc}")
         system_log.push_agent_chat(
             f"SKIPPED {side} on {pair}: {reason}",
             status="no_match",
@@ -4420,6 +4675,25 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         )
         PENDING_ENTRY_SIGNALS.pop(pair, None)
         print(f"[BRAIN] SKIPPED {side} {pair}: {reason}")
+        try:
+            import cursor_ai
+            cat = "trade_delay" if any(
+                x in reason.lower()
+                for x in ("expir", "timeout", "delay", "window", "no green", "no red", "confirm timeout")
+            ) else None
+            cursor_ai.schedule_bot_issue(
+                reason=reason,
+                category=cat,
+                pair=pair,
+                timeframe=timeframe_key,
+                family=detect.get("family"),
+                pattern=detect.get("pattern"),
+                side=side,
+                detect=detect,
+                extra={"stage": "skip_pending"},
+            )
+        except Exception as exc:
+            print(f"[CURSOR-AI] skip issue schedule note: {exc}")
         return False
 
     async def _execute_queued_fire(pending: dict) -> bool:
@@ -4562,6 +4836,12 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             target_mult=float(rr),
             pair=pair,
             timeframe_key=timeframe_key,
+            family=detect.get("family"),
+            score=detect.get("score"),
+            confidence=detect.get("confidence"),
+            strategy=detect.get("strategy"),
+            brain_verdict=detect.get("brain_verdict"),
+            train_context=detect,
         )
         if not trade:
             return await _skip_pending(
@@ -4953,6 +5233,25 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 "orderflow_trap": (detect.get("orderflow_trap") or {}).get("line"),
             },
         )
+        # Pattern-ish context but no fire → Cursor investigates no_fire / gate issues
+        reason_txt = str(detect.get("reason") or "NO_TRADE")
+        if detect.get("pattern") or detect.get("family") or detect.get("ai_confirmation") in (
+            "NO", "MISSING", "SKIP",
+        ):
+            try:
+                import cursor_ai
+                cursor_ai.schedule_bot_issue(
+                    reason=reason_txt,
+                    category="no_fire",
+                    pair=pair,
+                    timeframe=timeframe_key,
+                    family=detect.get("family"),
+                    pattern=detect.get("pattern"),
+                    detect=detect,
+                    extra={"ai_confirmation": detect.get("ai_confirmation")},
+                )
+            except Exception as exc:
+                print(f"[CURSOR-AI] no_fire schedule note: {exc}")
         return False
 
     blocked_pat = _pattern_is_trade_skipped(detect)
@@ -4982,15 +5281,10 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return False
 
     # First valid BUY/SELL after arm: optional skip once per pair (HTF default on; 1m/5m off).
-    skip_first_on_scalp = os.environ.get("SKIP_FIRST_DETECT_SCALP", "0").strip().lower() in (
-        "1", "true", "yes",
-    )
-    skip_first_on_htf = os.environ.get("SKIP_FIRST_DETECT", "1").strip().lower() not in (
-        "0", "false", "no",
-    )
+    # Values come from module globals (env default → MySQL engine_formulas override).
     should_skip_first = (
-        (is_scalp_tf(tf_l) and skip_first_on_scalp)
-        or (not is_scalp_tf(tf_l) and skip_first_on_htf)
+        (is_scalp_tf(tf_l) and bool(SKIP_FIRST_DETECT_SCALP))
+        or (not is_scalp_tf(tf_l) and bool(SKIP_FIRST_DETECT))
     )
     if should_skip_first and pair not in FIRST_DETECT_SKIPPED:
         FIRST_DETECT_SKIPPED.add(pair)
@@ -5429,9 +5723,30 @@ async def start_background_tasks():
             if synced > agent.trade_seq:
                 agent.trade_seq = synced
                 print(f"[MYSQL] trade_seq synced to {agent.trade_seq}")
+            try:
+                import engine_config
+                applied = engine_config.reload_and_apply()
+                system_log.push(
+                    "ai",
+                    f"Engine formulas loaded from MySQL ({len(applied)} knobs).",
+                    {"count": len(applied), "sample": list(applied.keys())[:12]},
+                )
+            except Exception as eng_exc:
+                print(f"[ENGINE-DB] startup apply note: {eng_exc}")
         system_log.push("ai", f"MySQL: {db_status.get('message')}", db_status)
     except Exception as exc:
         print(f"[MYSQL] startup note: {exc}")
+    try:
+        import cursor_ai
+        if cursor_ai.is_cursor_configured():
+            await cursor_ai._ensure_client()
+            system_log.push(
+                "ai",
+                f"Cursor AI ready (model={settings_store.ai_model}, provider=cursor).",
+                {"provider": "cursor", "model": settings_store.ai_model},
+            )
+    except Exception as exc:
+        print(f"[CURSOR-AI] startup note: {exc}")
     try:
         restored = restore_runtime(agent)
         if restored.get("restored"):
@@ -5533,6 +5848,15 @@ async def start_background_tasks():
     asyncio.create_task(chart_24h_refresh_loop(BYBIT_SYMBOL_MAP))
     asyncio.create_task(session_schedule_loop())
     asyncio.create_task(engine_runtime_checkpoint_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown_cursor_bridge():
+    try:
+        import cursor_ai
+        await cursor_ai.shutdown_cursor_client()
+    except Exception as exc:
+        print(f"[CURSOR-AI] shutdown note: {exc}")
 
 
 async def engine_runtime_checkpoint_loop():
@@ -6393,6 +6717,140 @@ async def trades_seasons(limit: int = Query(50, ge=1, le=200)):
 @app.get("/settings/mysql-status")
 async def mysql_status():
     return trade_db.status_dict()
+
+
+@app.get("/settings/family-rules")
+async def family_rules_status(family: str | None = Query(None)):
+    """Pilot family_engine_rules (pilot playbook + sample stats)."""
+    try:
+        import family_rules as _fr
+        rows = trade_db.fetch_family_rules(family=family) if family else _fr.list_rules()
+        if not rows and not family:
+            rows = trade_db.fetch_family_rules()
+        return {
+            "ok": True,
+            "ai_provider": settings_store.ai_provider,
+            "cursor_unlimited": bool(
+                (__import__("os").environ.get("CURSOR_AI_UNLIMITED") or "1").strip().lower()
+                in ("1", "true", "yes", "on")
+            ),
+            "pilot_families": sorted(_fr.PILOT_FAMILIES),
+            "rules": rows,
+        }
+    except Exception as exc:
+        return {"ok": False, "message": str(exc), "rules": []}
+
+
+@app.get("/settings/ai-training")
+async def ai_training_feed(
+    family: str | None = Query(None),
+    decision: str | None = Query(None, description="FIRE | SKIP | DELAY"),
+    limit: int = Query(80, ge=1, le=300),
+):
+    """AI observations (family playbook) + training log from MySQL."""
+    try:
+        import family_rules as _fr
+        import os as _os
+
+        st = trade_db.status_dict()
+        events = await asyncio.to_thread(
+            trade_db.fetch_recent_train_events,
+            family=family,
+            decision=decision,
+            limit=limit,
+        )
+        rules = await asyncio.to_thread(trade_db.fetch_family_rules, family=family)
+        # Observations = rules with lessons / win-rate history (newest activity first)
+        observations = []
+        for row in rules or []:
+            lesson = (row.get("lesson_text") or "").strip()
+            sc = int(row.get("sample_count") or 0)
+            wr = row.get("win_rate")
+            if not lesson and sc <= 0:
+                continue
+            observations.append(
+                {
+                    "family": row.get("family"),
+                    "timeframe_key": row.get("timeframe_key"),
+                    "lesson": lesson,
+                    "sample_count": sc,
+                    "win_rate": wr,
+                    "avg_r": row.get("avg_r"),
+                    "min_of_score": row.get("min_of_score"),
+                    "version": row.get("version"),
+                    "locked": bool(row.get("locked")),
+                    "updated_at": str(row.get("updated_at") or ""),
+                }
+            )
+        observations.sort(key=lambda o: (o.get("updated_at") or ""), reverse=True)
+
+        fire_n = sum(1 for e in events if str(e.get("decision") or "").upper() == "FIRE")
+        skip_n = sum(1 for e in events if str(e.get("decision") or "").upper() == "SKIP")
+        win_n = sum(1 for e in events if str(e.get("outcome") or "").lower() == "win")
+        loss_n = sum(1 for e in events if str(e.get("outcome") or "").lower() == "loss")
+
+        return {
+            "ok": bool(st.get("ok")),
+            "mysql": st,
+            "ai_provider": settings_store.ai_provider,
+            "ai_configured": bool(settings_store.is_ai_configured()),
+            "cursor_unlimited": bool(
+                (_os.environ.get("CURSOR_AI_UNLIMITED") or "1").strip().lower()
+                in ("1", "true", "yes", "on")
+            ),
+            "pilot_families": sorted(_fr.PILOT_FAMILIES),
+            "summary": {
+                "events": len(events),
+                "fire": fire_n,
+                "skip": skip_n,
+                "wins": win_n,
+                "losses": loss_n,
+                "observations": len(observations),
+                "rules": len(rules or []),
+            },
+            "observations": observations,
+            "events": events,
+            "rules": rules or [],
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "message": str(exc),
+            "observations": [],
+            "events": [],
+            "rules": [],
+            "summary": {},
+        }
+
+@app.get("/settings/engine-formulas")
+async def engine_formulas_status(group: str | None = Query(None)):
+    """Live engine formula knobs from MySQL `engine_formulas`."""
+    try:
+        import engine_config
+        engine_config.refresh()
+        rows = trade_db.fetch_engine_formulas(group=group) if group else engine_config.list_all()
+        if not rows:
+            rows = trade_db.fetch_engine_formulas(group=group)
+        st = trade_db.status_dict()
+        return {
+            "ok": bool(st.get("ok")),
+            "mysql": st,
+            "count": len(rows),
+            "formulas": rows,
+        }
+    except Exception as exc:
+        return {"ok": False, "message": str(exc), "formulas": []}
+
+
+@app.post("/settings/engine-formulas/reload")
+async def engine_formulas_reload():
+    """Re-load formulas from MySQL and patch live runtime globals."""
+    try:
+        import engine_config
+        applied = await asyncio.to_thread(engine_config.reload_and_apply)
+        return {"ok": True, "applied": applied, "count": len(applied)}
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
 
 
 @app.get("/agent/whale/status")
