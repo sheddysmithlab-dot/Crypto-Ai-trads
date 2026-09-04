@@ -1532,34 +1532,49 @@ class AITradingAgent:
             print(f"[MYSQL] open persist skipped: {exc}")
 
     def get_entry_candle_highlights(self) -> list[dict]:
-        """Candles where auto trades fired — scoped per pair for chart neon markers."""
-        seen: set[tuple[str, int]] = set()
+        """Candles where auto trades fired or exited — scoped per pair for chart neon."""
+        seen: set[tuple[str, int, str]] = set()
         out: list[dict] = []
         for row in self.trade_history:
             if row.get("source") == "manual":
                 continue
-            raw = row.get("signal_candle_time")
-            if raw is None:
-                continue
             pair = row.get("pair") or ""
-            chart_time = int(raw // 1000) if raw > 1_000_000_000_000 else int(raw)
-            key = (pair, chart_time)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append({
-                "time": chart_time,
-                "pair": pair,
-                "side": row.get("side", "LONG"),
-                "pattern": row.get("pattern"),
-                "opened_at": row.get("opened_at"),
-            })
+            raw = row.get("signal_candle_time")
+            if raw is not None:
+                chart_time = int(raw // 1000) if raw > 1_000_000_000_000 else int(raw)
+                key = (pair, chart_time, "fired")
+                if key not in seen:
+                    seen.add(key)
+                    out.append({
+                        "time": chart_time,
+                        "pair": pair,
+                        "side": row.get("side", "LONG"),
+                        "pattern": row.get("pattern"),
+                        "opened_at": row.get("opened_at"),
+                        "stage": "fired",
+                    })
+            exit_raw = row.get("exit_candle_time")
+            if exit_raw is not None and row.get("status") == "sold":
+                exit_time = int(exit_raw // 1000) if exit_raw > 1_000_000_000_000 else int(exit_raw)
+                key = (pair, exit_time, "exited")
+                if key not in seen:
+                    seen.add(key)
+                    out.append({
+                        "time": exit_time,
+                        "pair": pair,
+                        "side": row.get("side", "LONG"),
+                        "pattern": row.get("pattern") or "Trade exit",
+                        "opened_at": row.get("closed_at"),
+                        "stage": "exited",
+                        "reason": row.get("closed_reason"),
+                    })
         return out
 
     def _finalize_trade_history(self, trade, metrics, reason):
         exit_px = metrics.get("mark_price")
         if exit_px is None:
             exit_px = self.mark_price_for(trade.get("pair")) or trade.get("entry")
+        exit_ms = _exit_candle_time_ms(trade)
         found = False
         for row in self.trade_history:
             if row["id"] == trade["id"]:
@@ -1573,6 +1588,7 @@ class AITradingAgent:
                 row["status"] = "sold"
                 row["closed_reason"] = reason
                 row["closed_at"] = time.time()
+                row["exit_candle_time"] = exit_ms
                 found = True
                 break
         if not found:
@@ -1594,12 +1610,26 @@ class AITradingAgent:
                 "status": "sold",
                 "closed_reason": reason,
                 "closed_at": time.time(),
+                "exit_candle_time": exit_ms,
                 "source": trade.get("source", "auto"),
                 "protected": trade.get("source") == "manual",
                 "opened_at": trade.get("opened_at"),
                 "season_id": trade.get("season_id") or self.ai_season_id,
                 "exchange": trade.get("exchange"),
+                "pattern": trade.get("pattern"),
+                "timeframe_key": trade.get("timeframe_key"),
             })
+        try:
+            _push_pattern_neon(
+                pair=str(trade.get("pair") or ""),
+                candle_time_ms=int(exit_ms),
+                stage="exited",
+                side=trade.get("side"),
+                pattern=trade.get("pattern") or "Trade exit",
+                reason=(reason or "EXIT")[:80],
+            )
+        except Exception as neon_exc:
+            print(f"[NEON] exit push skipped: {neon_exc}")
         try:
             trade_db.finalize_trade(
                 trade,
@@ -3814,7 +3844,8 @@ PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
 LAST_AUTO_FIRE_CANDLE_MS: dict[str, int] = {}
 ONE_M_MIN_BARS_BETWEEN_FIRES = 3  # fire on N → next fire earliest N+3 (was 5)
 # 1m/5m: after pattern+AI lock, wait up to N bars for live green/red START (not candle close).
-ONE_M_CONFIRM_MAX_BARS = 3
+# Hard skip if color confirm does not complete within the next N bars after detect.
+ONE_M_CONFIRM_MAX_BARS = int(os.environ.get("ONE_M_CONFIRM_MAX_BARS", "2"))
 # 1m only: skip this many matching color ticks before fire (1 = pehla skip, dusra pe fire).
 ONE_M_CONFIRM_SKIP_TICKS = int(os.environ.get("ONE_M_CONFIRM_SKIP_TICKS", "1"))
 ONE_M_MAX_CONCURRENT = 3  # hard cap PER PAIR while chart TF is 1m (fee control)
@@ -3900,7 +3931,7 @@ def _push_pattern_neon(
     pattern: str | None = None,
     reason: str | None = None,
 ) -> None:
-    """Append a chart neon stage (detected / confirming / fired / skipped)."""
+    """Append a chart neon stage (detected / confirming / fired / skipped / exited)."""
     tsec = _chart_time_sec(candle_time_ms)
     if tsec is None:
         return
@@ -3916,22 +3947,30 @@ def _push_pattern_neon(
         "action": action,
         "pattern": pattern or "Pattern",
         "reason": reason,
-        "opened_at": time.time() if stage == "fired" else None,
+        "opened_at": time.time() if stage in ("fired", "exited") else None,
     }
-    # Replace same pair+time+stage; keep higher-rank stage on same bar.
-    rank = {"detected": 1, "confirming": 2, "skipped": 3, "fired": 4}.get(stage, 0)
+    # Same pair+bar+stage → replace; other stages on the same bar stay (fire + exit).
     kept: list[dict] = []
     for prev in PATTERN_NEON_STAGES:
-        if prev.get("pair") == pair and int(prev.get("time") or 0) == tsec:
-            prev_rank = {"detected": 1, "confirming": 2, "skipped": 3, "fired": 4}.get(
-                str(prev.get("stage") or ""), 0
-            )
-            if prev_rank > rank:
-                kept.append(prev)
+        if (
+            prev.get("pair") == pair
+            and int(prev.get("time") or 0) == tsec
+            and str(prev.get("stage") or "") == str(stage)
+        ):
             continue
         kept.append(prev)
     kept.append(entry)
     PATTERN_NEON_STAGES[:] = kept[-120:]
+
+
+def _exit_candle_time_ms(trade: dict | None = None) -> int:
+    """Snap now to the trade TF bar open (ms) for exit neon on that candle."""
+    tf = (trade or {}).get("timeframe_key") or SECONDS_TO_TIMEFRAME_KEY.get(
+        getattr(agent, "timeframe_seconds", 60), "1m"
+    )
+    interval_ms = max(1, int(_timeframe_interval_ms(tf)))
+    now_ms = int(time.time() * 1000)
+    return (now_ms // interval_ms) * interval_ms
 
 
 def _clear_entry_pipeline() -> None:
@@ -5069,7 +5108,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             PENDING_ENTRY_SIGNALS[pair] = pending
             return await _skip_pending(
                 pending,
-                f"scalp confirm timeout after {max_bars} candles (no {want} start)",
+                f"HARD SKIP: no {want} confirm within next {max_bars} candles",
                 fire_candle_ms=bar_start,
             )
 

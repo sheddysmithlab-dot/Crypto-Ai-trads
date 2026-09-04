@@ -375,7 +375,7 @@ _ENGINE_FORMULA_SEEDS: list[tuple[str, str, str, float | None, str | None, str]]
     ("fire", "MIN_CONFIRM_BODY_PCT", "number", 0.03, None, "Min body % for color confirm"),
     ("fire", "ONE_M_CONFIRM_SKIP_TICKS", "number", 1.0, None, "1m skip N matching ticks"),
     ("fire", "ONE_M_MIN_BARS_BETWEEN_FIRES", "number", 3.0, None, "Min bars between scalp fires"),
-    ("fire", "ONE_M_CONFIRM_MAX_BARS", "number", 3.0, None, "Max bars for color confirm"),
+    ("fire", "ONE_M_CONFIRM_MAX_BARS", "number", 2.0, None, "Hard skip if no color confirm in N bars"),
     ("fire", "SKIP_FIRST_DETECT", "bool", 1.0, None, "Skip first HTF detect after arm"),
     ("fire", "SKIP_FIRST_DETECT_SCALP", "bool", 0.0, None, "Skip first scalp detect"),
     ("engine", "ENGINE_BOOT_MAX_SEC", "number", 60.0, None, "Boot overlay max sec"),
@@ -434,6 +434,12 @@ def _tighten_trade_policy(cur) -> None:
            SET value_num = 80, note = 'Trap floor 1m'
            WHERE formula_key = 'THR_SCORE_TRAP_1M'
              AND (value_num IS NULL OR value_num < 80)"""
+    )
+    cur.execute(
+        """UPDATE engine_formulas
+           SET value_num = 2, note = 'Hard skip if no color confirm in N bars'
+           WHERE formula_key = 'ONE_M_CONFIRM_MAX_BARS'
+             AND (value_num IS NULL OR value_num <> 2)"""
     )
     # Unlock candle soft for every unlocked candle-family row (incl. new seeds).
     fam_list = ", ".join(f"'{f}'" for f, *_ in _SEED_FAMILIES)

@@ -259,7 +259,7 @@ INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_n
 ('MIN_CONFIRM_BODY_PCT','fire','number',0.03,'Min body % for color confirm'),
 ('ONE_M_CONFIRM_SKIP_TICKS','fire','number',1,'1m skip N matching ticks'),
 ('ONE_M_MIN_BARS_BETWEEN_FIRES','fire','number',3,'Min bars between scalp fires'),
-('ONE_M_CONFIRM_MAX_BARS','fire','number',3,'Max bars for color confirm'),
+('ONE_M_CONFIRM_MAX_BARS','fire','number',2,'Hard skip if no color confirm in N bars'),
 ('SKIP_FIRST_DETECT','fire','bool',1,'Skip first HTF detect after arm'),
 ('SKIP_FIRST_DETECT_SCALP','fire','bool',0,'Skip first scalp detect'),
 ('ENGINE_BOOT_MAX_SEC','engine','number',60,'Boot overlay max sec'),
@@ -274,6 +274,8 @@ INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_j
 -- Enable candle-family trading (safe re-run)
 UPDATE engine_formulas SET value_num = 1 WHERE formula_key = 'CANDLE_ONLY_FIRE' AND (value_num IS NULL OR value_num <> 1);
 UPDATE engine_formulas SET value_num = 80 WHERE formula_key = 'THR_SCORE_TRAP_1M' AND (value_num IS NULL OR value_num < 80);
+UPDATE engine_formulas SET value_num = 2, note = 'Hard skip if no color confirm in N bars'
+  WHERE formula_key = 'ONE_M_CONFIRM_MAX_BARS' AND (value_num IS NULL OR value_num <> 2);
 UPDATE family_engine_rules
   SET candle_soft = 1,
       min_of_score = CASE WHEN min_of_score IS NULL OR min_of_score > 55 THEN 50 ELSE min_of_score END

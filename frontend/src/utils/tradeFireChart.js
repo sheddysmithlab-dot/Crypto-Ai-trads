@@ -1,7 +1,7 @@
 import { normalizeChartCandleTime, snapToChartInterval } from './chartCandles';
 import { formatTradeFireTime } from './time';
 
-/** Three pipeline stages + fire side colors. */
+/** Pipeline stages + fire side colors + exit blue neon. */
 const NEON = {
   detected: {
     border: '#00e5ff',
@@ -53,6 +53,16 @@ const NEON = {
     glyph: '✕',
     label: 'SKIPPED',
   },
+  exited: {
+    border: '#2563eb',
+    glow: 'rgba(37, 99, 235, 0.85)',
+    bg: 'rgba(37, 99, 235, 0.16)',
+    badge: '#60a5fa',
+    className: 'trade-fire-neon--exited',
+    tipClass: 'trade-fire-tooltip--exited',
+    glyph: '▣',
+    label: 'TRADE OUT',
+  },
 };
 
 const STAGE_RANK = {
@@ -60,6 +70,7 @@ const STAGE_RANK = {
   confirming: 2,
   skipped: 3,
   fired: 4,
+  exited: 5,
 };
 
 function neonForEntry(entry) {
@@ -67,6 +78,7 @@ function neonForEntry(entry) {
   if (stage === 'detected') return NEON.detected;
   if (stage === 'confirming') return NEON.confirming;
   if (stage === 'skipped') return NEON.skipped;
+  if (stage === 'exited' || stage === 'exit') return NEON.exited;
   const isShort = entry.side === 'SHORT' || entry.side === 'SELL';
   return isShort ? NEON.fired_SHORT : NEON.fired_LONG;
 }
@@ -99,11 +111,14 @@ export function filterEntryCandlesForPair(entryCandles, pairLabel) {
 }
 
 function upsertLookupEntry(map, entry) {
-  const existing = map.get(entry.time);
-  const nextRank = STAGE_RANK[entry.stage] || 0;
+  // Allow fire + exit on the same bar (key by time+stage).
+  const stage = entry.stage || 'fired';
+  const key = `${entry.time}|${stage}`;
+  const existing = map.get(key);
+  const nextRank = STAGE_RANK[stage] || 0;
   const prevRank = existing ? STAGE_RANK[existing.stage] || 0 : 0;
   if (!existing || nextRank >= prevRank) {
-    map.set(entry.time, entry);
+    map.set(key, entry);
   }
 }
 
@@ -155,19 +170,21 @@ export function buildTradeFireLookup(
     const rawTime = item.time ?? item.signal_candle_time;
     const resolved = resolveBarTime(rawTime, candleData, intervalSeconds);
     if (!resolved) continue;
-    // Don't overwrite pipeline stages (esp. detected on signal bar).
-    if (map.has(resolved.time)) continue;
+    const stage = item.stage || 'fired';
+    const key = `${resolved.time}|${stage}`;
+    // Don't overwrite live pipeline stages for the same bar+stage.
+    if (map.has(key)) continue;
 
     const side = item.side || (item.action === 'SELL' ? 'SHORT' : 'LONG');
-    map.set(resolved.time, {
+    map.set(key, {
       time: resolved.time,
       bar: resolved.bar,
       side,
-      stage: 'fired',
+      stage,
       pair: item.pair || null,
-      pattern: item.pattern || item.taapi_action || 'Trade fire',
-      reason: null,
-      opened_at: item.opened_at ?? item.trade_time ?? null,
+      pattern: item.pattern || item.taapi_action || (stage === 'exited' ? 'Trade exit' : 'Trade fire'),
+      reason: item.reason || null,
+      opened_at: item.opened_at ?? item.trade_time ?? item.closed_at ?? null,
       signal_candle_time: normalizeChartCandleTime(rawTime),
     });
   }
@@ -204,8 +221,8 @@ function appendTooltip(overlayEl, left, top, entry, neon) {
   patternEl.textContent = formatPatternLabel(entry.pattern);
 
   tip.appendChild(stageEl);
-  // Explicit LONG/SHORT line on fired candles (color already encodes side).
-  if ((entry.stage === 'fired' || !entry.stage) && entry.side) {
+  // Explicit LONG/SHORT line on fired / exited candles.
+  if ((entry.stage === 'fired' || entry.stage === 'exited' || !entry.stage) && entry.side) {
     const sideEl = document.createElement('div');
     sideEl.className = 'trade-fire-tooltip__side';
     sideEl.textContent =
@@ -218,7 +235,7 @@ function appendTooltip(overlayEl, left, top, entry, neon) {
   timeEl.className = 'trade-fire-tooltip__time';
   timeEl.textContent = formatTradeFireTime(entry.opened_at || entry.signal_candle_time);
   tip.appendChild(timeEl);
-  if (entry.reason && entry.stage === 'skipped') {
+  if (entry.reason && (entry.stage === 'skipped' || entry.stage === 'exited')) {
     const reasonEl = document.createElement('div');
     reasonEl.className = 'trade-fire-tooltip__time';
     reasonEl.textContent = String(entry.reason).slice(0, 48);
@@ -307,7 +324,16 @@ export function renderTradeFireOverlay({
 
 export function tradeFireTooltipFromLookup(lookup, chartTime) {
   if (!lookup || chartTime == null) return null;
-  const hit = lookup.get(chartTime);
+  let hit = null;
+  let bestRank = -1;
+  for (const [, entry] of lookup) {
+    if (entry.time !== chartTime) continue;
+    const rank = STAGE_RANK[entry.stage || 'fired'] || 0;
+    if (rank >= bestRank) {
+      bestRank = rank;
+      hit = entry;
+    }
+  }
   if (!hit) return null;
   const neon = neonForEntry(hit);
   return {
