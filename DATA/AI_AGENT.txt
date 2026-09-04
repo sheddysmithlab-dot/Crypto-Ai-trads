@@ -1,9 +1,0 @@
-# AI Trading Agent
-
-| Profile | Role |
-|---------|------|
-| `PATTERN_2` | EMA + MACD/ADX (Bitcoin ML/TA paper) — **default** |
-| `PATTERN_1` | Candlestick Bible Pin/Engulf/Inside |
-| `ml_trading_memory.json` | Cost-aware takeaways |
-
-Router: `entry_router.py` · set `ENTRY_PATTERN_NAME` in `.env`

@@ -1,7 +1,0 @@
-# Trading policies — wiped
-
-No active auto entry / exit policy.
-
-Manual open/close + emergency sell-all only.
-
-Awaiting new strategy.
