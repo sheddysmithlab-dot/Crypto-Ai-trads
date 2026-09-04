@@ -45,7 +45,13 @@ THR_SCORE_5M = 75.0  # 5m non-trap / scalp floor
 THR_SCORE_1M = 75.0
 THR_SCORE_IMBALANCE_1M = float(os.environ.get("THR_SCORE_IMBALANCE_1M", "75"))
 THR_SCORE_INSIDE_BAR = float(os.environ.get("THR_SCORE_INSIDE_BAR", "75"))
-THR_SCORE_CLASSIC_PATTERN = float(os.environ.get("THR_SCORE_CLASSIC_PATTERN", "65"))
+# Soft floors — doji family (classic_pattern) + engulfing may fire with weaker OF.
+THR_SCORE_CLASSIC_PATTERN = float(os.environ.get("THR_SCORE_CLASSIC_PATTERN", "50"))
+THR_SCORE_ENGULFING = float(os.environ.get("THR_SCORE_ENGULFING", "50"))
+# When OF is weak/NO_TRADE, still allow brain engulfing/doji candle-only fire.
+CANDLE_ONLY_FIRE_ENABLED = os.environ.get("CANDLE_ONLY_FIRE", "1").strip().lower() in (
+    "1", "true", "yes",
+)
 THR_SCORE_TRAP = 90.0  # named trap fires (15m+)
 THR_SCORE_TRAP_5M = 80.0  # named trap fires on 5m
 THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "75"))
@@ -73,11 +79,34 @@ _IMBALANCE_FIRE_PATTERNS = frozenset({
     "RAW_IMBALANCE",
 })
 
+# Brain strategies that may soft-bypass weak OF (candle-only fire).
+_CANDLE_SOFT_STRATEGIES = frozenset({
+    "classic_pattern",  # doji / star / soldiers / harami / etc.
+    "engulfing_bar",
+    "engulfing",
+})
+
 # 1m fire allowlist — REVERSAL_TRAP + EXHAUSTION blocked (false fades).
 _1M_LONG_OK = ("SELL_TRAP", "ABSORPTION", "FAKE_BREAKOUT")
 _1M_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "FAKE_BREAKOUT")
 _HTF_LONG_OK = ("SELL_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
 _HTF_SHORT_OK = ("BUY_TRAP", "ABSORPTION", "EXHAUSTION", "FAKE_BREAKOUT", "REVERSAL_TRAP")
+
+
+def _norm_strategy(brain_strategy: str | None) -> str:
+    return (brain_strategy or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def is_candle_soft_strategy(brain_strategy: str | None) -> bool:
+    """True for doji-family classic_pattern and engulfing_bar — soft OF / candle-only."""
+    strat = _norm_strategy(brain_strategy)
+    if strat in _CANDLE_SOFT_STRATEGIES:
+        return True
+    if "engulf" in strat:
+        return True
+    if "doji" in strat:
+        return True
+    return False
 
 
 def thr_score_for_tf(exec_tf: str | None) -> float:
@@ -106,13 +135,18 @@ def thr_score_for_setup(
     *,
     brain_strategy: str | None = None,
 ) -> float:
-    """Floor for a specific setup: classic_pattern ≥65; inside_bar ≥75; traps ≥80/90; else ≥75."""
-    strat = (brain_strategy or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if strat == "classic_pattern":
+    """Floor: classic/doji ≥50; engulfing ≥50; inside_bar ≥75; traps ≥80/90; else ≥75."""
+    name = (pattern or "").strip().upper()
+    if name.startswith("CANDLE_"):
+        # Candle-only bypass already approved — no extra OF score gate.
+        return 0.0
+    strat = _norm_strategy(brain_strategy)
+    if strat == "classic_pattern" or "doji" in strat:
         return float(THR_SCORE_CLASSIC_PATTERN)
+    if strat in ("engulfing_bar", "engulfing") or "engulf" in strat:
+        return float(THR_SCORE_ENGULFING)
     if strat == "inside_bar":
         return float(THR_SCORE_INSIDE_BAR)
-    name = (pattern or "").strip().upper()
     if "INSIDE_BAR" in name:
         return float(THR_SCORE_INSIDE_BAR)
     if name in _TRAP_FIRE_PATTERNS:
@@ -136,12 +170,46 @@ def is_imbalance_fire_pattern(pattern: str | None) -> bool:
     return base in _IMBALANCE_FIRE_PATTERNS
 
 
-def _apply_imbalance_block(result: TrapOFResult) -> TrapOFResult:
-    """Hard skip any LONG/SHORT whose root pattern is imbalance-only."""
+def _apply_imbalance_block(
+    result: TrapOFResult,
+    *,
+    candle_soft: bool = False,
+    brain_side: str | None = None,
+    brain_strategy: str | None = None,
+) -> TrapOFResult:
+    """Hard skip imbalance-only fires — unless engulfing/doji candle-only remaps them."""
     if result.final_signal not in ("LONG", "SHORT"):
         return result
     if not is_imbalance_fire_pattern(result.pattern):
         return result
+    side_norm = (brain_side or "").strip().upper()
+    want = "LONG" if side_norm == "BUY" else "SHORT" if side_norm == "SELL" else None
+    if (
+        candle_soft
+        and CANDLE_ONLY_FIRE_ENABLED
+        and want
+        and result.final_signal == want
+    ):
+        strat = _norm_strategy(brain_strategy) or "classic_pattern"
+        max_sc = max(float(result.long_score), float(result.short_score))
+        return TrapOFResult(
+            timeframe=result.timeframe,
+            pattern=f"CANDLE_{strat.upper()}",
+            bias_5m=result.bias_5m,
+            buy_pressure=result.buy_pressure,
+            sell_pressure=result.sell_pressure,
+            buy_volume_ratio=result.buy_volume_ratio,
+            sell_volume_ratio=result.sell_volume_ratio,
+            long_score=result.long_score,
+            short_score=result.short_score,
+            final_signal=want,
+            confidence=max(max_sc, 40.0) / 100.0,
+            primary_reason=(
+                f"candle-only {strat} fire — imbalance remapped "
+                f"(was {result.pattern})"
+            ),
+            details=result.details,
+        )
     max_sc = max(float(result.long_score), float(result.short_score))
     return TrapOFResult(
         timeframe=result.timeframe,
@@ -762,11 +830,16 @@ def evaluate_trap_orderflow(
         else:
             short_score += 8
 
-    # NO TRADE gates — classic_pattern ≥65; traps ≥80/90; non-trap ≥75
+    # NO TRADE gates — classic/doji ≥50; engulfing ≥50; traps ≥80/90; else ≥75
     setup_name = (setup_1 or setup_5 or {}).get("name") if (setup_1 or setup_5) else None
-    strat_norm = (brain_strategy or "").strip().lower().replace("-", "_").replace(" ", "_")
+    strat_norm = _norm_strategy(brain_strategy)
     side_norm = (brain_side or "").strip().upper()
     classic_brain = strat_norm == "classic_pattern" and side_norm in ("BUY", "SELL")
+    candle_soft = (
+        CANDLE_ONLY_FIRE_ENABLED
+        and is_candle_soft_strategy(brain_strategy)
+        and side_norm in ("BUY", "SELL")
+    )
     thr = thr_score_for_setup(exec_tf, setup_name, brain_strategy=brain_strategy)
     thr_base = thr_score_for_tf(exec_tf)
     strict_scalp = (exec_tf or "").strip().lower() in ("1m", "5m", "30s")
@@ -775,8 +848,18 @@ def evaluate_trap_orderflow(
     max_score = max(long_score, short_score)
     gate_score = (
         long_score if side_norm == "BUY" else short_score
-    ) if classic_brain else max_score
+    ) if (classic_brain or candle_soft) else max_score
     low_conf = score_below_floor(gate_score, thr)
+
+    def _candle_only_fire(shown: float, why: str) -> tuple[str, str, str, float]:
+        """Brain engulfing/doji wins when OF is weak / imbalance / balanced."""
+        sig = "LONG" if side_norm == "BUY" else "SHORT"
+        label = f"CANDLE_{strat_norm.upper()}"
+        reason = (
+            f"candle-only {strat_norm} fire — {why} "
+            f"(OF score {shown:.1f}, soft floor {thr:.0f})"
+        )
+        return sig, label, reason, max(shown, 40.0) / 100.0
 
     # Named-pattern ok flags (15m+ may bypass low conf; 1m/5m never do)
     _long_ok = _1M_LONG_OK if strict_scalp else _HTF_LONG_OK
@@ -790,22 +873,37 @@ def evaluate_trap_orderflow(
             short_ok_pattern = True
 
     if bal_pressure and bal_volume:
-        signal = "NO_TRADE"
-        reason = "Buyer/Seller pressure and Buy/Sell volume both balanced"
-        pattern = "BALANCED"
-        conf = 0.0
+        if candle_soft:
+            signal, pattern, reason, conf = _candle_only_fire(
+                gate_score, "balanced OF overridden"
+            )
+        else:
+            signal = "NO_TRADE"
+            reason = "Buyer/Seller pressure and Buy/Sell volume both balanced"
+            pattern = "BALANCED"
+            conf = 0.0
     elif strict_scalp and low_conf:
-        # 1m/5m: score ≥ thr required — pattern / HTF / RAW bypass off
-        signal = "NO_TRADE"
-        shown = gate_score if classic_brain else max_score
-        reason = f"scalp strict: score {shown:.1f} < {thr:.0f} (pattern bypass off)"
-        pattern = setup_1["name"] if setup_1 else (setup_5["name"] if setup_5 else "NONE")
-        conf = max_score / 100.0
+        # 1m/5m: score ≥ thr required — unless engulfing/doji candle-only soft bypass
+        shown = gate_score if (classic_brain or candle_soft) else max_score
+        if candle_soft:
+            signal, pattern, reason, conf = _candle_only_fire(
+                shown, "OF soft bypass (pattern bypass on)"
+            )
+        else:
+            signal = "NO_TRADE"
+            reason = f"scalp strict: score {shown:.1f} < {thr:.0f} (pattern bypass off)"
+            pattern = setup_1["name"] if setup_1 else (setup_5["name"] if setup_5 else "NONE")
+            conf = max_score / 100.0
     elif low_conf and not (long_ok_pattern or short_ok_pattern):
-        signal = "NO_TRADE"
-        reason = f"Low confidence (max score {max_score:.1f} < {thr:.0f})"
-        pattern = setup_1["name"] if setup_1 else (setup_5["name"] if setup_5 else "NONE")
-        conf = max_score / 100.0
+        if candle_soft:
+            signal, pattern, reason, conf = _candle_only_fire(
+                max_score, "low-conf OF overridden"
+            )
+        else:
+            signal = "NO_TRADE"
+            reason = f"Low confidence (max score {max_score:.1f} < {thr:.0f})"
+            pattern = setup_1["name"] if setup_1 else (setup_5["name"] if setup_5 else "NONE")
+            conf = max_score / 100.0
     elif strict_scalp:
         # 1m/5m: named trap preferred; score-only QUALIFIED_IMBALANCE when side ≥ floor.
         if not setup_1 and not setup_5:
@@ -900,35 +998,42 @@ def evaluate_trap_orderflow(
 
     return _apply_imbalance_block(
         TrapOFResult(
-        timeframe=exec_tf.upper(),
-        pattern=pattern,
-        bias_5m=bias_5m,
-        buy_pressure=m1["buyer_ratio"],
-        sell_pressure=m1["seller_ratio"],
-        buy_volume_ratio=m1["buy_ratio"],
-        sell_volume_ratio=m1["sell_ratio"],
-        long_score=long_score,
-        short_score=short_score,
-        final_signal=signal,
-        confidence=conf,
-        primary_reason=reason,
-        details={
-            "dir_1m": dir_1m,
-            "up_20": flow_20["up_20"],
-            "down_20": flow_20["down_20"],
-            "flow_long_20": round(flow_20["flow_long"], 4),
-            "flow_short_20": round(flow_20["flow_short"], 4),
-            "patterns_1m": pats_1,
-            "patterns_5m": pats_5,
-            "setup_1m": setup_1,
-            "setup_5m": setup_5,
-            "volume_pressure": m1["volume_pressure"],
-            "proxy": "ohlc_volume_split",
-            "thr_score": thr,
-            "thr_base": thr_base,
-            "thr_trap": thr_trap_for_tf(exec_tf),
-        },
-        )
+            timeframe=exec_tf.upper(),
+            pattern=pattern,
+            bias_5m=bias_5m,
+            buy_pressure=m1["buyer_ratio"],
+            sell_pressure=m1["seller_ratio"],
+            buy_volume_ratio=m1["buy_ratio"],
+            sell_volume_ratio=m1["sell_ratio"],
+            long_score=long_score,
+            short_score=short_score,
+            final_signal=signal,
+            confidence=conf,
+            primary_reason=reason,
+            details={
+                "dir_1m": dir_1m,
+                "up_20": flow_20["up_20"],
+                "down_20": flow_20["down_20"],
+                "flow_long_20": round(flow_20["flow_long"], 4),
+                "flow_short_20": round(flow_20["flow_short"], 4),
+                "patterns_1m": pats_1,
+                "patterns_5m": pats_5,
+                "setup_1m": setup_1,
+                "setup_5m": setup_5,
+                "volume_pressure": m1["volume_pressure"],
+                "proxy": "ohlc_volume_split",
+                "thr_score": thr,
+                "thr_base": thr_base,
+                "thr_trap": thr_trap_for_tf(exec_tf),
+                "brain_strategy": brain_strategy,
+                "brain_side": brain_side,
+                "candle_soft": candle_soft,
+                "contradiction": contradiction,
+            },
+        ),
+        candle_soft=candle_soft,
+        brain_side=brain_side,
+        brain_strategy=brain_strategy,
     )
 
 

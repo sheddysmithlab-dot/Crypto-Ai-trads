@@ -23,6 +23,7 @@ import httpx
 import brain as _b
 from trap_orderflow_engine import (
     evaluate_trap_orderflow,
+    is_candle_soft_strategy,
     merge_with_structure_trap,
     score_below_floor,
     score_meets_floor,
@@ -159,23 +160,37 @@ def _of_side_ok(
     timeframe_key: str,
     think: dict,
 ) -> tuple[bool, float, str]:
-    """Order-flow layer: final_signal must match action and side score ≥ setup floor."""
+    """Order-flow layer: final_signal must match action and side score ≥ setup floor.
+
+    Engulfing/doji (candle soft): allow when OF already tagged CANDLE_* or when
+    OF is NO_TRADE / weak but brain confluence alone is enough.
+    """
     if action not in ("BUY", "SELL"):
         return False, 0.0, "not actionable"
     if not of_trap:
         return False, 0.0, "OF missing"
     want_sig = "LONG" if action == "BUY" else "SHORT"
     of_sig = (of_trap or {}).get("final_signal")
-    if of_sig != want_sig:
-        side_sc = _matching_side_score(of_trap, action)
-        return False, side_sc, f"OF {of_sig or 'NONE'} != {want_sig}"
-    tf = _norm_tf(timeframe_key)
     strategy = _brain_strategy_from_think(think)
-    pattern = (of_trap or {}).get("pattern")
-    thr = thr_score_for_setup(tf, pattern, brain_strategy=strategy)
+    pattern = (of_trap or {}).get("pattern") or ""
     side_sc = _matching_side_score(of_trap, action)
-    if score_below_floor(side_sc, thr):
-        return False, side_sc, f"OF score {side_sc:.1f} < {thr:.0f}"
+    tf = _norm_tf(timeframe_key)
+    thr = thr_score_for_setup(tf, pattern, brain_strategy=strategy)
+    candle_soft = is_candle_soft_strategy(strategy)
+
+    if of_sig == want_sig:
+        if score_below_floor(side_sc, thr):
+            if candle_soft:
+                return True, side_sc, f"candle-soft OF ok (score {side_sc:.1f} < {thr:.0f})"
+            return False, side_sc, f"OF score {side_sc:.1f} < {thr:.0f}"
+        return True, side_sc, "ok"
+
+    # Candle-only: brain engulfing/doji may fire even if OF said NO_TRADE / opposite weak.
+    if candle_soft and of_sig in (None, "NO_TRADE", want_sig):
+        return True, side_sc, f"candle-only {strategy} (OF was {of_sig or 'NONE'})"
+
+    if of_sig != want_sig:
+        return False, side_sc, f"OF {of_sig or 'NONE'} != {want_sig}"
     return True, side_sc, "ok"
 
 
@@ -185,7 +200,7 @@ def _dual_score_passes(
     think: dict,
     timeframe_key: str,
 ) -> tuple[bool, str, float, float]:
-    """Both brain confluence and OF side score must pass (all TFs, all patterns)."""
+    """Brain confluence required; OF required unless engulfing/doji candle-only."""
     b_ok, b_sc, b_msg = _brain_side_ok(think, action, timeframe_key)
     if not b_ok:
         return False, f"Brain gate: {b_msg}", b_sc, 0.0
@@ -210,7 +225,7 @@ def _setup_meets_ai_confirm_threshold(
     timeframe_key: str,
     think: dict,
 ) -> bool:
-    """AI consult only when BOTH brain confluence and OF side score clear floors."""
+    """AI consult only when brain (+ OF or candle-soft) clears floors."""
     ok, _, _, _ = _dual_score_passes(action, of_trap, think, timeframe_key)
     return ok
 
@@ -233,6 +248,29 @@ def _setup_label_and_score(think: dict, of_trap: Optional[dict], action: str) ->
         pattern = (sig.patterns[0] if sig.patterns else None) or sig.strategy
         score = getattr(sig, "score", None) or getattr(sig, "confidence", None)
     return (str(pattern or "setup"), score)
+
+
+def _fallback_action_from_brain_and_of(
+    think: dict, of_trap: Optional[dict], timeframe_key: str = "1m"
+) -> str:
+    """Pick BUY/SELL when brain+OF pass, or candle-soft engulfing/doji on brain alone."""
+    candidates: list[tuple[str, float]] = []
+    for action in ("BUY", "SELL"):
+        ok, _, b_sc, o_sc = _dual_score_passes(action, of_trap or {}, think, timeframe_key)
+        if ok:
+            candidates.append((action, o_sc + b_sc * 0.1))
+    if not candidates:
+        # Last resort: brain engulfing/doji with clear side even if OF dict missing.
+        strategy = _brain_strategy_from_think(think)
+        if is_candle_soft_strategy(strategy):
+            for action in ("BUY", "SELL"):
+                b_ok, b_sc, _ = _brain_side_ok(think, action, timeframe_key)
+                if b_ok:
+                    candidates.append((action, b_sc))
+    if not candidates:
+        return "HOLD"
+    candidates.sort(key=lambda x: -x[1])
+    return candidates[0][0]
 
 
 def _build_confirm_user_prompt(
@@ -683,23 +721,6 @@ def _gate_1m_of_score(
     return _gate_scalp_of_score(action, of_trap, timeframe_key, think=think)
 
 
-def _fallback_action_from_brain_and_of(
-    think: dict, of_trap: Optional[dict], timeframe_key: str = "1m"
-) -> str:
-    """Pick BUY/SELL only when BOTH brain pattern/trap AND OF pass on the same side."""
-    if not of_trap:
-        return "HOLD"
-    candidates: list[tuple[str, float]] = []
-    for action in ("BUY", "SELL"):
-        ok, _, b_sc, o_sc = _dual_score_passes(action, of_trap, think, timeframe_key)
-        if ok:
-            candidates.append((action, o_sc + b_sc * 0.1))
-    if not candidates:
-        return "HOLD"
-    candidates.sort(key=lambda x: -x[1])
-    return candidates[0][0]
-
-
 # ─── public API ───────────────────────────────────────────────────────────────
 MIN_CANDLES = 30
 
@@ -794,7 +815,12 @@ async def evaluate_live_entry_async(
             return _blocked("Backend OF signal missing — skip trade")
 
         of_sig = (of_trap or {}).get("final_signal")
-        if of_sig == "NO_TRADE":
+        strategy = _brain_strategy_from_think(think)
+        candle_soft = is_candle_soft_strategy(strategy)
+        of_pat = str((of_trap or {}).get("pattern") or "")
+        if of_sig == "NO_TRADE" and not (
+            candle_soft or of_pat.upper().startswith("CANDLE_")
+        ):
             return _blocked(f"Order-flow NO_TRADE — skip | {(of_trap or {}).get('primary_reason') or ''}")
 
         sig = think.get("signal")
@@ -815,19 +841,25 @@ async def evaluate_live_entry_async(
         if provider == "none" or not api_key:
             return _blocked("AI not configured — skip trade (no fail-open)")
 
-        strategy = _brain_strategy_from_think(think)
         thr = thr_score_for_setup(tf, (of_trap or {}).get("pattern"), brain_strategy=strategy)
         side_sc = _matching_side_score(of_trap, setup_action)
 
         allow_of_pass = os.environ.get("AI_FAILOPEN_OF_PASS", "1").strip().lower() in (
             "1", "true", "yes",
         )
-        # Scalp fast-path: dual score already passed → skip AI when OF clears floor.
-        if tf in ("1m", "5m", "30s") and allow_of_pass and score_meets_floor(side_sc, thr):
-            ai_confirmation = "OF_PASS"
+        # Scalp fast-path: dual/candle-soft already passed → skip AI when floor clears.
+        if tf in ("1m", "5m", "30s") and allow_of_pass and (
+            score_meets_floor(side_sc, thr)
+            or candle_soft
+            or of_pat.upper().startswith("CANDLE_")
+        ):
+            if candle_soft or of_pat.upper().startswith("CANDLE_"):
+                ai_confirmation = "CANDLE_PASS"
+            else:
+                ai_confirmation = "OF_PASS"
             print(
-                f"[AI-CONFIRM] Scalp OF pass — skip AI consult "
-                f"(brain={b_sc:.1f} OF={side_sc:.1f}≥{thr:.0f}) on {pair}"
+                f"[AI-CONFIRM] Scalp {ai_confirmation} — skip AI consult "
+                f"(brain={b_sc:.1f} OF={side_sc:.1f} thr={thr:.0f} soft={candle_soft}) on {pair}"
             )
         else:
             confirmed = await _confirm_setup_with_ai(
@@ -871,8 +903,12 @@ async def evaluate_live_entry_async(
     )
     out["ai_confirmation"] = ai_confirmation
     out["ai_driven"] = False
-    if ai_confirmation in ("YES", "OF_PASS") and out.get("action") in ("BUY", "SELL"):
-        tag = "AI=YES" if ai_confirmation == "YES" else "AI=OF_PASS"
+    if ai_confirmation in ("YES", "OF_PASS", "CANDLE_PASS") and out.get("action") in ("BUY", "SELL"):
+        tag = (
+            "AI=YES" if ai_confirmation == "YES"
+            else "AI=CANDLE_PASS" if ai_confirmation == "CANDLE_PASS"
+            else "AI=OF_PASS"
+        )
         out["reason"] = f"{out.get('reason', '')} | {tag}".strip(" |")
     return out
 
