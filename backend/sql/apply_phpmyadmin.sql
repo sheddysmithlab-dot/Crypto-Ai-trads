@@ -1,0 +1,192 @@
+-- Apply on Hostinger phpMyAdmin → database: u808821982_aitrads
+-- SQL tab → paste → Go
+-- Creates self-improve + engine formula tables and seeds defaults.
+-- Safe to re-run (IF NOT EXISTS / INSERT IGNORE).
+
+USE `u808821982_aitrads`;
+
+CREATE TABLE IF NOT EXISTS family_engine_rules (
+  id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  family            VARCHAR(64) NOT NULL,
+  timeframe_key     VARCHAR(16) NOT NULL,
+  min_of_score      DOUBLE NULL,
+  min_brain_score   DOUBLE NULL,
+  min_rr            DOUBLE NULL,
+  sl_pct            DOUBLE NULL,
+  tp_pct            DOUBLE NULL,
+  candle_soft       TINYINT(1) NOT NULL DEFAULT 0,
+  skip_when_json    JSON NULL,
+  fire_when_json    JSON NULL,
+  lesson_text       TEXT NULL,
+  sample_count      INT UNSIGNED NOT NULL DEFAULT 0,
+  win_rate          DOUBLE NULL,
+  avg_r             DOUBLE NULL,
+  version           INT UNSIGNED NOT NULL DEFAULT 1,
+  locked            TINYINT(1) NOT NULL DEFAULT 0,
+  prev_min_of_score DOUBLE NULL,
+  prev_win_rate     DOUBLE NULL,
+  updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_family_tf (family, timeframe_key),
+  KEY idx_family (family)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS family_train_events (
+  id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  event_uid      VARCHAR(64) NOT NULL,
+  family         VARCHAR(64) NOT NULL,
+  pattern        VARCHAR(128) NULL,
+  pair           VARCHAR(32) NULL,
+  tf             VARCHAR(16) NULL,
+  side           VARCHAR(8) NULL,
+  decision       ENUM('FIRE','SKIP','DELAY') NOT NULL,
+  score          DOUBLE NULL,
+  confidence     DOUBLE NULL,
+  strategy       VARCHAR(64) NULL,
+  context_json   JSON NULL,
+  trade_id       INT NULL,
+  outcome        ENUM('win','loss','breakeven','unknown','skipped') NULL,
+  closed_reason  VARCHAR(512) NULL,
+  mfe_pct        DOUBLE NULL,
+  mae_pct        DOUBLE NULL,
+  net_pnl_usd    DOUBLE NULL,
+  fault_tags     JSON NULL,
+  lesson         TEXT NULL,
+  created_at     DOUBLE NOT NULL,
+  closed_at      DOUBLE NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_event_uid (event_uid),
+  KEY idx_family_tf (family, tf),
+  KEY idx_trade_id (trade_id),
+  KEY idx_decision_created (decision, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS engine_formulas (
+  formula_key   VARCHAR(96) NOT NULL,
+  group_name    VARCHAR(48) NOT NULL DEFAULT 'general',
+  value_type    ENUM('number','bool','text','json') NOT NULL DEFAULT 'number',
+  value_num     DOUBLE NULL,
+  value_text    TEXT NULL,
+  value_json    JSON NULL,
+  note          VARCHAR(512) NULL,
+  updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (formula_key),
+  KEY idx_group (group_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Family rules (doji / engulfing / pin bar / inside bar × TFs)
+INSERT IGNORE INTO family_engine_rules
+  (family, timeframe_key, min_of_score, min_brain_score, min_rr, candle_soft, lesson_text, sample_count, version, locked)
+VALUES
+('doji','30s',75,6,2,0,'Doji = indecision. Prefer FIRE near S/R with HTF align; SKIP chop / weak OF.',0,1,0),
+('doji','1m',75,6,2,0,'Doji = indecision. Prefer FIRE near S/R with HTF align; SKIP chop / weak OF.',0,1,0),
+('doji','5m',75,6,2,0,'Doji = indecision. Prefer FIRE near S/R with HTF align; SKIP chop / weak OF.',0,1,0),
+('doji','15m',75,6,2,0,'Doji = indecision. Prefer FIRE near S/R with HTF align; SKIP chop / weak OF.',0,1,0),
+('doji','1h',75,6,2,0,'Doji = indecision. Prefer FIRE near S/R with HTF align; SKIP chop / weak OF.',0,1,0),
+('doji','1d',75,6,2,0,'Doji = indecision. Prefer FIRE near S/R with HTF align; SKIP chop / weak OF.',0,1,0),
+('engulfing','30s',75,6,2,0,'Engulfing needs body dominance + structure; SKIP opposing HTF / weak OF.',0,1,0),
+('engulfing','1m',75,6,2,0,'Engulfing needs body dominance + structure; SKIP opposing HTF / weak OF.',0,1,0),
+('engulfing','5m',75,6,2,0,'Engulfing needs body dominance + structure; SKIP opposing HTF / weak OF.',0,1,0),
+('engulfing','15m',75,6,2,0,'Engulfing needs body dominance + structure; SKIP opposing HTF / weak OF.',0,1,0),
+('engulfing','1h',75,6,2,0,'Engulfing needs body dominance + structure; SKIP opposing HTF / weak OF.',0,1,0),
+('engulfing','1d',75,6,2,0,'Engulfing needs body dominance + structure; SKIP opposing HTF / weak OF.',0,1,0),
+('pin bar','30s',75,6,2,0,'Pin bar / hammer / shooting star: rejection wick + HTF align; SKIP mid-range chop.',0,1,0),
+('pin bar','1m',75,6,2,0,'Pin bar / hammer / shooting star: rejection wick + HTF align; SKIP mid-range chop.',0,1,0),
+('pin bar','5m',75,6,2,0,'Pin bar / hammer / shooting star: rejection wick + HTF align; SKIP mid-range chop.',0,1,0),
+('pin bar','15m',75,6,2,0,'Pin bar / hammer / shooting star: rejection wick + HTF align; SKIP mid-range chop.',0,1,0),
+('pin bar','1h',75,6,2,0,'Pin bar / hammer / shooting star: rejection wick + HTF align; SKIP mid-range chop.',0,1,0),
+('pin bar','1d',75,6,2,0,'Pin bar / hammer / shooting star: rejection wick + HTF align; SKIP mid-range chop.',0,1,0),
+('inside bar','30s',75,6,2,0,'Inside bar: mother-bar break + OF confirm; SKIP weak pressure / low RV.',0,1,0),
+('inside bar','1m',75,6,2,0,'Inside bar: mother-bar break + OF confirm; SKIP weak pressure / low RV.',0,1,0),
+('inside bar','5m',75,6,2,0,'Inside bar: mother-bar break + OF confirm; SKIP weak pressure / low RV.',0,1,0),
+('inside bar','15m',75,6,2,0,'Inside bar: mother-bar break + OF confirm; SKIP weak pressure / low RV.',0,1,0),
+('inside bar','1h',75,6,2,0,'Inside bar: mother-bar break + OF confirm; SKIP weak pressure / low RV.',0,1,0),
+('inside bar','1d',75,6,2,0,'Inside bar: mother-bar break + OF confirm; SKIP weak pressure / low RV.',0,1,0);
+
+-- Global engine formulas (exit / risk / OF / fire / engine / sizing)
+INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_num, note) VALUES
+('PROFIT_LOCK_PCT','exit','number',0.65,'Profit book arm %'),
+('PROFIT_TRAIL_GIVEBACK_PCT','exit','number',0.10,'Trail giveback %'),
+('PROFIT_TRAIL_FIRST_GIVEBACK_PCT','exit','number',0.10,'First trail giveback %'),
+('LOSS_PROTECT_PCT','exit','number',0.60,'Soft loss lock arm %'),
+('LOSS_BAND_PCT','exit','number',0.80,'Hard loss floor %'),
+('LOSS_RECOVERY_RETRACE_PCT','exit','number',0.20,'Loss lock trail %'),
+('LOSS_LOCK_CLEAR_PCT','exit','number',0.20,'Unlock to profit book %'),
+('LOSS_PROTECT_PCT_1M','exit','number',0.60,'1m loss arm'),
+('LOSS_BAND_PCT_1M','exit','number',0.80,'1m hard band'),
+('PROFIT_HARD_PCT_1M','exit','number',0.65,'1m profit arm alias'),
+('FLIP_EXIT_MIN_GROSS_PCT','exit','number',0.25,'Min gross to flip-exit'),
+('MICRO_CAP_LOSS_ARM_PCT','exit','number',0.25,'Micro-cap loss arm'),
+('MICRO_CAP_LOSS_BAND_PCT','exit','number',0.35,'Micro-cap loss band'),
+('MICRO_CAP_HARD_STOP_PCT','exit','number',0.25,'Micro-cap hard stop %'),
+('STRUCTURE_SL_BUFFER_PCT','exit','number',0.05,'Structure SL buffer %'),
+('STRUCTURE_SL_MIN_DISTANCE_PCT','exit','number',0.15,'Min structure SL distance %'),
+('STRUCTURE_SL_GRACE_SEC','exit','number',2.0,'Structure SL grace seconds'),
+('STRICT_EXIT_HARD_TARGET_PCT','exit','number',1.8,'Strict exit hard target %'),
+('STRICT_EXIT_MIN_LOCK_PCT','exit','number',0.65,'Strict exit min lock %'),
+('STRICT_EXIT_FLUCTUATION_X_PCT','exit','number',0.10,'Strict exit fluctuation %'),
+('STRICT_EXIT_TRAIL_MULTIPLIER','exit','number',1.5,'Strict exit trail mult'),
+('STRICT_EXIT_MAX_LOSS_PCT','exit','number',0.80,'Strict exit max loss %'),
+('HARD_STOP_30S','exit','number',0.80,'Hard stop 30s %'),
+('HARD_STOP_1M','exit','number',0.80,'Hard stop 1m %'),
+('HARD_STOP_3M','exit','number',0.80,'Hard stop 3m %'),
+('HARD_STOP_5M','exit','number',0.80,'Hard stop 5m %'),
+('HARD_STOP_10M','exit','number',0.80,'Hard stop 10m %'),
+('HARD_STOP_15M','exit','number',0.80,'Hard stop 15m %'),
+('HARD_STOP_30M','exit','number',0.80,'Hard stop 30m %'),
+('HARD_STOP_1H','exit','number',0.80,'Hard stop 1h %'),
+('HARD_STOP_1D','exit','number',0.80,'Hard stop 1D %'),
+('MAX_CONCURRENT_TRADES','risk','number',10,'Global max open trades'),
+('MAX_SAME_SIDE_AUTO_PER_PAIR','risk','number',3,'Same-side auto per pair'),
+('ONE_M_MAX_CONCURRENT','risk','number',3,'Per-pair scalp max concurrent'),
+('THR_SCORE','of','number',75,'Base OF floor'),
+('THR_SCORE_5M','of','number',75,'5m OF floor'),
+('THR_SCORE_1M','of','number',75,'1m OF floor'),
+('THR_SCORE_CLASSIC_PATTERN','of','number',75,'Doji/classic OF floor'),
+('THR_SCORE_ENGULFING','of','number',75,'Engulfing OF floor'),
+('THR_SCORE_INSIDE_BAR','of','number',75,'Inside-bar OF floor'),
+('THR_SCORE_IMBALANCE_1M','of','number',75,'Imbalance scalp floor'),
+('THR_SCORE_TRAP','of','number',90,'Trap floor HTF'),
+('THR_SCORE_TRAP_5M','of','number',80,'Trap floor 5m'),
+('THR_SCORE_TRAP_1M','of','number',80,'Trap floor 1m'),
+('CANDLE_ONLY_FIRE','of','bool',0,'Allow candle-only fire'),
+('THR_PRESSURE','of','number',0.60,'OF pressure threshold'),
+('THR_RV_VOL','of','number',1.20,'Relative volume threshold'),
+('STRUCTURE_OPPOSITE_PENALTY','of','number',12,'OF vs structure penalty'),
+('THR_PRICE_EFFORT','of','number',0.25,'OF price effort threshold'),
+('THR_UPPER_WICK','of','number',0.35,'OF upper wick threshold'),
+('THR_LOWER_WICK','of','number',0.35,'OF lower wick threshold'),
+('THR_BODY_RATIO','of','number',0.35,'OF body ratio threshold'),
+('THR_Z_ACT','of','number',1.0,'OF z-act threshold'),
+('THR_Z_EXHAUST','of','number',1.5,'OF z-exhaust threshold'),
+('THR_Z_TVOL','of','number',1.0,'OF z-tvol threshold'),
+('THR_FAKE_WICK','of','number',0.30,'OF fake wick threshold'),
+('THR_BREAK_ATR','of','number',0.10,'OF break ATR threshold'),
+('THR_BALANCED','of','number',0.05,'OF balanced threshold'),
+('THR_RV_PRICE_WEAK','of','number',0.70,'OF weak RV/price threshold'),
+('SCORE_FLOOR_EPS','of','number',0.05,'OF score floor epsilon'),
+('LOOKBACK','of','number',20,'OF lookback candles'),
+('MIN_CONFIRM_BODY_PCT','fire','number',0.03,'Min body % for color confirm'),
+('ONE_M_CONFIRM_SKIP_TICKS','fire','number',1,'1m skip N matching ticks'),
+('ONE_M_MIN_BARS_BETWEEN_FIRES','fire','number',3,'Min bars between scalp fires'),
+('ONE_M_CONFIRM_MAX_BARS','fire','number',3,'Max bars for color confirm'),
+('SKIP_FIRST_DETECT','fire','bool',1,'Skip first HTF detect after arm'),
+('SKIP_FIRST_DETECT_SCALP','fire','bool',0,'Skip first scalp detect'),
+('ENGINE_BOOT_MAX_SEC','engine','number',60,'Boot overlay max sec'),
+('RECONCILE_GRACE_SECONDS','engine','number',30,'Live open reconcile grace');
+
+-- MariaDB: no CAST(... AS JSON) — insert JSON as plain string into value_json
+INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_json, note) VALUES
+('TIMEFRAME_PROFILES','sizing','json',
+ '{"1m":{"win_rate":30,"lose_rate":70,"capital_pct":1.5},"5m":{"win_rate":30,"lose_rate":70,"capital_pct":1.5},"15m":{"win_rate":60,"lose_rate":40,"capital_pct":10.0},"1h":{"win_rate":70,"lose_rate":30,"capital_pct":15.0},"1D":{"win_rate":80,"lose_rate":20,"capital_pct":20.0},"30s":{"win_rate":25,"lose_rate":75,"capital_pct":2.0},"3m":{"win_rate":40,"lose_rate":60,"capital_pct":5.0},"10m":{"win_rate":55,"lose_rate":45,"capital_pct":8.0},"30m":{"win_rate":65,"lose_rate":35,"capital_pct":12.0}}',
+ 'Per-TF win/lose display + capital_pct sizing');
+
+-- Tighten trade policy (safe re-run): raise OF floors, disable candle-only / candle_soft
+UPDATE engine_formulas SET value_num = 75 WHERE formula_key IN ('THR_SCORE_CLASSIC_PATTERN','THR_SCORE_ENGULFING') AND (value_num IS NULL OR value_num < 75);
+UPDATE engine_formulas SET value_num = 80 WHERE formula_key = 'THR_SCORE_TRAP_1M' AND (value_num IS NULL OR value_num < 80);
+UPDATE engine_formulas SET value_num = 0 WHERE formula_key = 'CANDLE_ONLY_FIRE' AND (value_num IS NULL OR value_num <> 0);
+UPDATE family_engine_rules
+  SET min_of_score = 75, candle_soft = 0
+  WHERE locked = 0
+    AND family IN ('doji','engulfing','pin bar','inside bar')
+    AND (min_of_score IS NULL OR min_of_score < 75 OR candle_soft = 1);

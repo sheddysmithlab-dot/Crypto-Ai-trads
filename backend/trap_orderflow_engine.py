@@ -45,16 +45,16 @@ THR_SCORE_5M = 75.0  # 5m non-trap / scalp floor
 THR_SCORE_1M = 75.0
 THR_SCORE_IMBALANCE_1M = float(os.environ.get("THR_SCORE_IMBALANCE_1M", "75"))
 THR_SCORE_INSIDE_BAR = float(os.environ.get("THR_SCORE_INSIDE_BAR", "75"))
-# Soft floors — doji family (classic_pattern) + engulfing may fire with weaker OF.
-THR_SCORE_CLASSIC_PATTERN = float(os.environ.get("THR_SCORE_CLASSIC_PATTERN", "50"))
-THR_SCORE_ENGULFING = float(os.environ.get("THR_SCORE_ENGULFING", "50"))
-# When OF is weak/NO_TRADE, still allow brain engulfing/doji candle-only fire.
-CANDLE_ONLY_FIRE_ENABLED = os.environ.get("CANDLE_ONLY_FIRE", "1").strip().lower() in (
+# Classic/doji + engulfing use the same OF floor as other non-trap setups (≥75).
+THR_SCORE_CLASSIC_PATTERN = float(os.environ.get("THR_SCORE_CLASSIC_PATTERN", "75"))
+THR_SCORE_ENGULFING = float(os.environ.get("THR_SCORE_ENGULFING", "75"))
+# Candle-only bypass off by default — require real OF match + score floor.
+CANDLE_ONLY_FIRE_ENABLED = os.environ.get("CANDLE_ONLY_FIRE", "0").strip().lower() in (
     "1", "true", "yes",
 )
 THR_SCORE_TRAP = 90.0  # named trap fires (15m+)
 THR_SCORE_TRAP_5M = 80.0  # named trap fires on 5m
-THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "75"))
+THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "80"))
 STRUCTURE_OPPOSITE_PENALTY = 12.0  # OF vs structure trap conflict — subtract from firing side
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
@@ -97,8 +97,32 @@ def _norm_strategy(brain_strategy: str | None) -> str:
     return (brain_strategy or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 
-def is_candle_soft_strategy(brain_strategy: str | None) -> bool:
-    """True for doji-family classic_pattern and engulfing_bar — soft OF / candle-only."""
+def is_candle_soft_strategy(
+    brain_strategy: str | None,
+    *,
+    family: str | None = None,
+    pattern: str | None = None,
+    timeframe_key: str | None = None,
+) -> bool:
+    """True for doji-family classic_pattern and engulfing_bar — soft OF / candle-only.
+
+    Global kill-switch: CANDLE_ONLY_FIRE_ENABLED must be on.
+    Pilot families may override via MySQL family_engine_rules.candle_soft.
+    """
+    if not CANDLE_ONLY_FIRE_ENABLED:
+        return False
+    try:
+        import family_rules as _fr
+        ov = _fr.effective_candle_soft(
+            family=family,
+            pattern=pattern,
+            brain_strategy=brain_strategy,
+            timeframe_key=timeframe_key,
+        )
+        if ov is not None:
+            return bool(ov)
+    except Exception:
+        pass
     strat = _norm_strategy(brain_strategy)
     if strat in _CANDLE_SOFT_STRATEGIES:
         return True
@@ -106,6 +130,10 @@ def is_candle_soft_strategy(brain_strategy: str | None) -> bool:
         return True
     if "doji" in strat:
         return True
+    if family:
+        fl = str(family).lower()
+        if "doji" in fl or "engulf" in fl:
+            return True
     return False
 
 
@@ -134,16 +162,30 @@ def thr_score_for_setup(
     pattern: str | None = None,
     *,
     brain_strategy: str | None = None,
+    family: str | None = None,
 ) -> float:
-    """Floor: classic/doji ≥50; engulfing ≥50; inside_bar ≥75; traps ≥80/90; else ≥75."""
+    """Floor: classic/doji ≥75; engulfing ≥75; inside_bar ≥75; traps ≥80/90; else ≥75.
+
+    Pilot family rows in family_engine_rules override OF floors when present.
+    """
     name = (pattern or "").strip().upper()
-    if name.startswith("CANDLE_"):
+    if name.startswith("CANDLE_") and CANDLE_ONLY_FIRE_ENABLED:
         # Candle-only bypass already approved — no extra OF score gate.
         return 0.0
+    try:
+        import family_rules as _fr
+        ov = _fr.effective_of_floor(
+            exec_tf, pattern, brain_strategy=brain_strategy, family=family
+        )
+        if ov is not None:
+            return float(ov)
+    except Exception:
+        pass
     strat = _norm_strategy(brain_strategy)
-    if strat == "classic_pattern" or "doji" in strat:
+    fam_l = (family or "").strip().lower()
+    if strat == "classic_pattern" or "doji" in strat or "doji" in fam_l:
         return float(THR_SCORE_CLASSIC_PATTERN)
-    if strat in ("engulfing_bar", "engulfing") or "engulf" in strat:
+    if strat in ("engulfing_bar", "engulfing") or "engulf" in strat or "engulf" in fam_l:
         return float(THR_SCORE_ENGULFING)
     if strat == "inside_bar":
         return float(THR_SCORE_INSIDE_BAR)
@@ -830,7 +872,7 @@ def evaluate_trap_orderflow(
         else:
             short_score += 8
 
-    # NO TRADE gates — classic/doji ≥50; engulfing ≥50; traps ≥80/90; else ≥75
+    # NO TRADE gates — classic/doji ≥75; engulfing ≥75; traps ≥80/90; else ≥75
     setup_name = (setup_1 or setup_5 or {}).get("name") if (setup_1 or setup_5) else None
     strat_norm = _norm_strategy(brain_strategy)
     side_norm = (brain_side or "").strip().upper()
