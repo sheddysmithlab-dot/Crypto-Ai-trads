@@ -16,13 +16,14 @@ from typing import Any, Awaitable, Callable
 from chart_tf_move import fetch_tf_move
 
 # Strict: avg_pct must be greater than these floors (same units as MARKET %).
+# Tightened so fewer quiet coins flood the watchlist / fire list.
 MOMENTUM_MIN_AVG_PCT: dict[str, float] = {
-    "1m": 0.030,
-    "5m": 0.050,
-    "15m": 0.15,
-    "1h": 0.35,
-    "1d": 5.0,
-    "1D": 5.0,
+    "1m": float(os.environ.get("MOMENTUM_MIN_1M", "0.055")),
+    "5m": float(os.environ.get("MOMENTUM_MIN_5M", "0.085")),
+    "15m": float(os.environ.get("MOMENTUM_MIN_15M", "0.25")),
+    "1h": float(os.environ.get("MOMENTUM_MIN_1H", "0.55")),
+    "1d": float(os.environ.get("MOMENTUM_MIN_1D", "7.0")),
+    "1D": float(os.environ.get("MOMENTUM_MIN_1D", "7.0")),
 }
 
 MOMENTUM_REFRESH_EVERY_N_CANDLES = 7  # legacy; candle re-scan disabled — use timer instead

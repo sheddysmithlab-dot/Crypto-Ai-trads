@@ -4,30 +4,29 @@ const SECTIONS = [
     items: [
       'START AI ENGINE scans watchlist pairs on your chart TF (1m–1D).',
       'Engine runs on the VPS — closing the browser does NOT stop trading. Only AI ENGINE STOP does.',
-      'Momentum gate: only coins with MARKET avg% above TF floor (1M>0.03, 5M>0.05, 15M>0.15, 1H>0.35, 1D>5) auto-enter watchlist; re-scan every 7 candles.',
+      'Momentum gate: only coins with MARKET avg% above TF floor (1M>0.055, 5M>0.085, 15M>0.25, 1H>0.55, 1D>7) auto-enter watchlist; re-scan hourly.',
       'HARD RULE: 7th-candle / watchlist refresh·replace·add·edit NEVER closes or hides related OPEN trades — they keep their own TP/SL until exit.',
       'Brain patterns + structure traps + order-flow trap (1M exec / 5M bias) → AI BUY/SELL/HOLD.',
       'Pattern scan uses the last closed candle. On 1m: lock after AI confirm, skip 1st green/red tick, fire on 2nd (max 3 bars). On 5m: fire on 1st green/red tick. On 15m+: fire at next candle open. First detect per pair is skipped. 1m next fire earliest N+3.',
       'Size: engine risk % set at START (typical 7%) · Bybit $5 minimum notional per trade.',
-      '1m path exit: hard TP +0.50% / hard SL −0.55% (no trail). 5m+: profit +0.65% peak-trail · loss soft −0.60%…−0.80%.',
+      '1m path exit: same trail as other TFs — profit +0.65% peak-trail · loss soft −0.60%…−0.80%. Plus 1m batch exit +0.25%/−0.50%.',
       '1m/5m: AI Engine soft-restarts every 1 hour (fresh momentum scan + confirm pipeline; open trades kept).',
     ],
   },
   {
     title: 'Stop-loss (per trade)',
     items: [
-      '1m: hard exit @ −0.55% (no soft lock / trail / unlock).',
-      'Other TFs: soft lock @ −0.60%; hard exit @ −0.80%; unlock @ −0.20%.',
-      'Other TFs loss zone: 0.20% upward trail — sell line = best recovery + 0.20.',
+      'All TFs (incl. 1m): soft lock @ −0.60%; hard exit @ −0.80%; unlock @ −0.20%.',
+      'Loss zone: 0.20% upward trail — sell line = best recovery + 0.20.',
       'Deeper than hard floor → HOLD until trail or unlock (hard exit fires at band).',
     ],
   },
   {
     title: 'Take-profit (per trade)',
     items: [
-      '1m: hard exit @ +0.50% (no trail).',
-      'Other TFs: arm @ +0.65%; lock follows peak; trail 0.10% (peak +0.85% → floor +0.75%).',
-      'Other TFs: continuous ratchet — bottom lock always peak − 0.10%.',
+      'All TFs (incl. 1m): arm @ +0.65%; lock follows peak; trail 0.10% (peak +0.85% → floor +0.75%).',
+      'Continuous ratchet — bottom lock always peak − 0.10%.',
+      '1m batch: when 10 trades net ≥ +0.25% (after fees), all 10 exit together.',
     ],
   },
   {
