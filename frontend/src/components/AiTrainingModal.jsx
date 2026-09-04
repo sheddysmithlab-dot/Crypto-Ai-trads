@@ -108,7 +108,9 @@ export default function AiTrainingModal({ open, onClose }) {
                 Provider: {data?.ai_provider || '—'}
                 {data?.cursor_unlimited ? ' · unlimited agent' : ''}
                 {' · '}
-                {dbOk ? 'MySQL connected' : data?.message || 'MySQL offline'}
+                {dbOk
+                  ? 'MySQL connected'
+                  : data?.mysql?.message || data?.message || 'MySQL offline'}
               </p>
             </div>
           </div>

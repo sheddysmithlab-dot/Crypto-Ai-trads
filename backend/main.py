@@ -5848,6 +5848,31 @@ async def start_background_tasks():
     asyncio.create_task(chart_24h_refresh_loop(BYBIT_SYMBOL_MAP))
     asyncio.create_task(session_schedule_loop())
     asyncio.create_task(engine_runtime_checkpoint_loop())
+    asyncio.create_task(mysql_reconnect_loop())
+
+
+async def mysql_reconnect_loop():
+    """Retry MySQL after Hostinger hourly conn-limit / circuit cooldown clears."""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            st = trade_db.status_dict()
+            if st.get("ok"):
+                continue
+            if getattr(trade_db, "_circuit_open", lambda: False)():
+                continue
+            s = await asyncio.to_thread(trade_db.init_db)
+            if s.get("ok"):
+                print(f"[MYSQL] reconnected: {s.get('message')}")
+                try:
+                    import engine_config
+                    applied = await asyncio.to_thread(engine_config.reload_and_apply)
+                    print(f"[ENGINE-DB] re-applied {len(applied)} knobs after MySQL recover")
+                except Exception as eng_exc:
+                    print(f"[ENGINE-DB] recover apply note: {eng_exc}")
+                system_log.push("ai", f"MySQL recovered: {s.get('message')}", s)
+        except Exception as exc:
+            print(f"[MYSQL] reconnect loop note: {exc}")
 
 
 @app.on_event("shutdown")
@@ -6791,6 +6816,7 @@ async def ai_training_feed(
 
         return {
             "ok": bool(st.get("ok")),
+            "message": st.get("message") or ("MySQL connected" if st.get("ok") else "MySQL offline"),
             "mysql": st,
             "ai_provider": settings_store.ai_provider,
             "ai_configured": bool(settings_store.is_ai_configured()),

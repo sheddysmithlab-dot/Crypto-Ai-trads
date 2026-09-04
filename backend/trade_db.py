@@ -86,7 +86,10 @@ def _trip_circuit(exc: BaseException) -> None:
         _circuit_until = time.time() + _CIRCUIT_COOLDOWN_SEC
         _db_status = {
             "ok": False,
-            "message": f"MySQL paused {int(_CIRCUIT_COOLDOWN_SEC)}s (conn/hour limit)",
+            "message": (
+                f"MySQL paused {int(_CIRCUIT_COOLDOWN_SEC // 60)}m "
+                "(Hostinger max_connections_per_hour — auto-retry)"
+            ),
         }
         print(f"[TRADE_DB] circuit open {_CIRCUIT_COOLDOWN_SEC:.0f}s — {msg[:160]}")
 
