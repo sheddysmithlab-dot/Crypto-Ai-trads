@@ -1042,27 +1042,27 @@ MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", 
 AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path lock/trail profit + protective SL (same engine)
 INVERT_AUTO_TRADE_FIRE = False
 # Profit book (gross %, LONG/SHORT symmetric) — all TFs incl. 1m:
-#   Arm @ +0.65%; lock = peak gross (continuous); trail 0.10% → floor peak−0.10
-#   (e.g. peak +0.85% → exit floor +0.75%; peak +0.73% → floor +0.63%).
-PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.65"))
+#   Arm @ +0.85%; lock = peak gross (continuous); trail 0.15% → floor peak−0.15
+#   (e.g. peak +1.05% → exit floor +0.90%; peak +0.95% → floor +0.80%).
+PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.85"))
 PROFIT_LOCK_STEP_PCT = float(os.environ.get("PROFIT_LOCK_STEP_PCT", "0.20"))  # unused — continuous trail
-PROFIT_TRAIL_FIRST_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "0.10"))
-PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.10"))
+PROFIT_TRAIL_FIRST_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "0.15"))
+PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.15"))
 # Opposite-signal flip: only exit old auto trade when unrealized gross > this %;
 # at or below → keep old open and skip the new opposite fire (no tiny flip-exits).
 FLIP_EXIT_MIN_GROSS_PCT = float(os.environ.get("FLIP_EXIT_MIN_GROSS_PCT", "0.25"))
 # Do not wipe a brand-new local open just because Bybit position API lags a few seconds.
 RECONCILE_GRACE_SECONDS = float(os.environ.get("RECONCILE_GRACE_SECONDS", "30"))
 # Protective stop-loss (gross %, LONG/SHORT symmetric) — all TFs incl. 1m:
-#   −0.60% → soft LOSS LOCK arms;
-#   −0.60…−0.80% zone: 0.20% upward trail (sell line = best_recovery + 0.20);
-#   −0.80% → hard exit (LOSS_BAND_EXIT);
-#   recover to −0.20% or better → UNLOCK (no sell) → profit book @ +0.65%.
-LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.60"))  # soft lock arm
-LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0.20"))
-LOSS_RECOVERY_RETRACE_CHOPPY_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_CHOPPY_PCT", "0.20"))
+#   −0.75% → soft LOSS LOCK arms;
+#   −0.75…−1.00% zone: 0.25% upward trail (sell line = best_recovery + 0.25);
+#   −1.00% → hard exit (LOSS_BAND_EXIT);
+#   recover to −0.20% or better → UNLOCK (no sell) → profit book @ +0.85%.
+LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.75"))  # soft lock arm
+LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0.25"))
+LOSS_RECOVERY_RETRACE_CHOPPY_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_CHOPPY_PCT", "0.25"))
 LOSS_LOCK_CLEAR_PCT = float(os.environ.get("LOSS_LOCK_CLEAR_PCT", "0.20"))  # unlock → profit book
-LOSS_BAND_PCT = float(os.environ.get("LOSS_BAND_PCT", "0.80"))  # hard floor / instant exit
+LOSS_BAND_PCT = float(os.environ.get("LOSS_BAND_PCT", "1.00"))  # hard floor / instant exit
 # Legacy 1m aliases (now same trail policy as other TFs — kept for env compatibility).
 LOSS_PROTECT_PCT_1M = float(os.environ.get("LOSS_PROTECT_PCT_1M", str(LOSS_PROTECT_PCT)))
 LOSS_BAND_PCT_1M = float(os.environ.get("LOSS_BAND_PCT_1M", str(LOSS_BAND_PCT)))

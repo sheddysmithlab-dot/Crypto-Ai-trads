@@ -311,16 +311,16 @@ def _seed_family_rules(cur) -> None:
 # Default live-engine formulas (code/env fallbacks → MySQL source of truth).
 # Tuple: (group, key, vtype, value_num, value_text, note) — value_json via text for json type.
 _ENGINE_FORMULA_SEEDS: list[tuple[str, str, str, float | None, str | None, str]] = [
-    ("exit", "PROFIT_LOCK_PCT", "number", 0.65, None, "Profit book arm %"),
-    ("exit", "PROFIT_TRAIL_GIVEBACK_PCT", "number", 0.10, None, "Trail giveback %"),
-    ("exit", "PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "number", 0.10, None, "First trail giveback %"),
-    ("exit", "LOSS_PROTECT_PCT", "number", 0.60, None, "Soft loss lock arm %"),
-    ("exit", "LOSS_BAND_PCT", "number", 0.80, None, "Hard loss floor %"),
-    ("exit", "LOSS_RECOVERY_RETRACE_PCT", "number", 0.20, None, "Loss lock trail %"),
+    ("exit", "PROFIT_LOCK_PCT", "number", 0.85, None, "Profit book arm %"),
+    ("exit", "PROFIT_TRAIL_GIVEBACK_PCT", "number", 0.15, None, "Trail giveback %"),
+    ("exit", "PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "number", 0.15, None, "First trail giveback %"),
+    ("exit", "LOSS_PROTECT_PCT", "number", 0.75, None, "Soft loss lock arm %"),
+    ("exit", "LOSS_BAND_PCT", "number", 1.00, None, "Hard loss floor %"),
+    ("exit", "LOSS_RECOVERY_RETRACE_PCT", "number", 0.25, None, "Loss lock trail %"),
     ("exit", "LOSS_LOCK_CLEAR_PCT", "number", 0.20, None, "Unlock to profit book %"),
-    ("exit", "LOSS_PROTECT_PCT_1M", "number", 0.60, None, "1m loss arm"),
-    ("exit", "LOSS_BAND_PCT_1M", "number", 0.80, None, "1m hard band"),
-    ("exit", "PROFIT_HARD_PCT_1M", "number", 0.65, None, "1m profit arm alias"),
+    ("exit", "LOSS_PROTECT_PCT_1M", "number", 0.75, None, "1m loss arm"),
+    ("exit", "LOSS_BAND_PCT_1M", "number", 1.00, None, "1m hard band"),
+    ("exit", "PROFIT_HARD_PCT_1M", "number", 0.85, None, "1m profit arm alias"),
     ("exit", "FLIP_EXIT_MIN_GROSS_PCT", "number", 0.25, None, "Min gross to flip-exit"),
     ("exit", "MICRO_CAP_LOSS_ARM_PCT", "number", 0.25, None, "Micro-cap loss arm"),
     ("exit", "MICRO_CAP_LOSS_BAND_PCT", "number", 0.35, None, "Micro-cap loss band"),
@@ -441,6 +441,24 @@ def _tighten_trade_policy(cur) -> None:
            WHERE formula_key = 'ONE_M_CONFIRM_MAX_BARS'
              AND (value_num IS NULL OR value_num <> 2)"""
     )
+    # Wider profit book + stop with trail room.
+    for key, val, note in (
+        ("PROFIT_LOCK_PCT", 0.85, "Profit book arm %"),
+        ("PROFIT_TRAIL_GIVEBACK_PCT", 0.15, "Trail giveback %"),
+        ("PROFIT_TRAIL_FIRST_GIVEBACK_PCT", 0.15, "First trail giveback %"),
+        ("LOSS_PROTECT_PCT", 0.75, "Soft loss lock arm %"),
+        ("LOSS_BAND_PCT", 1.00, "Hard loss floor %"),
+        ("LOSS_RECOVERY_RETRACE_PCT", 0.25, "Loss lock trail %"),
+        ("LOSS_PROTECT_PCT_1M", 0.75, "1m loss arm"),
+        ("LOSS_BAND_PCT_1M", 1.00, "1m hard band"),
+        ("PROFIT_HARD_PCT_1M", 0.85, "1m profit arm alias"),
+    ):
+        cur.execute(
+            """UPDATE engine_formulas
+               SET value_num = %s, note = %s
+               WHERE formula_key = %s""",
+            (val, note, key),
+        )
     # Unlock candle soft for every unlocked candle-family row (incl. new seeds).
     fam_list = ", ".join(f"'{f}'" for f, *_ in _SEED_FAMILIES)
     cur.execute(

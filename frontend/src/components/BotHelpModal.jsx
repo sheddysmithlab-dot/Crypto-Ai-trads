@@ -9,14 +9,14 @@ const SECTIONS = [
       'Brain patterns + structure traps + order-flow trap (1M exec / 5M bias) → AI BUY/SELL/HOLD.',
       'Pattern scan uses the last closed candle. Scalp (1m/5m/30s): lock after AI confirm, need consecutive green/red ticks — wrong-color bar is invalid (no fire on wick flicker), max 3 bars. 15m+: fire at next candle open only if color matches side. First detect per pair is skipped. 1m next fire earliest N+3.',
       'Size: engine risk % set at START (typical 7%) · Bybit $5 minimum notional per trade.',
-      '1m path exit: same trail as other TFs — profit +0.65% peak-trail · loss soft −0.60%…−0.80%. Plus 1m batch exit +0.25%/−0.50%.',
+      '1m path exit: same trail as other TFs — profit +0.85% peak-trail · loss soft −0.75%…−1.00%. Plus 1m batch exit +0.25%/−0.50%.',
       '1m/5m: AI Engine soft-restarts every 1 hour (fresh momentum scan + confirm pipeline; open trades kept).',
     ],
   },
   {
     title: 'Stop-loss (per trade)',
     items: [
-      'All TFs (incl. 1m): soft lock @ −0.60%; hard exit @ −0.80%; unlock @ −0.20%.',
+      'All TFs (incl. 1m): soft lock @ −0.75%; hard exit @ −1.00%; unlock @ −0.20%.',
       'Loss zone: 0.20% upward trail — sell line = best recovery + 0.20.',
       'Deeper than hard floor → HOLD until trail or unlock (hard exit fires at band).',
     ],
@@ -24,7 +24,7 @@ const SECTIONS = [
   {
     title: 'Take-profit (per trade)',
     items: [
-      'All TFs (incl. 1m): arm @ +0.65%; lock follows peak; trail 0.10% (peak +0.85% → floor +0.75%).',
+      'All TFs (incl. 1m): arm @ +0.85%; lock follows peak; trail 0.15% (peak +1.05% → floor +0.90%).',
       'Continuous ratchet — bottom lock always peak − 0.10%.',
       '1m batch: when 10 trades net ≥ +0.25% (after fees), all 10 exit together.',
     ],

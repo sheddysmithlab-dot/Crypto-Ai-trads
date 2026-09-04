@@ -195,16 +195,16 @@ VALUES
 
 -- Global engine formulas (exit / risk / OF / fire / engine / sizing)
 INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_num, note) VALUES
-('PROFIT_LOCK_PCT','exit','number',0.65,'Profit book arm %'),
-('PROFIT_TRAIL_GIVEBACK_PCT','exit','number',0.10,'Trail giveback %'),
-('PROFIT_TRAIL_FIRST_GIVEBACK_PCT','exit','number',0.10,'First trail giveback %'),
-('LOSS_PROTECT_PCT','exit','number',0.60,'Soft loss lock arm %'),
-('LOSS_BAND_PCT','exit','number',0.80,'Hard loss floor %'),
-('LOSS_RECOVERY_RETRACE_PCT','exit','number',0.20,'Loss lock trail %'),
+('PROFIT_LOCK_PCT','exit','number',0.85,'Profit book arm %'),
+('PROFIT_TRAIL_GIVEBACK_PCT','exit','number',0.15,'Trail giveback %'),
+('PROFIT_TRAIL_FIRST_GIVEBACK_PCT','exit','number',0.15,'First trail giveback %'),
+('LOSS_PROTECT_PCT','exit','number',0.75,'Soft loss lock arm %'),
+('LOSS_BAND_PCT','exit','number',1.00,'Hard loss floor %'),
+('LOSS_RECOVERY_RETRACE_PCT','exit','number',0.25,'Loss lock trail %'),
 ('LOSS_LOCK_CLEAR_PCT','exit','number',0.20,'Unlock to profit book %'),
-('LOSS_PROTECT_PCT_1M','exit','number',0.60,'1m loss arm'),
-('LOSS_BAND_PCT_1M','exit','number',0.80,'1m hard band'),
-('PROFIT_HARD_PCT_1M','exit','number',0.65,'1m profit arm alias'),
+('LOSS_PROTECT_PCT_1M','exit','number',0.75,'1m loss arm'),
+('LOSS_BAND_PCT_1M','exit','number',1.00,'1m hard band'),
+('PROFIT_HARD_PCT_1M','exit','number',0.85,'1m profit arm alias'),
 ('FLIP_EXIT_MIN_GROSS_PCT','exit','number',0.25,'Min gross to flip-exit'),
 ('MICRO_CAP_LOSS_ARM_PCT','exit','number',0.25,'Micro-cap loss arm'),
 ('MICRO_CAP_LOSS_BAND_PCT','exit','number',0.35,'Micro-cap loss band'),
@@ -276,6 +276,12 @@ UPDATE engine_formulas SET value_num = 1 WHERE formula_key = 'CANDLE_ONLY_FIRE' 
 UPDATE engine_formulas SET value_num = 80 WHERE formula_key = 'THR_SCORE_TRAP_1M' AND (value_num IS NULL OR value_num < 80);
 UPDATE engine_formulas SET value_num = 2, note = 'Hard skip if no color confirm in N bars'
   WHERE formula_key = 'ONE_M_CONFIRM_MAX_BARS' AND (value_num IS NULL OR value_num <> 2);
+UPDATE engine_formulas SET value_num = 0.85, note = 'Profit book arm %' WHERE formula_key = 'PROFIT_LOCK_PCT';
+UPDATE engine_formulas SET value_num = 0.15, note = 'Trail giveback %' WHERE formula_key IN ('PROFIT_TRAIL_GIVEBACK_PCT','PROFIT_TRAIL_FIRST_GIVEBACK_PCT');
+UPDATE engine_formulas SET value_num = 0.75, note = 'Soft loss lock arm %' WHERE formula_key IN ('LOSS_PROTECT_PCT','LOSS_PROTECT_PCT_1M');
+UPDATE engine_formulas SET value_num = 1.00, note = 'Hard loss floor %' WHERE formula_key IN ('LOSS_BAND_PCT','LOSS_BAND_PCT_1M');
+UPDATE engine_formulas SET value_num = 0.25, note = 'Loss lock trail %' WHERE formula_key = 'LOSS_RECOVERY_RETRACE_PCT';
+UPDATE engine_formulas SET value_num = 0.85, note = '1m profit arm alias' WHERE formula_key = 'PROFIT_HARD_PCT_1M';
 UPDATE family_engine_rules
   SET candle_soft = 1,
       min_of_score = CASE WHEN min_of_score IS NULL OR min_of_score > 55 THEN 50 ELSE min_of_score END
