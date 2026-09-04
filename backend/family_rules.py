@@ -1,7 +1,7 @@
 """Family engine rules — cache + lookup for self-improving playbook.
 
-Families with rows in MySQL `family_engine_rules` override OF floors /
-candle-soft / SL-TP. Seeded defaults: doji, engulfing, pin bar, inside bar.
+All brain candle families can seed MySQL `family_engine_rules` and override
+OF floors / candle-soft / SL-TP. Labels match brain.PATTERNS family groups.
 """
 from __future__ import annotations
 
@@ -10,9 +10,32 @@ from typing import Any, Optional
 
 import trade_db
 
-# Kept as alias for older callers; DB-backed families expand as rows are seeded.
-PILOT_FAMILIES = frozenset({"doji", "engulfing", "pin bar", "inside bar"})
-DB_FAMILIES = PILOT_FAMILIES
+# Canonical family labels (space-normalized) — match brain.PATTERNS + training UI.
+ALL_CANDLE_FAMILIES = frozenset({
+    "doji",
+    "engulfing",
+    "engulfing combo",
+    "pin bar",
+    "inside bar",
+    "harami combo",
+    "star",
+    "tweezer",
+    "belt hold",
+    "piercing",
+    "soldiers",
+    "crows",
+    "kicker",
+    "separating lines",
+    "three methods",
+    "three line strike",
+    "meeting lines",
+    "ladder",
+    "swallow",
+})
+
+# Kept as alias for older callers; all candle families are first-class now.
+PILOT_FAMILIES = ALL_CANDLE_FAMILIES
+DB_FAMILIES = ALL_CANDLE_FAMILIES
 
 # Cache: (family, tf) -> rule dict; refresh every TTL or on invalidate.
 _CACHE: dict[tuple[str, str], dict] = {}
@@ -57,6 +80,54 @@ def normalize_family(name: str | None) -> str:
     return (name or "").strip().lower().replace("_", " ").replace("-", " ")
 
 
+def _canonical_family(family: str | None) -> str:
+    fam = normalize_family(family)
+    if not fam:
+        return ""
+    if fam in ALL_CANDLE_FAMILIES:
+        return fam
+    # Combos / multi-word before generic aliases
+    if "engulf" in fam and "combo" in fam:
+        return "engulfing combo"
+    if "harami" in fam and "combo" in fam:
+        return "harami combo"
+    if "three method" in fam:
+        return "three methods"
+    if "three line" in fam:
+        return "three line strike"
+    if "separating" in fam:
+        return "separating lines"
+    if "belt" in fam:
+        return "belt hold"
+    if "meeting" in fam:
+        return "meeting lines"
+    if "swallow" in fam:
+        return "swallow"
+    if "ladder" in fam:
+        return "ladder"
+    if "tweezer" in fam:
+        return "tweezer"
+    if "soldier" in fam:
+        return "soldiers"
+    if "crow" in fam:
+        return "crows"
+    if "kicker" in fam:
+        return "kicker"
+    if "pierc" in fam or "dark cloud" in fam:
+        return "piercing"
+    if "star" in fam or "abandoned baby" in fam:
+        return "star"
+    if "engulf" in fam:
+        return "engulfing"
+    if "doji" in fam:
+        return "doji"
+    if "inside" in fam or fam == "harami":
+        return "inside bar"
+    if "pin" in fam or "hammer" in fam or "shooting" in fam or "hanging" in fam:
+        return "pin bar"
+    return fam
+
+
 def resolve_family(
     pattern: str | None = None,
     strategy: str | None = None,
@@ -68,30 +139,48 @@ def resolve_family(
             import brain as _b
             info = _b.pattern_info(pat)
             if not info:
-                # try snake → knowledge key
                 key = pat.lower().replace(" ", "_").replace("-", "_")
                 info = _b.pattern_info(key)
             if info and info.get("family"):
-                fam = normalize_family(str(info["family"]))
-                # Pilot uses short labels without spaces where possible
-                if fam in ("pin bar",):
-                    return "pin bar"
-                if "engulf" in fam:
-                    return "engulfing"
-                if fam == "doji" or "doji" in fam:
-                    return "doji"
-                return fam
+                return _canonical_family(str(info["family"])) or None
         except Exception:
             pass
-        low = pat.lower()
+        low = pat.lower().replace("-", "_")
+        # Strip OF/structure suffixes for family resolve
+        base = low.split("+", 1)[0].strip()
+        if base.startswith("candle_"):
+            base = base[7:]
+        hit = _canonical_family(base.replace("_", " "))
+        if hit in ALL_CANDLE_FAMILIES:
+            return hit
         if "doji" in low:
             return "doji"
+        if "engulf" in low and "combo" in low:
+            return "engulfing combo"
         if "engulf" in low:
             return "engulfing"
         if "hammer" in low or "shooting" in low or "hanging" in low or "pin" in low:
             return "pin bar"
+        if "three_inside" in low or "harami_combo" in low:
+            return "harami combo"
         if "inside" in low or "harami" in low:
             return "inside bar"
+        if "tweezer" in low:
+            return "tweezer"
+        if "morning_star" in low or "evening_star" in low or "abandoned_baby" in low:
+            return "star"
+        if "belt" in low:
+            return "belt hold"
+        if "separating" in low:
+            return "separating lines"
+        if "piercing" in low or "dark_cloud" in low:
+            return "piercing"
+        if "soldier" in low:
+            return "soldiers"
+        if "crow" in low:
+            return "crows"
+        if "kicker" in low:
+            return "kicker"
 
     strat = (strategy or "").strip().lower().replace("-", "_").replace(" ", "_")
     if not strat:
@@ -100,29 +189,20 @@ def resolve_family(
         return "engulfing"
     if "doji" in strat:
         return "doji"
-    if strat in ("classic_pattern",):
-        # classic_pattern covers doji/star/soldiers — map to doji for train log when pattern unknown
-        return "doji"
     if "pin" in strat:
         return "pin bar"
     if "inside" in strat:
         return "inside bar"
+    if "tweezer" in strat:
+        return "tweezer"
+    if "belt" in strat:
+        return "belt hold"
+    if "star" in strat:
+        return "star"
+    if strat in ("classic_pattern",):
+        # classic_pattern covers star/soldiers/doji/… — need pattern for exact family
+        return None
     return None
-
-
-def _canonical_family(family: str | None) -> str:
-    fam = normalize_family(family)
-    if not fam:
-        return ""
-    if "engulf" in fam:
-        return "engulfing"
-    if "doji" in fam:
-        return "doji"
-    if "inside" in fam or "harami" in fam:
-        return "inside bar"
-    if "pin" in fam or "hammer" in fam or "shooting" in fam or "hanging" in fam:
-        return "pin bar"
-    return fam
 
 
 def is_pilot_family(family: str | None) -> bool:
@@ -268,11 +348,40 @@ def playbook_lines(
     return lines
 
 
+def format_candle_trade_label(
+    *,
+    family: str | None = None,
+    candle_pattern: str | None = None,
+    of_pattern: str | None = None,
+) -> str:
+    """Human trade label: prefer candle pattern; fall back to family / OF."""
+    candle = (candle_pattern or "").strip()
+    fam = _canonical_family(family) if family else ""
+    if candle and not candle.upper().startswith(("FAKE_", "BUY_TRAP", "SELL_TRAP", "REVERSAL_", "EXHAUSTION", "ABSORPTION", "IMBALANCE", "QUALIFIED_", "RAW_", "STRUCTURE_", "BALANCED", "NONE")):
+        if "+" in candle and any(
+            t in candle.upper()
+            for t in ("FAKE_BREAKOUT", "BUY_TRAP", "SELL_TRAP", "STOP_HUNT", "STRUCTURE_")
+        ):
+            pass  # OF composite — prefer family/candle below
+        else:
+            nice = candle.replace("_", " ").replace("-", " ").strip()
+            if fam and fam.lower() not in nice.lower():
+                return f"{fam}: {nice}"
+            return nice
+    if fam:
+        return fam
+    ofp = (of_pattern or "").strip()
+    if ofp:
+        return ofp.replace("_", " ")
+    return "candle pattern"
+
+
 def event_context_from_detect(detect: dict | None) -> dict[str, Any]:
     d = detect or {}
     of_trap = d.get("orderflow_trap") if isinstance(d.get("orderflow_trap"), dict) else {}
     return {
         "pattern": d.get("pattern"),
+        "candle_pattern": d.get("candle_pattern"),
         "family": d.get("family"),
         "strategy": d.get("strategy"),
         "score": d.get("score"),
@@ -283,7 +392,7 @@ def event_context_from_detect(detect: dict | None) -> dict[str, Any]:
         "ai_confirmation": d.get("ai_confirmation"),
         "of_long": of_trap.get("long_score"),
         "of_short": of_trap.get("short_score"),
-        "of_pattern": of_trap.get("pattern"),
+        "of_pattern": of_trap.get("pattern") or d.get("of_pattern"),
         "of_signal": of_trap.get("final_signal"),
         "reason": (d.get("reason") or "")[:300],
     }

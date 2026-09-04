@@ -81,9 +81,12 @@ _IMBALANCE_FIRE_PATTERNS = frozenset({
 
 # Brain strategies that may soft-bypass weak OF (candle-only fire).
 _CANDLE_SOFT_STRATEGIES = frozenset({
-    "classic_pattern",  # doji / star / soldiers / harami / etc.
+    "classic_pattern",  # doji / star / soldiers / harami / tweezer / …
     "engulfing_bar",
     "engulfing",
+    "pin_bar",
+    "inside_bar",
+    "inside_bar_false_breakout",
 })
 
 # 1m fire allowlist — REVERSAL_TRAP + EXHAUSTION blocked (false fades).
@@ -104,13 +107,11 @@ def is_candle_soft_strategy(
     pattern: str | None = None,
     timeframe_key: str | None = None,
 ) -> bool:
-    """True for doji-family classic_pattern and engulfing_bar — soft OF / candle-only.
+    """True when candle family may soft-bypass weak OF / fire candle-only.
 
-    Global kill-switch: CANDLE_ONLY_FIRE_ENABLED must be on.
-    Pilot families may override via MySQL family_engine_rules.candle_soft.
+    MySQL family_engine_rules.candle_soft wins when set.
+    Else requires CANDLE_ONLY_FIRE + known candle strategy/family.
     """
-    if not CANDLE_ONLY_FIRE_ENABLED:
-        return False
     try:
         import family_rules as _fr
         ov = _fr.effective_candle_soft(
@@ -121,18 +122,29 @@ def is_candle_soft_strategy(
         )
         if ov is not None:
             return bool(ov)
+        if family and _fr._canonical_family(family) in _fr.ALL_CANDLE_FAMILIES:
+            # Seeded candle family without explicit soft row → allow when global on
+            if CANDLE_ONLY_FIRE_ENABLED:
+                return True
     except Exception:
         pass
+    if not CANDLE_ONLY_FIRE_ENABLED:
+        return False
     strat = _norm_strategy(brain_strategy)
     if strat in _CANDLE_SOFT_STRATEGIES:
         return True
-    if "engulf" in strat:
-        return True
-    if "doji" in strat:
+    if "engulf" in strat or "doji" in strat or "pin" in strat or "inside" in strat:
         return True
     if family:
         fl = str(family).lower()
-        if "doji" in fl or "engulf" in fl:
+        if any(
+            k in fl
+            for k in (
+                "doji", "engulf", "pin", "inside", "harami", "star", "tweezer",
+                "belt", "pierc", "soldier", "crow", "kicker", "separat",
+                "method", "strike", "meeting", "ladder", "swallow",
+            )
+        ):
             return True
     return False
 
@@ -169,7 +181,7 @@ def thr_score_for_setup(
     Pilot family rows in family_engine_rules override OF floors when present.
     """
     name = (pattern or "").strip().upper()
-    if name.startswith("CANDLE_") and CANDLE_ONLY_FIRE_ENABLED:
+    if name.startswith("CANDLE_"):
         # Candle-only bypass already approved — no extra OF score gate.
         return 0.0
     try:
@@ -226,12 +238,7 @@ def _apply_imbalance_block(
         return result
     side_norm = (brain_side or "").strip().upper()
     want = "LONG" if side_norm == "BUY" else "SHORT" if side_norm == "SELL" else None
-    if (
-        candle_soft
-        and CANDLE_ONLY_FIRE_ENABLED
-        and want
-        and result.final_signal == want
-    ):
+    if candle_soft and want and result.final_signal == want:
         strat = _norm_strategy(brain_strategy) or "classic_pattern"
         max_sc = max(float(result.long_score), float(result.short_score))
         return TrapOFResult(
@@ -877,12 +884,23 @@ def evaluate_trap_orderflow(
     strat_norm = _norm_strategy(brain_strategy)
     side_norm = (brain_side or "").strip().upper()
     classic_brain = strat_norm == "classic_pattern" and side_norm in ("BUY", "SELL")
+    try:
+        import family_rules as _fr
+        _fam = _fr.resolve_family(setup_name, brain_strategy)
+    except Exception:
+        _fam = None
     candle_soft = (
-        CANDLE_ONLY_FIRE_ENABLED
-        and is_candle_soft_strategy(brain_strategy)
-        and side_norm in ("BUY", "SELL")
+        side_norm in ("BUY", "SELL")
+        and is_candle_soft_strategy(
+            brain_strategy,
+            family=_fam,
+            pattern=setup_name,
+            timeframe_key=exec_tf,
+        )
     )
-    thr = thr_score_for_setup(exec_tf, setup_name, brain_strategy=brain_strategy)
+    thr = thr_score_for_setup(
+        exec_tf, setup_name, brain_strategy=brain_strategy, family=_fam
+    )
     thr_base = thr_score_for_tf(exec_tf)
     strict_scalp = (exec_tf or "").strip().lower() in ("1m", "5m", "30s")
     bal_pressure = abs(m1["buyer_ratio"] - 0.50) < THR_BALANCED

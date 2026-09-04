@@ -295,9 +295,12 @@ def _fallback_action_from_brain_and_of(
         if ok:
             candidates.append((action, o_sc + b_sc * 0.1))
     if not candidates:
-        # Last resort: brain engulfing/doji with clear side even if OF dict missing.
+        # Last resort: brain candle family with clear side even if OF dict missing.
         strategy = _brain_strategy_from_think(think)
-        if is_candle_soft_strategy(strategy):
+        fam = _family_from_think(think, of_trap)
+        if is_candle_soft_strategy(
+            strategy, family=fam, timeframe_key=timeframe_key
+        ):
             for action in ("BUY", "SELL"):
                 b_ok, b_sc, _ = _brain_side_ok(think, action, timeframe_key)
                 if b_ok:
@@ -660,13 +663,21 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
         except Exception:
             plan = None
 
-    # Pattern / confluence labels — order-flow trap can label when it drove decision
+    # Prefer brain candle pattern for trade UI; keep OF trap as secondary.
+    candle_pattern = None
+    brain_strategy_name = None
+    if sig is not None:
+        candle_pattern = sig.patterns[0] if sig.patterns else None
+        brain_strategy_name = getattr(sig, "strategy", None)
+
     of_signal = (of_trap or {}).get("final_signal")
+    of_pattern = (of_trap or {}).get("pattern") if of_trap else None
     if of_trap and of_signal in ("LONG", "SHORT") and (
         (ai_action == "BUY" and of_signal == "LONG") or (ai_action == "SELL" and of_signal == "SHORT")
     ):
-        pattern_name = of_trap.get("pattern") or "orderflow_trap"
-        strategy_name = "trap_orderflow"
+        strategy_name = brain_strategy_name or "trap_orderflow"
+        if isinstance(strategy_name, str):
+            strategy_name = strategy_name.replace("_", " ")
         confluences = [
             of_trap.get("primary_reason") or "",
             f"5M bias={of_trap.get('bias_5m')}",
@@ -674,20 +685,35 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
         ]
         if trap is not None:
             confluences.append(f"structure_trap={trap.trap_type}")
+        family_name = family_rules.resolve_family(candle_pattern, brain_strategy_name)
+        if not family_name:
+            family_name = family_rules.resolve_family(of_pattern, brain_strategy_name)
+        pattern_name = family_rules.format_candle_trade_label(
+            family=family_name,
+            candle_pattern=candle_pattern,
+            of_pattern=of_pattern,
+        )
     elif stance and stance.source == "trap" and trap is not None:
         pattern_name = trap.trap_type.replace("_", " ")
         strategy_name = "trap_reverse"
         confluences = list(trap.reasons) if trap.reasons else []
+        family_name = family_rules.resolve_family(candle_pattern, brain_strategy_name)
     elif sig is not None:
-        pattern_name = sig.patterns[0] if sig.patterns else sig.strategy
-        strategy_name = sig.strategy.replace("_", " ")
+        pattern_name = candle_pattern or (sig.strategy.replace("_", " ") if sig.strategy else None)
+        strategy_name = sig.strategy.replace("_", " ") if sig.strategy else None
         confluences = list(sig.confluence or []) + list(sig.reasons or [])
+        family_name = family_rules.resolve_family(candle_pattern, brain_strategy_name)
+        if family_name and candle_pattern:
+            pattern_name = family_rules.format_candle_trade_label(
+                family=family_name,
+                candle_pattern=candle_pattern,
+            )
     else:
         pattern_name = None
         strategy_name = None
         confluences = []
+        family_name = None
 
-    family_name = family_rules.resolve_family(pattern_name, strategy_name)
     if not family_name and sig is not None:
         family_name = family_rules.resolve_family(
             (sig.patterns[0] if sig.patterns else None), sig.strategy
@@ -716,6 +742,8 @@ def _flatten(think: dict, *, ai_action: str, pair: str, timeframe_key: str,
         "engine": ENGINE_NAME,
         "entry_pattern": ENTRY_PATTERN_NAME,
         "pattern": pattern_name,
+        "candle_pattern": candle_pattern,
+        "of_pattern": of_pattern,
         "family": family_name,
         "strategy": strategy_name,
         "entry": entry_price,
@@ -922,7 +950,13 @@ async def evaluate_live_entry_async(
 
         of_sig = (of_trap or {}).get("final_signal")
         strategy = _brain_strategy_from_think(think)
-        candle_soft = is_candle_soft_strategy(strategy)
+        fam = _family_from_think(think, of_trap)
+        candle_soft = is_candle_soft_strategy(
+            strategy,
+            family=fam,
+            pattern=str((of_trap or {}).get("pattern") or ""),
+            timeframe_key=_norm_tf(timeframe_key),
+        )
         of_pat = str((of_trap or {}).get("pattern") or "")
         if of_sig == "NO_TRADE" and not (
             candle_soft or of_pat.upper().startswith("CANDLE_")

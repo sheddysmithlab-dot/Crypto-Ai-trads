@@ -249,42 +249,54 @@ CREATE TABLE IF NOT EXISTS engine_formulas (
 """
 
 _SEED_TFS = ("30s", "1m", "5m", "15m", "1h", "1d")
-# family, min_of_score, candle_soft, lesson
+# family, min_of_score, candle_soft, lesson — all brain candle families (tradable)
+_DEFAULT_OF = float(_env("THR_SCORE_CLASSIC_PATTERN", "50"))
 _SEED_FAMILIES = (
-    (
-        "doji",
-        float(_env("THR_SCORE_CLASSIC_PATTERN", "75")),
-        False,
-        "Doji = indecision. Prefer FIRE near support/resistance with HTF align; "
-        "SKIP chop / mid-range / weak OF below family floor.",
-    ),
-    (
-        "engulfing",
-        float(_env("THR_SCORE_ENGULFING", "75")),
-        False,
-        "Engulfing needs clear body dominance + trend/structure confluence; "
-        "SKIP opposing HTF or weak OF below family floor.",
-    ),
-    (
-        "pin bar",
-        float(_env("THR_SCORE_CLASSIC_PATTERN", "75")),
-        False,
-        "Pin bar / hammer / shooting star: require rejection wick + HTF align; "
-        "SKIP mid-range chop and opposing structure.",
-    ),
-    (
-        "inside bar",
-        float(_env("THR_SCORE_INSIDE_BAR", "75")),
-        False,
-        "Inside bar: wait mother-bar break + OF confirm; SKIP weak pressure / low RV.",
-    ),
+    ("doji", _DEFAULT_OF, True,
+     "Doji = indecision. FIRE near S/R with HTF align; candle-soft OK on scalp."),
+    ("engulfing", float(_env("THR_SCORE_ENGULFING", "50")), True,
+     "Engulfing: body dominance + structure; candle-soft bypasses weak OF."),
+    ("engulfing combo", _DEFAULT_OF, True,
+     "Three outside up/down: engulf + confirm candle; candle-soft on scalp."),
+    ("pin bar", _DEFAULT_OF, True,
+     "Pin bar / hammer / shooting star / hanging man: rejection wick + HTF."),
+    ("inside bar", float(_env("THR_SCORE_INSIDE_BAR", "50")), True,
+     "Inside bar / harami: mother-bar break or false-breakout + OF/candle-soft."),
+    ("harami combo", _DEFAULT_OF, True,
+     "Three inside up/down: harami + confirm; candle-soft on scalp."),
+    ("star", _DEFAULT_OF, True,
+     "Morning/evening star / abandoned baby: 3-candle reversal; candle-soft OK."),
+    ("tweezer", _DEFAULT_OF, True,
+     "Tweezer top/bottom: equal highs/lows at S/R; candle-soft on scalp."),
+    ("belt hold", _DEFAULT_OF, True,
+     "Belt hold: strong open-drive candle; candle-soft on scalp."),
+    ("piercing", _DEFAULT_OF, True,
+     "Piercing line / dark cloud cover: 50% reclaim; candle-soft on scalp."),
+    ("soldiers", _DEFAULT_OF, True,
+     "Three white soldiers: sustained buying; prefer trend align."),
+    ("crows", _DEFAULT_OF, True,
+     "Three black crows / gap two crows: sustained selling; prefer HTF align."),
+    ("kicker", _DEFAULT_OF, True,
+     "Bullish/bearish kicker: violent sentiment shift; candle-soft OK."),
+    ("separating lines", _DEFAULT_OF, True,
+     "Separating lines: continuation from shared open; candle-soft on scalp."),
+    ("three methods", _DEFAULT_OF, True,
+     "Rising three methods / mat hold: trend pause then continuation."),
+    ("three line strike", _DEFAULT_OF, True,
+     "Three-line strike: flush then resume; candle-soft on scalp."),
+    ("meeting lines", _DEFAULT_OF, True,
+     "Meeting lines: shared close reversal; candle-soft on scalp."),
+    ("ladder", _DEFAULT_OF, True,
+     "Ladder bottom: multi-candle capitulation then reclaim."),
+    ("swallow", _DEFAULT_OF, True,
+     "Concealing baby swallow: rare exhaustion; require structure confirm."),
 )
 
 _db_status: dict = {"ok": False, "message": "not initialised"}
 
 
 def _seed_family_rules(cur) -> None:
-    """Insert default family rules when missing (doji/engulfing/pin/inside × TFs)."""
+    """Insert default family rules when missing (all candle families × TFs)."""
     for family, min_of, soft, lesson in _SEED_FAMILIES:
         for tf in _SEED_TFS:
             cur.execute(
@@ -343,7 +355,7 @@ _ENGINE_FORMULA_SEEDS: list[tuple[str, str, str, float | None, str | None, str]]
     ("of", "THR_SCORE_TRAP", "number", 90.0, None, "Trap floor HTF"),
     ("of", "THR_SCORE_TRAP_5M", "number", 80.0, None, "Trap floor 5m"),
     ("of", "THR_SCORE_TRAP_1M", "number", 80.0, None, "Trap floor 1m"),
-    ("of", "CANDLE_ONLY_FIRE", "bool", 0.0, None, "Allow candle-only fire"),
+    ("of", "CANDLE_ONLY_FIRE", "bool", 1.0, None, "Allow candle-only fire"),
     ("of", "THR_PRESSURE", "number", 0.60, None, "OF pressure threshold"),
     ("of", "THR_RV_VOL", "number", 1.20, None, "Relative volume threshold"),
     ("of", "STRUCTURE_OPPOSITE_PENALTY", "number", 12.0, None, "OF vs structure penalty"),
@@ -410,18 +422,12 @@ def _seed_engine_formulas(cur) -> None:
 
 
 def _tighten_trade_policy(cur) -> None:
-    """Raise soft classic/engulf floors and disable candle-only (existing rows)."""
+    """Enable candle-family trading: soft ON + candle-only path + seed floors."""
     cur.execute(
         """UPDATE engine_formulas
-           SET value_num = 75, note = 'Doji/classic OF floor'
-           WHERE formula_key = 'THR_SCORE_CLASSIC_PATTERN'
-             AND (value_num IS NULL OR value_num < 75)"""
-    )
-    cur.execute(
-        """UPDATE engine_formulas
-           SET value_num = 75, note = 'Engulfing OF floor'
-           WHERE formula_key = 'THR_SCORE_ENGULFING'
-             AND (value_num IS NULL OR value_num < 75)"""
+           SET value_num = 1, note = 'Allow candle-only fire'
+           WHERE formula_key = 'CANDLE_ONLY_FIRE'
+             AND (value_num IS NULL OR value_num <> 1)"""
     )
     cur.execute(
         """UPDATE engine_formulas
@@ -429,20 +435,18 @@ def _tighten_trade_policy(cur) -> None:
            WHERE formula_key = 'THR_SCORE_TRAP_1M'
              AND (value_num IS NULL OR value_num < 80)"""
     )
+    # Unlock candle soft for every unlocked candle-family row (incl. new seeds).
+    fam_list = ", ".join(f"'{f}'" for f, *_ in _SEED_FAMILIES)
     cur.execute(
-        """UPDATE engine_formulas
-           SET value_num = 0, note = 'Allow candle-only fire'
-           WHERE formula_key = 'CANDLE_ONLY_FIRE'
-             AND (value_num IS NULL OR value_num <> 0)"""
-    )
-    cur.execute(
-        """UPDATE family_engine_rules
-           SET min_of_score = 75, candle_soft = 0
-           WHERE locked = 0
-             AND family IN ('doji', 'engulfing', 'pin bar', 'inside bar')
-             AND (
-               min_of_score IS NULL OR min_of_score < 75 OR candle_soft = 1
-             )"""
+        f"""UPDATE family_engine_rules
+            SET candle_soft = 1,
+                min_of_score = CASE
+                  WHEN min_of_score IS NULL OR min_of_score > 55 THEN 50
+                  ELSE min_of_score
+                END,
+                lesson_text = COALESCE(NULLIF(TRIM(lesson_text), ''), 'Candle family — tradable with soft OF')
+            WHERE locked = 0
+              AND family IN ({fam_list})"""
     )
 
 
