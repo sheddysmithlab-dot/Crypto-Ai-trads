@@ -34,6 +34,15 @@ def _refresh_if_stale() -> None:
     if _CACHE_ALL is not None and (now - _CACHE_TS) < _CACHE_TTL_SEC:
         return
     rows = trade_db.fetch_family_rules()
+    if not rows:
+        # Keep last good cache (MySQL down / circuit) — avoid thrashing empty.
+        if _CACHE_ALL is not None:
+            _CACHE_TS = now
+            return
+        _CACHE_ALL = []
+        _CACHE = {}
+        _CACHE_TS = now
+        return
     _CACHE_ALL = rows
     _CACHE = {}
     for row in rows:

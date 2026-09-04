@@ -37,6 +37,8 @@ def _env(name: str, default: str = "") -> str:
 
 
 def _mysql_enabled() -> bool:
+    if _circuit_open():
+        return False
     return _env("MYSQL_ENABLED", "false").lower() in ("1", "true", "yes") and _PYMYSQL_OK
 
 
@@ -45,6 +47,14 @@ def _mysql_enabled() -> bool:
 # session on every query.
 _tls = threading.local()
 _connect_lock = threading.Lock()
+# Hostinger error 1226: stop opening new sockets for a while so the hourly
+# quota can recover instead of burning remaining attempts on every trade tick.
+_circuit_until = 0.0
+_CIRCUIT_COOLDOWN_SEC = 900.0
+
+
+def _circuit_open() -> bool:
+    return time.time() < _circuit_until
 
 
 class _ReusableConn:
@@ -68,6 +78,19 @@ class _ReusableConn:
         return getattr(self._real, name)
 
 
+def _trip_circuit(exc: BaseException) -> None:
+    global _circuit_until, _db_status
+    msg = str(exc)
+    low = msg.lower()
+    if "1226" in msg or "max_connections" in low:
+        _circuit_until = time.time() + _CIRCUIT_COOLDOWN_SEC
+        _db_status = {
+            "ok": False,
+            "message": f"MySQL paused {int(_CIRCUIT_COOLDOWN_SEC)}s (conn/hour limit)",
+        }
+        print(f"[TRADE_DB] circuit open {_CIRCUIT_COOLDOWN_SEC:.0f}s — {msg[:160]}")
+
+
 def _new_raw_connection():
     return pymysql.connect(
         host=_env("MYSQL_HOST", "localhost"),
@@ -83,10 +106,14 @@ def _new_raw_connection():
 
 def _connect():
     """Return a thread-local reusable connection (close() is a no-op)."""
+    if _circuit_open():
+        raise RuntimeError("MySQL circuit open (max_connections cooldown)")
     raw = getattr(_tls, "conn", None)
     if raw is not None:
         try:
-            raw.ping(reconnect=True)
+            # Do not auto-reconnect here — a silent reconnect still burns Hostinger's
+            # max_connections_per_hour quota.
+            raw.ping(reconnect=False)
             return _ReusableConn(raw)
         except Exception:
             try:
@@ -95,8 +122,26 @@ def _connect():
                 pass
             _tls.conn = None
     with _connect_lock:
-        raw = _new_raw_connection()
+        if _circuit_open():
+            raise RuntimeError("MySQL circuit open (max_connections cooldown)")
+        # Another thread may have opened while we waited.
+        raw = getattr(_tls, "conn", None)
+        if raw is not None:
+            try:
+                raw.ping(reconnect=False)
+                return _ReusableConn(raw)
+            except Exception:
+                _tls.conn = None
+        try:
+            raw = _new_raw_connection()
+        except Exception as exc:
+            _trip_circuit(exc)
+            raise
         _tls.conn = raw
+        global _db_status
+        if not _db_status.get("ok"):
+            _db_status = {"ok": True, "message": "MySQL connected (recovered)"}
+            print("[TRADE_DB] MySQL connection recovered")
     return _ReusableConn(raw)
 
 
@@ -139,7 +184,7 @@ CREATE TABLE IF NOT EXISTS family_engine_rules (
     min_rr DOUBLE NULL,
     sl_pct DOUBLE NULL,
     tp_pct DOUBLE NULL,
-    candle_soft TINYINT(1) NOT NULL DEFAULT 1,
+    candle_soft TINYINT(1) NOT NULL DEFAULT 0,
     skip_when_json JSON NULL,
     fire_when_json JSON NULL,
     lesson_text TEXT NULL,
@@ -417,6 +462,7 @@ def init_db() -> dict:
         _db_status = {"ok": True, "message": "MySQL connected and schema OK"}
         return _db_status
     except Exception as exc:
+        _trip_circuit(exc)
         _db_status = {"ok": False, "message": str(exc)}
         return _db_status
 
