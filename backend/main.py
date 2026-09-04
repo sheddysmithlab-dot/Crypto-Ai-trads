@@ -2125,6 +2125,12 @@ class AITradingAgent:
                 print(f"[PILLAR 3: AI AGENT] {self.last_open_skip_reason}.")
                 return None
 
+            ok_sc, sc_msg = self.same_chart_score_beats_last(trade_pair, score)
+            if not ok_sc:
+                self.last_open_skip_reason = sc_msg
+                print(f"[PILLAR 3: AI AGENT] {self.last_open_skip_reason}.")
+                return None
+
         # AI Agent Instructions: global max_concurrent; 1m also caps per pair/chart.
         blocked = concurrent_entry_blocked(self, trade_pair)
         if blocked:
@@ -3098,6 +3104,54 @@ class AITradingAgent:
         if is_scalp_tf(tf):
             limit = max(limit, int(ONE_M_MAX_CONCURRENT))
         return self.same_side_auto_count(side, pair) < limit
+
+    def last_auto_trade_score_on_pair(self, pair: str) -> float | None:
+        """Score of the most recently opened auto trade on this chart/pair (if any)."""
+        last_score: float | None = None
+        last_opened = -1.0
+        for t in self.trades:
+            if t.get("source") != "auto" or t.get("pair") != pair:
+                continue
+            try:
+                opened = float(t.get("opened_at") or 0)
+            except (TypeError, ValueError):
+                opened = 0.0
+            if opened < last_opened:
+                continue
+            raw = t.get("score")
+            if raw is None:
+                continue
+            try:
+                sc = float(raw)
+            except (TypeError, ValueError):
+                continue
+            last_opened = opened
+            last_score = sc
+        return last_score
+
+    def same_chart_score_beats_last(self, pair: str, new_score) -> tuple[bool, str]:
+        """When stacking on the same chart, next fire must beat the last open trade's score.
+
+        First auto position on a flat pair always passes. Reduces fee burn from
+        weak follow-on entries after an already-open scalp.
+        """
+        last = self.last_auto_trade_score_on_pair(pair)
+        if last is None:
+            return True, "ok"
+        if new_score is None:
+            return False, (
+                f"stack on {pair} needs a score > last {last:.1f} (new score missing)"
+            )
+        try:
+            sc = float(new_score)
+        except (TypeError, ValueError):
+            return False, f"stack on {pair} blocked — invalid new score"
+        if sc > last:
+            return True, "ok"
+        return False, (
+            f"stack on {pair} blocked — score {sc:.1f} <= last trade {last:.1f} "
+            f"(need higher score to add another position)"
+        )
 
     def has_duplicate_auto_entry(
         self,
@@ -4768,6 +4822,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 f"{side} already open on {pair} (max {MAX_SAME_SIDE_AUTO_PER_PAIR} same-side)",
                 fire_candle_ms=fire_candle_ms,
             )
+        ok_sc, sc_msg = agent.same_chart_score_beats_last(pair, detect.get("score"))
+        if not ok_sc:
+            return await _skip_pending(pending, sc_msg, fire_candle_ms=fire_candle_ms)
         if agent.has_duplicate_auto_entry(
             side, pair, detect.get("pattern"), detect_candle_ms, candle_close or float(detect.get("entry") or 0)
         ):
@@ -5351,6 +5408,18 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         )
         return False
     if not agent.has_same_side_auto_capacity(side, pair):
+        return False
+    ok_sc, sc_msg = agent.same_chart_score_beats_last(pair, detect.get("score"))
+    if not ok_sc:
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=close_time,
+            stage="skipped",
+            side=side,
+            action=detect.get("action"),
+            pattern=detect.get("pattern"),
+            reason=sc_msg if len(sc_msg) <= 48 else "Need higher score to stack",
+        )
         return False
     if agent.has_duplicate_auto_entry(
         side, pair, detect.get("pattern"), close_time, candle_close or float(detect.get("entry") or 0)
