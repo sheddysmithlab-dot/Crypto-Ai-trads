@@ -12,6 +12,8 @@ export default function ChartPanel({
   pairSelector,
   chartContainerRef,
   volumeContainerRef,
+  rsiContainerRef,
+  macdContainerRef,
   timeframe,
   switchTimeframe,
   readouts,
@@ -184,8 +186,29 @@ export default function ChartPanel({
         <span>
           VOL:{pairSelector.activePair.symbol}: <span className="text-blue-400 font-bold">{fmtNum(readouts.vol)}</span>
         </span>
+        <span>
+          VWAP: <span className="text-orange-400 font-bold">{fmtNum(readouts.vwap)}</span>
+        </span>
       </div>
-      <div ref={volumeContainerRef} className="w-full h-32 lg:h-44 pb-1.5"></div>
+      <div ref={volumeContainerRef} className="w-full h-24 lg:h-32 pb-1"></div>
+
+      {/* RSI(14) */}
+      <div className="px-3 pt-1 text-[10px] text-gray-500 dark:text-gray-400 font-mono border-t border-gray-200 dark:border-gray-800 flex flex-wrap items-baseline gap-x-3">
+        <span className="font-sans font-semibold text-gray-700 dark:text-gray-300">RSI(14)</span>
+        <span>
+          RSI: <span className="text-violet-400 font-bold">{fmtNum(readouts.rsi)}</span>
+        </span>
+      </div>
+      <div ref={rsiContainerRef} className="w-full h-20 lg:h-24 pb-1"></div>
+
+      {/* MACD(12/26/9) */}
+      <div className="px-3 pt-1 text-[10px] text-gray-500 dark:text-gray-400 font-mono border-t border-gray-200 dark:border-gray-800 flex flex-wrap items-baseline gap-x-3">
+        <span className="font-sans font-semibold text-gray-700 dark:text-gray-300">MACD(12,26,9)</span>
+        <span>
+          MACD: <span className="text-sky-400 font-bold">{fmtNum(readouts.macd)}</span>
+        </span>
+      </div>
+      <div ref={macdContainerRef} className="w-full h-20 lg:h-28 pb-1.5"></div>
     </div>
   );
 }

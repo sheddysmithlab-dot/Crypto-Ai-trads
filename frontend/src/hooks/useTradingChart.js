@@ -223,6 +223,135 @@ function calcVolumeSMA(data, period) {
   return result;
 }
 
+function calcEMAValues(closes, period) {
+  const out = new Array(closes.length).fill(null);
+  if (closes.length < period) return out;
+  let sum = 0;
+  for (let i = 0; i < period; i++) sum += closes[i];
+  let prev = sum / period;
+  out[period - 1] = prev;
+  const k = 2 / (period + 1);
+  for (let i = period; i < closes.length; i++) {
+    prev = prev + k * (closes[i] - prev);
+    out[i] = prev;
+  }
+  return out;
+}
+
+function calcBollinger(data, period = 20, mult = 2) {
+  const mid = [];
+  const upper = [];
+  const lower = [];
+  for (let i = 0; i < data.length; i++) {
+    if (i < period - 1) continue;
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += data[j].close;
+    const m = sum / period;
+    let varSum = 0;
+    for (let j = i - period + 1; j <= i; j++) varSum += (data[j].close - m) ** 2;
+    const sd = Math.sqrt(varSum / period);
+    const t = data[i].time;
+    mid.push({ time: t, value: m });
+    upper.push({ time: t, value: m + mult * sd });
+    lower.push({ time: t, value: m - mult * sd });
+  }
+  return { mid, upper, lower };
+}
+
+function calcVWAP(data) {
+  const result = [];
+  let cumPv = 0;
+  let cumV = 0;
+  let lastDay = null;
+  for (let i = 0; i < data.length; i++) {
+    const d = data[i];
+    const day = Math.floor(d.time / 86400);
+    if (lastDay != null && day !== lastDay) {
+      cumPv = 0;
+      cumV = 0;
+    }
+    lastDay = day;
+    const typical = (d.high + d.low + d.close) / 3;
+    const vol = d.volume > 0 ? d.volume : 1;
+    cumPv += typical * vol;
+    cumV += vol;
+    result.push({ time: d.time, value: cumPv / cumV });
+  }
+  return result;
+}
+
+function calcRSI(data, period = 14) {
+  const result = [];
+  if (data.length < period + 1) return result;
+  let gains = 0;
+  let losses = 0;
+  for (let i = 1; i <= period; i++) {
+    const diff = data[i].close - data[i - 1].close;
+    gains += Math.max(diff, 0);
+    losses += Math.max(-diff, 0);
+  }
+  let avgG = gains / period;
+  let avgL = losses / period;
+  const rsiAt = (ag, al) => (al === 0 ? 100 : 100 - 100 / (1 + ag / al));
+  result.push({ time: data[period].time, value: rsiAt(avgG, avgL) });
+  for (let i = period + 1; i < data.length; i++) {
+    const diff = data[i].close - data[i - 1].close;
+    avgG = (avgG * (period - 1) + Math.max(diff, 0)) / period;
+    avgL = (avgL * (period - 1) + Math.max(-diff, 0)) / period;
+    result.push({ time: data[i].time, value: rsiAt(avgG, avgL) });
+  }
+  return result;
+}
+
+function calcMACD(data, fast = 12, slow = 26, signal = 9) {
+  const closes = data.map((d) => d.close);
+  const emaFast = calcEMAValues(closes, fast);
+  const emaSlow = calcEMAValues(closes, slow);
+  const macdVals = closes.map((_, i) =>
+    emaFast[i] != null && emaSlow[i] != null ? emaFast[i] - emaSlow[i] : null
+  );
+  const macdLine = [];
+  const signalLine = [];
+  const hist = [];
+  const firstMacd = macdVals.findIndex((v) => v != null);
+  if (firstMacd < 0) return { macdLine, signalLine, hist };
+  const seedEnd = firstMacd + signal - 1;
+  let sigPrev = null;
+  if (seedEnd < macdVals.length) {
+    let s = 0;
+    let ok = true;
+    for (let i = firstMacd; i <= seedEnd; i++) {
+      if (macdVals[i] == null) {
+        ok = false;
+        break;
+      }
+      s += macdVals[i];
+    }
+    if (ok) sigPrev = s / signal;
+  }
+  const k = 2 / (signal + 1);
+  for (let i = 0; i < data.length; i++) {
+    if (macdVals[i] == null) continue;
+    let sig = null;
+    if (i === seedEnd && sigPrev != null) {
+      sig = sigPrev;
+    } else if (i > seedEnd && sigPrev != null) {
+      sigPrev = sigPrev + k * (macdVals[i] - sigPrev);
+      sig = sigPrev;
+    }
+    macdLine.push({ time: data[i].time, value: macdVals[i] });
+    if (sig != null) {
+      signalLine.push({ time: data[i].time, value: sig });
+      hist.push({
+        time: data[i].time,
+        value: macdVals[i] - sig,
+        color: macdVals[i] - sig >= 0 ? 'rgba(34,197,94,0.55)' : 'rgba(239,68,68,0.55)',
+      });
+    }
+  }
+  return { macdLine, signalLine, hist };
+}
+
 function toVolumeBars(data) {
   return data.map((d) => ({
     time: d.time,
@@ -275,6 +404,8 @@ function buildTimeScaleOptions(intervalSeconds) {
 export function useTradingChart({
   chartContainerRef,
   volumeContainerRef,
+  rsiContainerRef,
+  macdContainerRef,
   pairLabel,
   pairPrice,
   externalTradingMode,
@@ -286,10 +417,20 @@ export function useTradingChart({
 }) {
   const chartRef = useRef(null);
   const volumeChartRef = useRef(null);
+  const rsiChartRef = useRef(null);
+  const macdChartRef = useRef(null);
   const candleSeriesRef = useRef(null);
   const maSeriesRef = useRef({});
+  const bollMidRef = useRef(null);
+  const bollUpperRef = useRef(null);
+  const bollLowerRef = useRef(null);
+  const vwapSeriesRef = useRef(null);
   const volumeSeriesRef = useRef(null);
   const volumeMaSeriesRef = useRef(null);
+  const rsiSeriesRef = useRef(null);
+  const macdLineRef = useRef(null);
+  const macdSignalRef = useRef(null);
+  const macdHistRef = useRef(null);
   const trailingLockLineRef = useRef(null);
   const blueBoxOverlayElRef = useRef(null);
   const tradeFireOverlayElRef = useRef(null);
@@ -358,17 +499,26 @@ export function useTradingChart({
     if (pin?.time != null) {
       const bar = mockDataRef.current.find((b) => b.time === pin.time);
       if (bar) {
-        lookup.set(pin.time, {
-          time: pin.time,
-          bar,
-          side: pin.side || 'LONG',
-          stage: pin.stage || 'fired',
-          pair: pin.pair || pairLabelRef.current,
-          pattern: pin.pattern || 'Trade fire',
-          reason: pin.reason || null,
-          opened_at: pin.opened_at ?? null,
-          signal_candle_time: pin.signal_candle_time ?? pin.time,
-        });
+        const pinStage = pin.stage || 'fired';
+        const existing = lookup.get(pin.time);
+        const pinRank = { detected: 1, confirming: 2, skipped: 3, fired: 4, exited: 5 }[pinStage] || 4;
+        const prevRank = existing
+          ? ({ detected: 1, confirming: 2, skipped: 3, fired: 4, exited: 5 }[existing.stage] || 0)
+          : 0;
+        // Pin fills missing fire neon; never downgrade a live higher stage on this bar.
+        if (!existing || pinRank >= prevRank) {
+          lookup.set(pin.time, {
+            time: pin.time,
+            bar,
+            side: pin.side || 'LONG',
+            stage: pinStage,
+            pair: pin.pair || pairLabelRef.current,
+            pattern: pin.pattern || 'Trade fire',
+            reason: pin.reason || null,
+            opened_at: pin.opened_at ?? null,
+            signal_candle_time: pin.signal_candle_time ?? pin.time,
+          });
+        }
       }
     }
     tradeFireLookupRef.current = lookup;
@@ -455,6 +605,8 @@ export function useTradingChart({
     try {
       chart.timeScale().setVisibleLogicalRange({ from, to });
       volumeChartRef.current?.timeScale().setVisibleLogicalRange({ from, to });
+      rsiChartRef.current?.timeScale().setVisibleLogicalRange({ from, to });
+      macdChartRef.current?.timeScale().setVisibleLogicalRange({ from, to });
     } catch (err) {
       console.warn('[CHART] focusTradeCandle range failed:', err);
     }
@@ -602,25 +754,45 @@ export function useTradingChart({
     const now = new Date();
     const volSeries = calcVolumeSMA(data.slice(-(VOLUME_MA_PERIOD + 5)), VOLUME_MA_PERIOD);
     const clock = formatLiveClock(now);
+    const rsiSeries = calcRSI(data, 14);
+    const { macdLine } = calcMACD(data);
+    const vwapSeries = calcVWAP(data);
 
     setReadouts((prev) => ({
       ...prev,
       vol: bar.volume,
       volMA: volSeries.length ? volSeries[volSeries.length - 1].value : bar.volume,
+      rsi: rsiSeries.length ? rsiSeries[rsiSeries.length - 1].value : null,
+      macd: macdLine.length ? macdLine[macdLine.length - 1].value : null,
+      vwap: vwapSeries.length ? vwapSeries[vwapSeries.length - 1].value : null,
       lastUpdated: clock,
       liveClock: clock,
       chartCandleTime: bar?.time ? formatChartAxisTime(bar.time, currentIntervalRef.current) : prev.chartCandleTime,
     }));
   }, []);
 
-  const applyAllOverlays = useCallback((data) => {
+  const applyIndicatorOverlays = useCallback((data) => {
     MA_PERIODS.forEach((period) => {
       maSeriesRef.current[period]?.setData(calcSMA(data, period));
     });
+    const bb = calcBollinger(data, 20, 2);
+    bollMidRef.current?.setData(bb.mid);
+    bollUpperRef.current?.setData(bb.upper);
+    bollLowerRef.current?.setData(bb.lower);
+    vwapSeriesRef.current?.setData(calcVWAP(data));
     volumeSeriesRef.current?.setData(toVolumeBars(data));
     volumeMaSeriesRef.current?.setData(calcVolumeSMA(data, VOLUME_MA_PERIOD));
+    rsiSeriesRef.current?.setData(calcRSI(data, 14));
+    const macd = calcMACD(data);
+    macdLineRef.current?.setData(macd.macdLine);
+    macdSignalRef.current?.setData(macd.signalLine);
+    macdHistRef.current?.setData(macd.hist);
+  }, []);
+
+  const applyAllOverlays = useCallback((data) => {
+    applyIndicatorOverlays(data);
     pushCandlesToChart(data);
-  }, [pushCandlesToChart]);
+  }, [pushCandlesToChart, applyIndicatorOverlays]);
 
   // Pushes a full dataset (synthetic or real) into every series + the readouts.
   const applyDataset = useCallback(
@@ -765,11 +937,7 @@ export function useTradingChart({
       const now = performance.now();
       if (newCandle || now - overlayThrottleRef.current > 400) {
         overlayThrottleRef.current = now;
-        MA_PERIODS.forEach((period) => {
-          maSeriesRef.current[period]?.setData(calcSMA(mockData, period));
-        });
-        volumeSeriesRef.current?.setData(toVolumeBars(mockData));
-        volumeMaSeriesRef.current?.setData(calcVolumeSMA(mockData, VOLUME_MA_PERIOD));
+        applyIndicatorOverlays(mockData);
       }
 
       if (newCandle) {
@@ -779,12 +947,14 @@ export function useTradingChart({
         try {
           chartRef.current?.timeScale().scrollToRealTime();
           volumeChartRef.current?.timeScale().scrollToRealTime();
+          rsiChartRef.current?.timeScale().scrollToRealTime();
+          macdChartRef.current?.timeScale().scrollToRealTime();
         } catch {
           /* chart may be mid-reset */
         }
       }
     },
-    [updateReadouts, zoomToRecentCandles, pushCandlesToChart, redrawTradeFireOverlay]
+    [updateReadouts, zoomToRecentCandles, pushCandlesToChart, redrawTradeFireOverlay, applyIndicatorOverlays]
   );
 
   const applyLivePriceTick = useCallback(
@@ -924,6 +1094,8 @@ export function useTradingChart({
       const timeScaleOpts = buildTimeScaleOptions(currentIntervalRef.current);
       chartRef.current?.applyOptions({ timeScale: { ...darkThemeConfig.timeScale, ...timeScaleOpts } });
       volumeChartRef.current?.applyOptions({ timeScale: timeScaleOpts });
+      rsiChartRef.current?.applyOptions({ timeScale: timeScaleOpts });
+      macdChartRef.current?.applyOptions({ timeScale: timeScaleOpts });
       // Clear the chart rather than showing a fake synthetic placeholder.
       applyDataset([]);
       loadRealHistoryInBackground(pairLabelRef.current, tf, entryPriceRef.current);
@@ -952,6 +1124,8 @@ export function useTradingChart({
   useEffect(() => {
     const chartContainer = chartContainerRef.current;
     const volumeContainer = volumeContainerRef.current;
+    const rsiContainer = rsiContainerRef?.current;
+    const macdContainer = macdContainerRef?.current;
     if (!chartContainer || !volumeContainer) return;
 
     if (getComputedStyle(chartContainer).position === 'static') {
@@ -1007,15 +1181,49 @@ export function useTradingChart({
       });
     });
 
-    // Volume histogram sub-panel (own chart instance, time-synced with the main chart)
-    const volumeChart = createChart(volumeContainer, {
-      width: volumeContainer.clientWidth,
-      height: volumeContainer.clientHeight,
+    // Bollinger Bands (20, 2)
+    bollUpperRef.current = chart.addLineSeries({
+      color: 'rgba(148,163,184,0.7)',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    bollMidRef.current = chart.addLineSeries({
+      color: 'rgba(148,163,184,0.45)',
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    bollLowerRef.current = chart.addLineSeries({
+      color: 'rgba(148,163,184,0.7)',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+
+    // VWAP (daily reset)
+    vwapSeriesRef.current = chart.addLineSeries({
+      color: '#f97316',
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+
+    const subPaneOpts = {
       ...darkThemeConfig,
       timeScale: buildTimeScaleOptions(currentIntervalRef.current),
       localization: {
         timeFormatter: (time) => formatChartAxisTime(time, currentIntervalRef.current),
       },
+    };
+
+    // Volume histogram sub-panel (own chart instance, time-synced with the main chart)
+    const volumeChart = createChart(volumeContainer, {
+      width: volumeContainer.clientWidth,
+      height: volumeContainer.clientHeight,
+      ...subPaneOpts,
     });
     volumeChartRef.current = volumeChart;
     const volumeSeries = volumeChart.addHistogramSeries({ priceFormat: { type: 'volume' }, lastValueVisible: false });
@@ -1023,21 +1231,83 @@ export function useTradingChart({
     const volumeMaSeries = volumeChart.addLineSeries({ color: '#f59e0b', lineWidth: 1.5, lastValueVisible: false });
     volumeMaSeriesRef.current = volumeMaSeries;
 
+    let rsiChart = null;
+    if (rsiContainer) {
+      rsiChart = createChart(rsiContainer, {
+        width: rsiContainer.clientWidth,
+        height: rsiContainer.clientHeight,
+        ...subPaneOpts,
+        timeScale: { ...buildTimeScaleOptions(currentIntervalRef.current), visible: false },
+      });
+      rsiChartRef.current = rsiChart;
+      rsiSeriesRef.current = rsiChart.addLineSeries({
+        color: '#a78bfa',
+        lineWidth: 1.5,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      // Fixed 0–100 RSI scale with 30/70 guides via price lines after first data
+      rsiSeriesRef.current.createPriceLine({
+        price: 70,
+        color: 'rgba(239,68,68,0.45)',
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: false,
+        title: '',
+      });
+      rsiSeriesRef.current.createPriceLine({
+        price: 30,
+        color: 'rgba(34,197,94,0.45)',
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: false,
+        title: '',
+      });
+    }
+
+    let macdChart = null;
+    if (macdContainer) {
+      macdChart = createChart(macdContainer, {
+        width: macdContainer.clientWidth,
+        height: macdContainer.clientHeight,
+        ...subPaneOpts,
+      });
+      macdChartRef.current = macdChart;
+      macdHistRef.current = macdChart.addHistogramSeries({
+        priceFormat: { type: 'price', precision: 4, minMove: 0.0001 },
+        lastValueVisible: false,
+      });
+      macdLineRef.current = macdChart.addLineSeries({
+        color: '#38bdf8',
+        lineWidth: 1.5,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+      macdSignalRef.current = macdChart.addLineSeries({
+        color: '#f472b6',
+        lineWidth: 1.5,
+        priceLineVisible: false,
+        lastValueVisible: false,
+      });
+    }
+
     const entryPrice = entryPriceRef.current;
     // Chart starts empty - no fake synthetic placeholder - until real data arrives below.
     mockDataRef.current = [];
 
     refreshTrailingLockLine(entryPrice);
 
-    // Sync time scales between the main chart and the volume panel.
+    // Sync time scales between the main chart and indicator panes.
     // When data is cleared (pair/timeframe switch), lightweight-charts fires this
     // callback with range=null — passing that through crashes setVisibleLogicalRange.
     chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
       if (!range || range.from == null || range.to == null) return;
       try {
         volumeChart.timeScale().setVisibleLogicalRange(range);
+        rsiChart?.timeScale().setVisibleLogicalRange(range);
+        macdChart?.timeScale().setVisibleLogicalRange(range);
       } catch (err) {
-        console.warn('[CHART] Could not sync volume chart zoom:', err);
+        console.warn('[CHART] Could not sync indicator chart zoom:', err);
       }
     });
 
@@ -1080,6 +1350,12 @@ export function useTradingChart({
     const handleResize = () => {
       chart.applyOptions({ width: chartContainer.clientWidth, height: chartContainer.clientHeight });
       volumeChart.applyOptions({ width: volumeContainer.clientWidth, height: volumeContainer.clientHeight });
+      if (rsiContainer && rsiChart) {
+        rsiChart.applyOptions({ width: rsiContainer.clientWidth, height: rsiContainer.clientHeight });
+      }
+      if (macdContainer && macdChart) {
+        macdChart.applyOptions({ width: macdContainer.clientWidth, height: macdContainer.clientHeight });
+      }
       redrawBlueBoxOverlay();
       redrawTradeFireOverlayRef.current();
     };
@@ -1168,6 +1444,8 @@ export function useTradingChart({
       if (tradeFireLayer.parentNode) tradeFireLayer.parentNode.removeChild(tradeFireLayer);
       chart.remove();
       volumeChart.remove();
+      rsiChart?.remove();
+      macdChart?.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

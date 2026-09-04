@@ -285,6 +285,83 @@ class CandleSeries:
             out[i] = 100.0 if avg_l == 0 else 100.0 - 100.0 / (1 + avg_g / avg_l)
         return out
 
+    @staticmethod
+    def _ema_of(values: Sequence[Optional[float]], period: int) -> List[Optional[float]]:
+        """EMA with SMA seed; skips leading Nones in `values`."""
+        n = len(values)
+        out: List[Optional[float]] = [None] * n
+        first = next((i for i, v in enumerate(values) if v is not None), None)
+        if first is None:
+            return out
+        seed_end = first + period - 1
+        if seed_end >= n:
+            return out
+        window = [values[i] for i in range(first, seed_end + 1)]
+        if any(v is None for v in window):
+            return out
+        prev = sum(window) / period  # type: ignore[arg-type]
+        out[seed_end] = prev
+        k = 2.0 / (period + 1.0)
+        for i in range(seed_end + 1, n):
+            v = values[i]
+            if v is None:
+                continue
+            prev = prev + k * (v - prev)
+            out[i] = prev
+        return out
+
+    def macd(
+        self, fast: int = 12, slow: int = 26, signal: int = 9
+    ) -> Tuple[List[Optional[float]], List[Optional[float]], List[Optional[float]]]:
+        """
+        MACD line, signal line, and histogram (None-padded until enough bars).
+        Defaults: 12 / 26 / 9.
+        """
+        closes: List[Optional[float]] = list(self.closes)
+        ema_fast = self._ema_of(closes, fast)
+        ema_slow = self._ema_of(closes, slow)
+        macd_line: List[Optional[float]] = []
+        for i in range(len(closes)):
+            if ema_fast[i] is None or ema_slow[i] is None:
+                macd_line.append(None)
+            else:
+                macd_line.append(ema_fast[i] - ema_slow[i])  # type: ignore[operator]
+        signal_line = self._ema_of(macd_line, signal)
+        hist: List[Optional[float]] = []
+        for i in range(len(closes)):
+            if macd_line[i] is None or signal_line[i] is None:
+                hist.append(None)
+            else:
+                hist.append(macd_line[i] - signal_line[i])  # type: ignore[operator]
+        return macd_line, signal_line, hist
+
+    def vwap(self, reset_daily: bool = True) -> List[Optional[float]]:
+        """
+        Volume-weighted average price.
+        When reset_daily=True and timestamps exist, resets each UTC day.
+        Falls back to cumulative VWAP when volume/timestamps are missing.
+        """
+        out: List[Optional[float]] = []
+        cum_pv = 0.0
+        cum_v = 0.0
+        last_day: Optional[int] = None
+        for c in self.candles:
+            if reset_daily and c.timestamp is not None and c.timestamp > 0:
+                ts = c.timestamp
+                if ts > 1e12:
+                    ts = ts / 1000.0
+                day = int(ts // 86400)
+                if last_day is not None and day != last_day:
+                    cum_pv = 0.0
+                    cum_v = 0.0
+                last_day = day
+            typical = (c.high + c.low + c.close) / 3.0
+            vol = c.volume if c.volume and c.volume > 0 else 1.0
+            cum_pv += typical * vol
+            cum_v += vol
+            out.append(cum_pv / cum_v if cum_v > 0 else None)
+        return out
+
     def returns(self, period: int = 1) -> List[Optional[float]]:
         """Simple percentage return over `period` bars ending at i."""
         closes = self.closes
@@ -936,6 +1013,10 @@ CONFLUENCE_FACTORS = {
     "fibonacci": "Is price at the 50% or 61% Fibonacci retracement?",
     "trendline": "Is price at a drawn trendline?",
     "bollinger": "Is price at the upper/lower Bollinger band (range markets)?",
+    "rsi": "Is RSI(14) oversold/overbought or showing momentum on the trade side?",
+    "macd": "Is MACD(12/26/9) aligned (line vs signal) with the trade side?",
+    "vwap": "Is price at VWAP (session mean) as dynamic support/resistance?",
+    "vwap_bias": "Is price on the correct side of VWAP for directional bias?",
     "timeframe_alignment": "Do the higher time frames agree (top-down analysis)?",
 }
 
@@ -1764,6 +1845,11 @@ class Context:
     boll_up: List[Optional[float]]
     boll_lo: List[Optional[float]]
     atr: List[Optional[float]]
+    rsi: List[Optional[float]]
+    macd_line: List[Optional[float]]
+    macd_signal: List[Optional[float]]
+    macd_hist: List[Optional[float]]
+    vwap: List[Optional[float]]
     fib50: Optional[float]
     fib618: Optional[float]
     higher_tf_trend: Optional[str] = None
@@ -1777,6 +1863,9 @@ def build_context(candles: Sequence[Candle], higher_tf_trend: Optional[str] = No
     sma200 = series.sma(200)
     bmid, bup, blo = series.bollinger(20, 2.0)
     atr = series.atr(14)
+    rsi = series.rsi(14)
+    macd_line, macd_signal, macd_hist = series.macd(12, 26, 9)
+    vwap = series.vwap(reset_daily=True)
 
     # Fibonacci retracement pivot from last major swing low/high
     fib50 = fib618 = None
@@ -1790,8 +1879,11 @@ def build_context(candles: Sequence[Candle], higher_tf_trend: Optional[str] = No
             fib50 = levels["0.5"]
             fib618 = levels["0.618"]
 
-    return Context(series, ms, sma8, sma21, sma200, bmid, bup, blo, atr,
-                   fib50, fib618, higher_tf_trend)
+    return Context(
+        series, ms, sma8, sma21, sma200, bmid, bup, blo, atr,
+        rsi, macd_line, macd_signal, macd_hist, vwap,
+        fib50, fib618, higher_tf_trend,
+    )
 
 
 def _near(price: float, level: Optional[float], tol_pct: float = 0.35) -> bool:
@@ -1813,6 +1905,10 @@ _CONFLUENCE_WEIGHTS = {
     "fibonacci": 1.0,
     "trendline": 1.0,
     "bollinger": 1.0,
+    "rsi": 1.5,
+    "macd": 1.5,
+    "vwap": 1.0,
+    "vwap_bias": 1.0,
     "higher_timeframe": 2.0,
 }
 
@@ -1876,6 +1972,47 @@ def _confluence(ctx: Context, i: int, side: str, pattern_kind: str) -> tuple:
     if band is not None and _near(price, band, tol_pct=0.4):
         hits.append("bollinger")
         reasons.append("at the Bollinger band")
+
+    # RSI(14) — oversold/overbought or momentum side of 50
+    rsi_v = ctx.rsi[i] if i < len(ctx.rsi) else None
+    rsi_prev = ctx.rsi[i - 1] if i > 0 and i - 1 < len(ctx.rsi) else None
+    if rsi_v is not None:
+        if side == "BUY" and rsi_v <= 40:
+            hits.append("rsi")
+            reasons.append(f"RSI({rsi_v:.0f}) oversold / bounce zone")
+        elif side == "SELL" and rsi_v >= 60:
+            hits.append("rsi")
+            reasons.append(f"RSI({rsi_v:.0f}) overbought / fade zone")
+        elif side == "BUY" and rsi_v >= 50 and rsi_prev is not None and rsi_v > rsi_prev:
+            hits.append("rsi")
+            reasons.append(f"RSI({rsi_v:.0f}) rising above 50 (bullish momentum)")
+        elif side == "SELL" and rsi_v <= 50 and rsi_prev is not None and rsi_v < rsi_prev:
+            hits.append("rsi")
+            reasons.append(f"RSI({rsi_v:.0f}) falling below 50 (bearish momentum)")
+
+    # MACD(12/26/9) — line vs signal alignment
+    ml = ctx.macd_line[i] if i < len(ctx.macd_line) else None
+    ms_line = ctx.macd_signal[i] if i < len(ctx.macd_signal) else None
+    if ml is not None and ms_line is not None:
+        if side == "BUY" and ml > ms_line:
+            hits.append("macd")
+            reasons.append("MACD bullish (line above signal)")
+        elif side == "SELL" and ml < ms_line:
+            hits.append("macd")
+            reasons.append("MACD bearish (line below signal)")
+
+    # VWAP — touch as dynamic mean + directional bias
+    vw = ctx.vwap[i] if i < len(ctx.vwap) else None
+    if vw is not None:
+        if _near(price, vw, tol_pct=0.35):
+            hits.append("vwap")
+            reasons.append("at VWAP (session mean)")
+        if side == "BUY" and price >= vw:
+            hits.append("vwap_bias")
+            reasons.append("price above VWAP (bullish bias)")
+        elif side == "SELL" and price <= vw:
+            hits.append("vwap_bias")
+            reasons.append("price below VWAP (bearish bias)")
 
     # higher timeframe alignment
     if ctx.higher_tf_trend:

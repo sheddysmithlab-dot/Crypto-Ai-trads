@@ -214,9 +214,13 @@ export default function App() {
 
   const chartContainerRef = useRef(null);
   const volumeContainerRef = useRef(null);
+  const rsiContainerRef = useRef(null);
+  const macdContainerRef = useRef(null);
   const { timeframe, switchTimeframe, focusTradeCandle, readouts, chartSourceMode, chartHistorySource, chartLiveSource } = useTradingChart({
     chartContainerRef,
     volumeContainerRef,
+    rsiContainerRef,
+    macdContainerRef,
     pairLabel: pairSelector.activePairLabel,
     pairPrice: pairSelector.activePair.price,
     externalTradingMode: effectiveTradingMode,
@@ -864,6 +868,8 @@ export default function App() {
           pairSelector={pairSelector}
           chartContainerRef={chartContainerRef}
           volumeContainerRef={volumeContainerRef}
+          rsiContainerRef={rsiContainerRef}
+          macdContainerRef={macdContainerRef}
           timeframe={timeframe}
           switchTimeframe={switchTimeframe}
           readouts={readouts}
