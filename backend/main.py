@@ -909,10 +909,9 @@ MAX_CONCURRENT_TRADES_DEFAULT = int(os.environ.get("MAX_CONCURRENT_TRADES", "10"
 MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", "3"))
 AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path lock/trail profit + protective SL (same engine)
 INVERT_AUTO_TRADE_FIRE = False
-# Profit book (gross %, LONG/SHORT symmetric) — default (5m+):
+# Profit book (gross %, LONG/SHORT symmetric) — all TFs incl. 1m:
 #   Arm @ +0.65%; lock = peak gross (continuous); trail 0.10% → floor peak−0.10
 #   (e.g. peak +0.85% → exit floor +0.75%; peak +0.73% → floor +0.63%).
-# 1m: hard TP @ +0.50% (no trail) — see PROFIT_HARD_PCT_1M below.
 PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.65"))
 PROFIT_LOCK_STEP_PCT = float(os.environ.get("PROFIT_LOCK_STEP_PCT", "0.20"))  # unused — continuous trail
 PROFIT_TRAIL_FIRST_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "0.10"))
@@ -922,22 +921,21 @@ PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0
 FLIP_EXIT_MIN_GROSS_PCT = float(os.environ.get("FLIP_EXIT_MIN_GROSS_PCT", "0.25"))
 # Do not wipe a brand-new local open just because Bybit position API lags a few seconds.
 RECONCILE_GRACE_SECONDS = float(os.environ.get("RECONCILE_GRACE_SECONDS", "30"))
-# Protective stop-loss (gross %, LONG/SHORT symmetric) — default (5m+):
+# Protective stop-loss (gross %, LONG/SHORT symmetric) — all TFs incl. 1m:
 #   −0.60% → soft LOSS LOCK arms;
 #   −0.60…−0.80% zone: 0.20% upward trail (sell line = best_recovery + 0.20);
 #   −0.80% → hard exit (LOSS_BAND_EXIT);
 #   recover to −0.20% or better → UNLOCK (no sell) → profit book @ +0.65%.
-# 1m-only: fixed hard exits (no trail / unlock) — SL −0.55% · TP +0.50%.
 LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.60"))  # soft lock arm
 LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0.20"))
 LOSS_RECOVERY_RETRACE_CHOPPY_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_CHOPPY_PCT", "0.20"))
 LOSS_LOCK_CLEAR_PCT = float(os.environ.get("LOSS_LOCK_CLEAR_PCT", "0.20"))  # unlock → profit book
 LOSS_BAND_PCT = float(os.environ.get("LOSS_BAND_PCT", "0.80"))  # hard floor / instant exit
-# 1m-only fixed exits (no soft lock / trail / unlock)
-LOSS_PROTECT_PCT_1M = float(os.environ.get("LOSS_PROTECT_PCT_1M", "0.55"))  # hard SL
-LOSS_BAND_PCT_1M = float(os.environ.get("LOSS_BAND_PCT_1M", "0.55"))  # same = instant hard
-LOSS_LOCK_CLEAR_PCT_1M = float(os.environ.get("LOSS_LOCK_CLEAR_PCT_1M", "0.20"))  # unused on 1m hard
-PROFIT_HARD_PCT_1M = float(os.environ.get("PROFIT_HARD_PCT_1M", "0.50"))  # hard TP, no trail
+# Legacy 1m aliases (now same trail policy as other TFs — kept for env compatibility).
+LOSS_PROTECT_PCT_1M = float(os.environ.get("LOSS_PROTECT_PCT_1M", str(LOSS_PROTECT_PCT)))
+LOSS_BAND_PCT_1M = float(os.environ.get("LOSS_BAND_PCT_1M", str(LOSS_BAND_PCT)))
+LOSS_LOCK_CLEAR_PCT_1M = float(os.environ.get("LOSS_LOCK_CLEAR_PCT_1M", str(LOSS_LOCK_CLEAR_PCT)))
+PROFIT_HARD_PCT_1M = float(os.environ.get("PROFIT_HARD_PCT_1M", str(PROFIT_LOCK_PCT)))  # alias → trail arm
 PROFIT_LOCK_PCT_1M = float(os.environ.get("PROFIT_LOCK_PCT_1M", str(PROFIT_HARD_PCT_1M)))  # alias
 
 
@@ -993,11 +991,11 @@ class AITradingAgent:
     # Strict Exit — raised profit book + dynamic upside ratchet + tight max loss.
     STRICT_EXIT_HARD_TARGET_PCT = float(os.environ.get("STRICT_EXIT_HARD_TARGET", "1.8"))
     # Fee-aware floor: 0.50% gross (raised so winners clear round-trip fees).
-    STRICT_EXIT_MIN_LOCK_PCT = float(os.environ.get("STRICT_EXIT_MIN_LOCK", "0.50"))
+    STRICT_EXIT_MIN_LOCK_PCT = float(os.environ.get("STRICT_EXIT_MIN_LOCK", "0.65"))
     STRICT_EXIT_FLUCTUATION_X_PCT = float(os.environ.get("STRICT_EXIT_FLUCTUATION_X", "0.10"))
     STRICT_EXIT_TRAIL_MULTIPLIER = float(os.environ.get("STRICT_EXIT_TRAIL_MULT", "1.5"))
     # Absolute max loss (gross %) — never let a trade bleed past this, any TF.
-    STRICT_EXIT_MAX_LOSS_PCT = float(os.environ.get("STRICT_EXIT_MAX_LOSS", "0.55"))
+    STRICT_EXIT_MAX_LOSS_PCT = float(os.environ.get("STRICT_EXIT_MAX_LOSS", "0.80"))
     # Upside "strong move" velocity: peak jump within this window raises profit book.
     UPSIDE_VELOCITY_WINDOW_SEC = float(os.environ.get("UPSIDE_VELOCITY_WINDOW_SEC", "8"))
     UPSIDE_VELOCITY_JUMP_PCT = float(os.environ.get("UPSIDE_VELOCITY_JUMP_PCT", "0.20"))
@@ -1007,17 +1005,17 @@ class AITradingAgent:
     STRUCTURE_SL_MIN_DISTANCE_PCT = float(os.environ.get("STRUCTURE_SL_MIN_DISTANCE_PCT", "0.15"))
     # Ignore structure SL for this many seconds after open (first tick false fire).
     STRUCTURE_SL_GRACE_SEC = float(os.environ.get("STRUCTURE_SL_GRACE_SEC", "2.0"))
-    # TF hard stop (gross % loss) — tightened after trail losses to −1%+.
+    # TF hard stop (gross % loss) — align with path hard band −0.80%.
     HARD_STOP_PCT_BY_TF: dict[str, float] = {
-        "30s": float(os.environ.get("HARD_STOP_30S", "0.30")),
-        "1m": float(os.environ.get("HARD_STOP_1M", "0.55")),  # align with 1m hard SL
-        "3m": float(os.environ.get("HARD_STOP_3M", "0.55")),
-        "5m": float(os.environ.get("HARD_STOP_5M", "0.60")),  # scalp hard SL align
-        "10m": float(os.environ.get("HARD_STOP_10M", "0.45")),
-        "15m": float(os.environ.get("HARD_STOP_15M", "0.50")),
-        "30m": float(os.environ.get("HARD_STOP_30M", "0.55")),
-        "1h": float(os.environ.get("HARD_STOP_1H", "0.60")),
-        "1D": float(os.environ.get("HARD_STOP_1D", "0.70")),
+        "30s": float(os.environ.get("HARD_STOP_30S", "0.80")),
+        "1m": float(os.environ.get("HARD_STOP_1M", "0.80")),
+        "3m": float(os.environ.get("HARD_STOP_3M", "0.80")),
+        "5m": float(os.environ.get("HARD_STOP_5M", "0.80")),
+        "10m": float(os.environ.get("HARD_STOP_10M", "0.80")),
+        "15m": float(os.environ.get("HARD_STOP_15M", "0.80")),
+        "30m": float(os.environ.get("HARD_STOP_30M", "0.80")),
+        "1h": float(os.environ.get("HARD_STOP_1H", "0.80")),
+        "1D": float(os.environ.get("HARD_STOP_1D", "0.80")),
     }
 
     def __init__(self):
@@ -2093,7 +2091,7 @@ class AITradingAgent:
             "exit_mode": "path_sl" if source == "auto" else "manual",
             "entry_pattern": ENTRY_PATTERN_NAME,
             # Path SL + profit lock/trail state (auto):
-            #   Default SL: −0.60% soft / −0.80% hard; 1m hard: SL −0.55% / TP +0.50%
+            #   Path SL: −0.60% soft / −0.80% hard + trail; profit arm +0.65% peak-trail (all TFs incl. 1m)
             "path_last_gross_pct": 0.0,
             "path_adverse_streak": 0,
             "path_favorable_streak": 0,
@@ -2379,17 +2377,8 @@ class AITradingAgent:
         """Return (trail_pct, arm_pct, band_pct, is_small_coin, tier_label).
 
         Micro-cap pairs: soft lock @ −0.25%, hard exit @ −0.35%.
-        1m: hard SL @ −0.20% (no trail).
-        Others: soft lock @ −0.50%, trail, hard exit @ −0.70%.
+        All other TFs incl. 1m: soft −0.60%, trail +0.20%, hard −0.80%.
         """
-        if self._is_1m_trade(trade):
-            return (
-                0.0,  # no loss trail on 1m
-                LOSS_PROTECT_PCT_1M,
-                LOSS_BAND_PCT_1M,
-                False,
-                "1m",
-            )
         if self._is_micro_cap_pair(trade):
             return (
                 LOSS_RECOVERY_RETRACE_PCT,
@@ -2398,18 +2387,15 @@ class AITradingAgent:
                 True,
                 "micro_cap",
             )
-        return LOSS_RECOVERY_RETRACE_PCT, LOSS_PROTECT_PCT, LOSS_BAND_PCT, False, "normal"
+        tier = "1m" if self._is_1m_trade(trade) else "normal"
+        return LOSS_RECOVERY_RETRACE_PCT, LOSS_PROTECT_PCT, LOSS_BAND_PCT, False, tier
 
     def _loss_lock_clear_pct_for_trade(self, trade: dict) -> float:
-        """Unlock threshold (recover to −X% or better). Unused on 1m hard exits."""
-        if self._is_1m_trade(trade):
-            return float(LOSS_LOCK_CLEAR_PCT_1M)
+        """Unlock threshold (recover to −X% or better)."""
         return float(LOSS_LOCK_CLEAR_PCT)
 
     def _loss_retrace_for_trade(self, trade: dict) -> float:
         """Upward recovery trail in loss zone (sell line = best_recovery + this)."""
-        if self._is_1m_trade(trade):
-            return 0.0
         return float(LOSS_RECOVERY_RETRACE_PCT)
 
     def _loss_trail_sell_line(self, trade: dict, *, arm_pct: float | None = None) -> float:
@@ -2434,43 +2420,8 @@ class AITradingAgent:
 
         trade["path_last_gross_pct"] = gross_pct
         lock_start = self._profit_lock_start_pct(trade)
-        is_1m_hard = self._is_1m_trade(trade)
 
-        # 1m: fixed hard SL/TP only — no soft lock, unlock, or trail UI.
-        if is_1m_hard:
-            trade["path_sl_pct"] = band_pct
-            trade["loss_protect_pct"] = arm_pct
-            trade["path_tp_pct"] = lock_start
-            trade["profit_lock"] = False
-            trade["profit_lock_level"] = None
-            trade["is_lock_active"] = False
-            trade["loss_protect"] = False
-            trade["loss_deep_hold"] = False
-            if gross_pct >= lock_start - 1e-9:
-                trade["is_lock_active"] = True
-                trade["lock_level_pct"] = lock_start
-                trade["sell_trigger_pct"] = lock_start
-            elif gross_pct <= -arm_pct + 1e-9:
-                trade["is_stop_active"] = True
-                trade["stop_level_pct"] = -arm_pct
-                trade["sell_trigger_pct"] = -arm_pct
-            else:
-                trade["is_stop_active"] = False
-                trade["stop_level_pct"] = None
-                trade["sell_trigger_pct"] = None
-            entry = float(trade.get("entry") or 0)
-            side = trade.get("side")
-            if entry > 0 and side in ("LONG", "SHORT"):
-                sl, tp = self._fixed_exit_prices(
-                    entry, side, loss_pct=arm_pct, profit_pct=lock_start
-                )
-                if sl is not None:
-                    trade["sl_price"] = sl
-                if tp is not None:
-                    trade["tp_price"] = tp
-            return
-
-        # Soft lock @ arm%; trail in arm…band; hard floor @ band%.
+        # Soft lock @ arm%; trail in arm…band; hard floor @ band% (all TFs incl. 1m).
         if gross_pct <= -arm_pct:
             trade["loss_protect"] = True
         if gross_pct <= -band_pct:
@@ -2544,9 +2495,7 @@ class AITradingAgent:
                 trade["tp_price"] = tp
 
     def _profit_lock_start_pct(self, trade: dict | None = None) -> float:
-        """Profit arm: 1m hard +0.50%; other TFs +0.65% trail book."""
-        if self._is_1m_trade(trade):
-            return float(PROFIT_HARD_PCT_1M)
+        """Profit arm: +0.65% trail book on all TFs (incl. 1m)."""
         return float(PROFIT_LOCK_PCT)
 
     def _is_scalp_trade(self, trade: dict | None = None) -> bool:
@@ -2561,9 +2510,7 @@ class AITradingAgent:
         return tf == "1m"
 
     def _profit_giveback_for_lock(self, lock_lvl: float, trade: dict | None = None) -> float:
-        """Trail giveback from peak lock. 1m: 0 (hard exit at arm). Else 0.10%."""
-        if self._is_1m_trade(trade):
-            return 0.0
+        """Trail giveback from peak lock — 0.10% on all TFs."""
         return float(PROFIT_TRAIL_GIVEBACK_PCT)
 
     def _ratchet_profit_lock_level(self, trade: dict, gross_pct: float) -> float:
@@ -2641,8 +2588,7 @@ class AITradingAgent:
     def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
         """Single path-exit engine: profit locks + two-tier loss stop.
 
-        1m: hard TP @ +0.50% and hard SL @ −0.55% (no trail / unlock).
-        Other TFs: profit trail book + soft lock / recovery trail / hard band.
+        All TFs (incl. 1m): profit trail book + soft lock / recovery trail / hard band.
         LONG/SHORT symmetric on gross %. Fees stay out of the trigger.
         """
         trade.pop("_exit_fill_mark", None)
@@ -2677,23 +2623,7 @@ class AITradingAgent:
             elif target_gross < 0 and gross_pct < target_gross - 1e-9:
                 trade["_exit_fill_mark"] = self._mark_from_gross_pct(entry, side, target_gross)
 
-        # 1m hard fixed exits — no profit trail, no loss trail/unlock.
-        if self._is_1m_trade(trade):
-            if gross_pct >= lock_start - 1e-9:
-                _arm_paper_fill(lock_start)
-                return (
-                    f"PROFIT_HARD_EXIT | {side} hard_tp=+{lock_start:g}% now={gross_pct:.3f}% "
-                    f"(no trail) tier={tier} mark={mark:.6f} entry={entry:.6f}"
-                )
-            if gross_pct <= -arm_pct - 1e-9:
-                _arm_paper_fill(-arm_pct)
-                return (
-                    f"LOSS_HARD_EXIT | {side} hard_sl=−{arm_pct:g}% now={gross_pct:.3f}% "
-                    f"(no trail) tier={tier} mark={mark:.6f} entry={entry:.6f}"
-                )
-            return None
-
-        # 1) Profit step-locks (5m+)
+        # 1) Profit step-locks (all TFs incl. 1m)
         if gross_pct >= lock_start:
             self._ratchet_profit_lock_level(trade, gross_pct)
 
@@ -2709,7 +2639,7 @@ class AITradingAgent:
                     f"PROFIT_LOCK_EXIT | {side} peak_lock={lock_lvl:.3f}% now={gross_pct:.3f}% "
                     f"giveback={lock_giveback:.3f}%≥{giveback_need:g}% "
                     f"(trail {giveback_need:g}% → floor +{floor_pct:.3f}%) "
-                    f"mark={mark:.6f} entry={entry:.6f}"
+                    f"tier={tier} mark={mark:.6f} entry={entry:.6f}"
                 )
             return None
 
@@ -4149,10 +4079,9 @@ def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
         "CANDLESTICK BRAIN + path exit | "
-        f"1m hard TP +{PROFIT_HARD_PCT_1M:g}% / SL −{LOSS_PROTECT_PCT_1M:g}% (no trail); "
-        f"else profit arm +{PROFIT_LOCK_PCT:g}% peak-trail −{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
-        f"(e.g. +0.73→floor +0.63); "
-        f"else LOCK −{LOSS_PROTECT_PCT:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
+        f"profit arm +{PROFIT_LOCK_PCT:g}% peak-trail −{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
+        f"(e.g. +0.85→floor +0.75); "
+        f"LOCK −{LOSS_PROTECT_PCT:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
         f"in −{LOSS_PROTECT_PCT:g}…−{LOSS_BAND_PCT:g}% (hard @ −{LOSS_BAND_PCT:g}%); "
         f"unlock @−{LOSS_LOCK_CLEAR_PCT:g}% → profit +{PROFIT_LOCK_PCT:g}% | "
         "manual BUY/SELL + emergency sell-all"
@@ -4584,18 +4513,10 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
         brain_sl = detect.get("sl")
         brain_tp = detect.get("tp")
-        tf_key = str(pending.get("timeframe_key") or timeframe_key or "").strip().lower()
-        if tf_key == "1m":
-            arm_pct = LOSS_PROTECT_PCT_1M
-            band_pct = LOSS_BAND_PCT_1M
-            lock_pct = PROFIT_HARD_PCT_1M
-            hard_1m = True
-        else:
-            arm_pct = LOSS_PROTECT_PCT
-            band_pct = LOSS_BAND_PCT
-            clear_pct = LOSS_LOCK_CLEAR_PCT
-            lock_pct = PROFIT_LOCK_PCT
-            hard_1m = False
+        arm_pct = LOSS_PROTECT_PCT
+        band_pct = LOSS_BAND_PCT
+        clear_pct = LOSS_LOCK_CLEAR_PCT
+        lock_pct = PROFIT_LOCK_PCT
         if (
             brain_sl
             and brain_tp
@@ -4610,20 +4531,14 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             sl_price, tp_price = agent._fixed_exit_prices(
                 float(mark_px), side, loss_pct=arm_pct, profit_pct=lock_pct
             )
-            if hard_1m:
-                exit_label = (
-                    f"1m hard SL −{arm_pct:g}% / TP +{lock_pct:g}% (no trail) "
-                    f"SL={sl_price} TP={tp_price}"
-                )
-            else:
-                exit_label = (
-                    f"loss lock −{arm_pct:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
-                    f"in −{arm_pct:g}…−{band_pct:g}% (hard @ −{band_pct:g}%); "
-                    f"unlock @−{clear_pct:g}% → profit +{lock_pct:g}% | "
-                    f"profit peak-trail arm +{lock_pct:g}%/−{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
-                    f"(floor = peak − {PROFIT_TRAIL_GIVEBACK_PCT:g}%) "
-                    f"SL={sl_price} TP={tp_price}"
-                )
+            exit_label = (
+                f"loss lock −{arm_pct:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
+                f"in −{arm_pct:g}…−{band_pct:g}% (hard @ −{band_pct:g}%); "
+                f"unlock @−{clear_pct:g}% → profit +{lock_pct:g}% | "
+                f"profit peak-trail arm +{lock_pct:g}%/−{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
+                f"(floor = peak − {PROFIT_TRAIL_GIVEBACK_PCT:g}%) "
+                f"SL={sl_price} TP={tp_price}"
+            )
             if brain_sl and brain_tp and float(brain_sl) > 0 and float(brain_tp) > 0:
                 exit_label = (
                     f"brain SL/TP invalid for {side} (sl={brain_sl}, tp={brain_tp}) — {exit_label}"
@@ -5475,9 +5390,8 @@ async def auto_exit_watchdog():
     """Re-check path-SL / path-TP even if a ticker tick was skipped or failed."""
     print(
         f"[AUTO-EXIT] Watchdog online "
-        f"(1m hard TP +{PROFIT_HARD_PCT_1M:g}% / SL −{LOSS_PROTECT_PCT_1M:g}% no trail | "
-        f"else profit arm +{PROFIT_LOCK_PCT:g}% peak-trail −{PROFIT_TRAIL_GIVEBACK_PCT:g}% | "
-        f"else loss lock −{LOSS_PROTECT_PCT:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
+        f"(profit arm +{PROFIT_LOCK_PCT:g}% peak-trail −{PROFIT_TRAIL_GIVEBACK_PCT:g}% | "
+        f"loss lock −{LOSS_PROTECT_PCT:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
         f"in −{LOSS_PROTECT_PCT:g}…−{LOSS_BAND_PCT:g}% (hard @ −{LOSS_BAND_PCT:g}%); "
         f"unlock @−{LOSS_LOCK_CLEAR_PCT:g}%)."
     )
