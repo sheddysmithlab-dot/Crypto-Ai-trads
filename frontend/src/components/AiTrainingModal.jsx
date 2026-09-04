@@ -173,6 +173,9 @@ export default function AiTrainingModal({ open, onClose }) {
         <div className="px-5 py-2.5 flex flex-wrap gap-3 border-b border-gray-800/80 text-[11px]">
           <span className="text-gray-500">
             Events <b className="text-gray-200">{summary.events ?? 0}</b>
+            {summary.pending > 0 ? (
+              <span className="text-violet-400 ml-1">(pending {summary.pending})</span>
+            ) : null}
           </span>
           <span className="text-emerald-500/90">
             Fire <b>{summary.fire ?? 0}</b>
