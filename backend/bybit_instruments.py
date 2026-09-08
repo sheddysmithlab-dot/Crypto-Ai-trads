@@ -126,6 +126,13 @@ def get_instrument(bybit_symbol: str | None) -> dict | None:
     return _cache["by_symbol"].get(str(bybit_symbol).upper())
 
 
+def tick_size(bybit_symbol: str | None) -> float | None:
+    row = get_instrument(bybit_symbol)
+    if not row:
+        return None
+    return _safe_float(row.get("tickSize"))
+
+
 def qty_step(bybit_symbol: str | None) -> float | None:
     row = get_instrument(bybit_symbol)
     if not row:

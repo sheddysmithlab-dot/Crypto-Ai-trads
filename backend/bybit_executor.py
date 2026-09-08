@@ -42,6 +42,31 @@ def _format_bybit_api_error(exc: Exception, *, action: str, symbol: str, qty, pa
     )
 
 
+def _price_str(price) -> str:
+    """Format limit price for Bybit without scientific notation."""
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return str(price)
+    if not math.isfinite(p) or p <= 0:
+        return str(price)
+    text = f"{p:.10f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _is_post_only_reject(err: str | None) -> bool:
+    msg = (err or "").lower()
+    return (
+        "postonly" in msg
+        or "post only" in msg
+        or "post-only" in msg
+        or "110079" in msg
+        or "would immediately" in msg
+        or "immediately match" in msg
+        or "would take" in msg
+    )
+
+
 def _qty_str(qty) -> str:
     """Format qty for Bybit without scientific notation / float junk."""
     try:
@@ -190,6 +215,121 @@ class BybitAgent:
             self.last_error = err
             print(f"❌ ORDER FAILED: {err}")
             return False, err
+
+    def place_post_only_limit(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        qty,
+        price: float,
+        pattern: str = "",
+    ) -> tuple[bool, str | None, str | None]:
+        """Post-only maker limit. Returns (ok, error, order_id). Does not chase."""
+        action = "Buy" if (side or "").upper() in ("LONG", "BUY") else "Sell"
+        qty_s = _qty_str(qty)
+        price_s = _price_str(price)
+        idx_order = (0, 1 if action == "Buy" else 2)
+        last_err = None
+        seen = set()
+        for idx in idx_order:
+            if idx in seen:
+                continue
+            seen.add(idx)
+            try:
+                resp = self.session.place_order(
+                    category="linear",
+                    symbol=symbol,
+                    side=action,
+                    orderType="Limit",
+                    qty=qty_s,
+                    price=price_s,
+                    timeInForce="PostOnly",
+                    reduceOnly=False,
+                    positionIdx=int(idx),
+                )
+            except Exception as exc:
+                err = _format_bybit_api_error(
+                    exc, action=f"POST-ONLY {action}", symbol=symbol, qty=qty_s, pattern=pattern
+                )
+                last_err = err
+                msg_l = err.lower()
+                if "position idx" in msg_l or "110025" in err or "10001" in err:
+                    continue
+                self.last_error = err
+                print(f"❌ POST-ONLY FAILED: {err}")
+                return False, err, None
+            ok, api_err = self._check_place_order_response(
+                resp, action=f"POST-ONLY {action}", symbol=symbol, qty=qty_s, pattern=pattern
+            )
+            if ok:
+                order_id = None
+                if isinstance(resp, dict):
+                    order_id = ((resp.get("result") or {}).get("orderId")) or None
+                self.last_error = None
+                print(
+                    f"✅ Bybit REST -> POST-ONLY LIMIT {action} {symbol} "
+                    f"@ {price_s} qty={qty_s} orderId={order_id}"
+                )
+                return True, None, str(order_id) if order_id else None
+            last_err = api_err
+            msg_l = (api_err or "").lower()
+            if "position idx" in msg_l or "110025" in (api_err or "") or "10001" in (api_err or ""):
+                continue
+            self.last_error = api_err
+            print(f"❌ POST-ONLY FAILED: {api_err}")
+            return False, api_err, None
+        self.last_error = last_err
+        print(f"❌ POST-ONLY FAILED: {last_err}")
+        return False, last_err, None
+
+    def get_order(self, symbol: str, order_id: str) -> tuple[str, dict | None]:
+        """Return (status, row). status is ok/error. Checks open then history."""
+        if not order_id:
+            return "error", None
+        for fetch_name in ("get_open_orders", "get_order_history"):
+            fetch = getattr(self.session, fetch_name, None)
+            if fetch is None:
+                continue
+            try:
+                resp = fetch(category="linear", symbol=symbol, orderId=str(order_id))
+            except Exception as exc:
+                print(f"[BYBIT] {fetch_name} failed {symbol} {order_id}: {exc}")
+                continue
+            if not isinstance(resp, dict) or resp.get("retCode", 0) != 0:
+                continue
+            rows = (resp.get("result") or {}).get("list") or []
+            if rows:
+                return "ok", rows[0]
+        return "ok", None
+
+    def cancel_order(self, symbol: str, order_id: str) -> tuple[bool, str | None]:
+        if not order_id:
+            return True, None
+        try:
+            resp = self.session.cancel_order(
+                category="linear",
+                symbol=symbol,
+                orderId=str(order_id),
+            )
+        except Exception as exc:
+            err = _format_bybit_api_error(
+                exc, action="CANCEL", symbol=symbol, qty="", pattern=order_id
+            )
+            if "order not exists" in err.lower() or "110001" in err:
+                return True, None
+            self.last_error = err
+            return False, err
+        ok, api_err = self._check_place_order_response(
+            resp, action="CANCEL", symbol=symbol, qty="", pattern=order_id
+        )
+        if ok:
+            print(f"✅ Bybit REST -> CANCEL {symbol} orderId={order_id}")
+            return True, None
+        if api_err and ("110001" in api_err or "not exist" in api_err.lower()):
+            return True, None
+        self.last_error = api_err
+        return False, api_err
 
     def _fetch_open_position(self, symbol: str, side: str) -> tuple[str, dict | None]:
         """Return (status, row). status is 'ok' or 'error'; row is None when flat."""

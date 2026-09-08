@@ -311,16 +311,16 @@ def _seed_family_rules(cur) -> None:
 # Default live-engine formulas (code/env fallbacks → MySQL source of truth).
 # Tuple: (group, key, vtype, value_num, value_text, note) — value_json via text for json type.
 _ENGINE_FORMULA_SEEDS: list[tuple[str, str, str, float | None, str | None, str]] = [
-    ("exit", "PROFIT_LOCK_PCT", "number", 0.85, None, "Profit book arm %"),
-    ("exit", "PROFIT_TRAIL_GIVEBACK_PCT", "number", 0.15, None, "Trail giveback %"),
-    ("exit", "PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "number", 0.15, None, "First trail giveback %"),
-    ("exit", "LOSS_PROTECT_PCT", "number", 0.75, None, "Soft loss lock arm %"),
-    ("exit", "LOSS_BAND_PCT", "number", 1.00, None, "Hard loss floor %"),
-    ("exit", "LOSS_RECOVERY_RETRACE_PCT", "number", 0.25, None, "Loss lock trail %"),
-    ("exit", "LOSS_LOCK_CLEAR_PCT", "number", 0.20, None, "Unlock to profit book %"),
-    ("exit", "LOSS_PROTECT_PCT_1M", "number", 0.75, None, "1m loss arm"),
-    ("exit", "LOSS_BAND_PCT_1M", "number", 1.00, None, "1m hard band"),
-    ("exit", "PROFIT_HARD_PCT_1M", "number", 0.85, None, "1m profit arm alias"),
+    ("exit", "PROFIT_LOCK_PCT", "number", 0.50, None, "Seed profit book arm % (AI may retune)"),
+    ("exit", "PROFIT_TRAIL_GIVEBACK_PCT", "number", 0.10, None, "Seed trail giveback % (AI may retune)"),
+    ("exit", "PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "number", 0.10, None, "Seed first trail giveback % (AI may retune)"),
+    ("exit", "LOSS_PROTECT_PCT", "number", 0.50, None, "Seed soft loss lock arm % (AI may retune)"),
+    ("exit", "LOSS_BAND_PCT", "number", 0.70, None, "Seed hard loss floor % (AI may retune)"),
+    ("exit", "LOSS_RECOVERY_RETRACE_PCT", "number", 0.10, None, "Seed loss lock trail % (AI may retune)"),
+    ("exit", "LOSS_LOCK_CLEAR_PCT", "number", 0.25, None, "Unlock to profit book %"),
+    ("exit", "LOSS_PROTECT_PCT_1M", "number", 0.50, None, "Seed 1m loss arm (AI may retune)"),
+    ("exit", "LOSS_BAND_PCT_1M", "number", 0.70, None, "Seed 1m hard band (AI may retune)"),
+    ("exit", "PROFIT_HARD_PCT_1M", "number", 0.50, None, "Seed 1m profit arm alias (AI may retune)"),
     ("exit", "FLIP_EXIT_MIN_GROSS_PCT", "number", 0.25, None, "Min gross to flip-exit"),
     ("exit", "MICRO_CAP_LOSS_ARM_PCT", "number", 0.25, None, "Micro-cap loss arm"),
     ("exit", "MICRO_CAP_LOSS_BAND_PCT", "number", 0.35, None, "Micro-cap loss band"),
@@ -373,9 +373,10 @@ _ENGINE_FORMULA_SEEDS: list[tuple[str, str, str, float | None, str | None, str]]
     ("of", "SCORE_FLOOR_EPS", "number", 0.05, None, "OF score floor epsilon"),
     ("of", "LOOKBACK", "number", 20.0, None, "OF lookback candles"),
     ("fire", "MIN_CONFIRM_BODY_PCT", "number", 0.03, None, "Min body % for color confirm"),
+    ("fire", "SCALP_CONFIRM_MIN_CONSECUTIVE", "number", 1.0, None, "Fire on 1st matching CLOSED candle"),
     ("fire", "ONE_M_CONFIRM_SKIP_TICKS", "number", 1.0, None, "1m skip N matching ticks"),
     ("fire", "ONE_M_MIN_BARS_BETWEEN_FIRES", "number", 3.0, None, "Min bars between scalp fires"),
-    ("fire", "ONE_M_CONFIRM_MAX_BARS", "number", 2.0, None, "Hard skip if no color confirm in N bars"),
+    ("fire", "ONE_M_CONFIRM_MAX_BARS", "number", 2.0, None, "Try 1st then 2nd CLOSED confirm; else skip"),
     ("fire", "SKIP_FIRST_DETECT", "bool", 1.0, None, "Skip first HTF detect after arm"),
     ("fire", "SKIP_FIRST_DETECT_SCALP", "bool", 0.0, None, "Skip first scalp detect"),
     ("engine", "ENGINE_BOOT_MAX_SEC", "number", 60.0, None, "Boot overlay max sec"),
@@ -387,11 +388,11 @@ _ENGINE_FORMULA_SEEDS: list[tuple[str, str, str, float | None, str | None, str]]
         None,
         json.dumps(
             {
-                "1m": {"win_rate": 30, "lose_rate": 70, "capital_pct": 1.5},
-                "5m": {"win_rate": 30, "lose_rate": 70, "capital_pct": 1.5},
-                "15m": {"win_rate": 60, "lose_rate": 40, "capital_pct": 10.0},
-                "1h": {"win_rate": 70, "lose_rate": 30, "capital_pct": 15.0},
-                "1D": {"win_rate": 80, "lose_rate": 20, "capital_pct": 20.0},
+                "1m": {"win_rate": 30, "lose_rate": 70, "capital_pct": 1.5, "profit": 0.50, "trail": 0.10, "soft": 0.50, "hard": 0.70},
+                "5m": {"win_rate": 40, "lose_rate": 60, "capital_pct": 3.0, "profit": 0.70, "trail": 0.15, "soft": 0.70, "hard": 1.00},
+                "15m": {"win_rate": 60, "lose_rate": 40, "capital_pct": 7.0, "profit": 1.00, "trail": 0.20, "soft": 1.00, "hard": 1.40},
+                "1h": {"win_rate": 70, "lose_rate": 30, "capital_pct": 12.0, "profit": 1.50, "trail": 0.25, "soft": 1.50, "hard": 2.00},
+                "1D": {"win_rate": 80, "lose_rate": 20, "capital_pct": 20.0, "profit": 2.50, "trail": 0.40, "soft": 2.50, "hard": 3.00},
                 "30s": {"win_rate": 25, "lose_rate": 75, "capital_pct": 2.0},
                 "3m": {"win_rate": 40, "lose_rate": 60, "capital_pct": 5.0},
                 "10m": {"win_rate": 55, "lose_rate": 45, "capital_pct": 8.0},
@@ -422,7 +423,12 @@ def _seed_engine_formulas(cur) -> None:
 
 
 def _tighten_trade_policy(cur) -> None:
-    """Enable candle-family trading: soft ON + candle-only path + seed floors."""
+    """Structural fire policy only — do NOT overwrite exit/score knobs Cursor AI owns.
+
+    User/chat sets seed defaults via INSERT IGNORE (_seed_engine_formulas) and
+    one-shot deploy. After that Cursor AI observes live trades and retunes
+    PROFIT_*/LOSS_*/THR_*/family min_* freely in MySQL.
+    """
     cur.execute(
         """UPDATE engine_formulas
            SET value_num = 1, note = 'Allow candle-only fire'
@@ -431,46 +437,19 @@ def _tighten_trade_policy(cur) -> None:
     )
     cur.execute(
         """UPDATE engine_formulas
-           SET value_num = 80, note = 'Trap floor 1m'
-           WHERE formula_key = 'THR_SCORE_TRAP_1M'
-             AND (value_num IS NULL OR value_num < 80)"""
-    )
-    cur.execute(
-        """UPDATE engine_formulas
            SET value_num = 2, note = 'Hard skip if no color confirm in N bars'
            WHERE formula_key = 'ONE_M_CONFIRM_MAX_BARS'
              AND (value_num IS NULL OR value_num <> 2)"""
     )
-    # Wider profit book + stop with trail room.
-    for key, val, note in (
-        ("PROFIT_LOCK_PCT", 0.85, "Profit book arm %"),
-        ("PROFIT_TRAIL_GIVEBACK_PCT", 0.15, "Trail giveback %"),
-        ("PROFIT_TRAIL_FIRST_GIVEBACK_PCT", 0.15, "First trail giveback %"),
-        ("LOSS_PROTECT_PCT", 0.75, "Soft loss lock arm %"),
-        ("LOSS_BAND_PCT", 1.00, "Hard loss floor %"),
-        ("LOSS_RECOVERY_RETRACE_PCT", 0.25, "Loss lock trail %"),
-        ("LOSS_PROTECT_PCT_1M", 0.75, "1m loss arm"),
-        ("LOSS_BAND_PCT_1M", 1.00, "1m hard band"),
-        ("PROFIT_HARD_PCT_1M", 0.85, "1m profit arm alias"),
-    ):
-        cur.execute(
-            """UPDATE engine_formulas
-               SET value_num = %s, note = %s
-               WHERE formula_key = %s""",
-            (val, note, key),
-        )
-    # Unlock candle soft for every unlocked candle-family row (incl. new seeds).
+    # Candle soft ON for unlocked families — never clamp min_of_score (AI owns floors).
     fam_list = ", ".join(f"'{f}'" for f, *_ in _SEED_FAMILIES)
     cur.execute(
         f"""UPDATE family_engine_rules
             SET candle_soft = 1,
-                min_of_score = CASE
-                  WHEN min_of_score IS NULL OR min_of_score > 55 THEN 50
-                  ELSE min_of_score
-                END,
                 lesson_text = COALESCE(NULLIF(TRIM(lesson_text), ''), 'Candle family — tradable with soft OF')
             WHERE locked = 0
-              AND family IN ({fam_list})"""
+              AND family IN ({fam_list})
+              AND (candle_soft IS NULL OR candle_soft = 0)"""
     )
 
 

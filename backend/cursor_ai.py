@@ -26,14 +26,14 @@ def cursor_api_key() -> str:
     return (os.environ.get("CURSOR_API_KEY") or os.environ.get("AI_API_KEY") or "").strip()
 
 
+# Cursor AI self-improve / confirm bridge is fully disabled.
+# Manual 1m scale + exit policy stay locked in engine_config.
 def is_cursor_configured() -> bool:
-    return bool(cursor_api_key())
+    return False
 
 
 def is_unlimited() -> bool:
-    """Full agent power (tools + edits + external research). Default ON."""
-    raw = (os.environ.get("CURSOR_AI_UNLIMITED") or "1").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return False
 
 
 def repo_root() -> str:
@@ -282,6 +282,16 @@ Stats / context:
 {stats_blurb}
 {trade_bits}
 
+AUTHORITY (critical):
+- Human chat sets INITIAL SEEDS only (defaults in engine_formulas / family_engine_rules).
+- YOU own ongoing retunes from live observation: scores / floors (THR_*, min_of_score,
+  min_brain_score), profit book (PROFIT_LOCK_PCT, PROFIT_TRAIL_*), stop/exit
+  (LOSS_PROTECT_PCT, LOSS_BAND_PCT, LOSS_RECOVERY_RETRACE_PCT, family sl_pct/tp_pct),
+  and family seed lessons / skip-fire rules.
+- Do not wait for another human message to change these after seed — observe trades,
+  training events, and closed_reason, then write durable MySQL + code changes yourself.
+- Boot/init will NOT force-overwrite your exit/score knobs (INSERT IGNORE seeds only).
+
 YOU HAVE FULL POWER:
 1. Read and edit project files under this workspace (especially backend/: trade_db.py,
    family_rules.py, family_analyzer.py, engine_config.py, trap_orderflow_engine.py,
@@ -301,7 +311,9 @@ CONSTRAINTS (only these):
 - Do not leak or print full API keys / passwords into new files committed as plaintext
   beyond existing .env patterns.
 - Do not push to git remotes.
-- Prefer durable improvements (code + DB rule fields) over one-off chat advice.
+- Confirm policy is CLOSED-candle only: need SCALP_CONFIRM_MIN_CONSECUTIVE matching closes
+  (default 1) within ONE_M_CONFIRM_MAX_BARS (default 2). Do not set consecutive below 1.
+  Do not switch confirm back to forming/start ticks.
 
 PROCESS:
 1. Diagnose where loss / delay / wrong fires happen for this family/TF.

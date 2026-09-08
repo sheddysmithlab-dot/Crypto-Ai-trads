@@ -217,6 +217,7 @@ def apply_to_runtime() -> dict[str, Any]:
             "MAX_CONCURRENT_TRADES_DEFAULT",
             "MAX_SAME_SIDE_AUTO_PER_PAIR",
             "MIN_CONFIRM_BODY_PCT",
+            "SCALP_CONFIRM_MIN_CONSECUTIVE",
             "ONE_M_CONFIRM_SKIP_TICKS",
             "ONE_M_MIN_BARS_BETWEEN_FIRES",
             "ONE_M_CONFIRM_MAX_BARS",
@@ -230,6 +231,19 @@ def apply_to_runtime() -> dict[str, Any]:
             if name == "MAX_CONCURRENT_TRADES_DEFAULT":
                 key = "MAX_CONCURRENT_TRADES"
             _set(m, name, key)
+
+        # Confirm window stays locked. Exit % come from timeframe_profiles ladder
+        # (1m < 5m < 15m < 1h < 1D) — do not flatten every TF to 1m numbers.
+        manual = {
+            "SCALP_CONFIRM_MIN_CONSECUTIVE": 1,
+            "ONE_M_CONFIRM_START_BAR": 1,
+            "ONE_M_CONFIRM_MAX_BARS": 1,
+        }
+        for name, val in manual.items():
+            if hasattr(m, name):
+                setattr(m, name, type(getattr(m, name))(val) if not isinstance(val, int) else int(val))
+                applied[f"main.{name}"] = val
+        print("[ENGINE-DB] confirm window locked; exit % from TF ladder (maker entry all TFs)")
 
         if hasattr(m, "PROFIT_LOCK_PCT") and hasattr(m, "PROFIT_TRAIL_GIVEBACK_PCT"):
             m.PATH_TP_WIDE_PCT = float(m.PROFIT_LOCK_PCT) + float(m.PROFIT_TRAIL_GIVEBACK_PCT)
@@ -276,6 +290,10 @@ def apply_to_runtime() -> dict[str, Any]:
                             updated[tf_key] = float(_CACHE[formula_key])
                         except (TypeError, ValueError):
                             pass
+                from timeframe_profiles import get_exit_ladder
+
+                for tf_key in list(updated.keys()):
+                    updated[tf_key] = float(get_exit_ladder(tf_key)["hard"])
                 agent_cls.HARD_STOP_PCT_BY_TF = updated
                 applied["main.AITradingAgent.HARD_STOP_PCT_BY_TF"] = updated
     except Exception as exc:
@@ -284,18 +302,15 @@ def apply_to_runtime() -> dict[str, Any]:
     try:
         import timeframe_profiles as tfp
 
-        profiles = get("TIMEFRAME_PROFILES")
-        if isinstance(profiles, dict) and profiles:
-            merged = dict(getattr(tfp, "TIMEFRAME_PROFILES", {}) or {})
-            for k, v in profiles.items():
-                if isinstance(v, dict):
-                    merged[str(k)] = {
-                        "win_rate": int(v.get("win_rate", 50)),
-                        "lose_rate": int(v.get("lose_rate", 50)),
-                        "capital_pct": float(v.get("capital_pct", 7.0)),
-                    }
-            tfp.TIMEFRAME_PROFILES = merged
-            applied["timeframe_profiles.TIMEFRAME_PROFILES"] = list(merged.keys())
+        # DB must not flatten the exit/size ladder. Code profile is the lock.
+        if hasattr(tfp, "lock_profiles"):
+            locked = tfp.lock_profiles()
+            applied["timeframe_profiles.TIMEFRAME_PROFILES"] = list(locked.keys())
+            print(
+                "[ENGINE-DB] locked TF ladder "
+                "1m 1.5/0.50/0.70 · 5m 3/0.70/1.00 · 15m 7/1.00/1.40 · "
+                "1h 12/1.50/2.00 · 1D 20/2.50/3.00 · maker entry all TFs"
+            )
     except Exception as exc:
         print(f"[ENGINE-DB] timeframe_profiles apply note: {exc}")
 

@@ -43,8 +43,8 @@ def _safe_trade(t: dict) -> dict:
     return out
 
 
-def dump_runtime(agent: Any) -> dict:
-    return {
+def dump_runtime(agent: Any, *, pattern_neon: list | None = None) -> dict:
+    out = {
         "version": 1,
         "saved_at": time.time(),
         "trading_ready_at": float(getattr(agent, "trading_ready_at", 0) or 0),
@@ -80,12 +80,25 @@ def dump_runtime(agent: Any) -> dict:
         "pair_prices": dict(getattr(agent, "pair_prices", {}) or {}),
         "current_price": float(getattr(agent, "current_price", 0) or 0),
     }
+    # Chart pipeline neon (detect → confirming → fire) — survive container restarts.
+    if isinstance(pattern_neon, list):
+        safe = []
+        for e in pattern_neon[-200:]:
+            if not isinstance(e, dict):
+                continue
+            try:
+                json.dumps(e)
+                safe.append(e)
+            except TypeError:
+                safe.append({k: str(v) for k, v in e.items()})
+        out["pattern_neon"] = safe
+    return out
 
 
-def save_runtime(agent: Any) -> None:
+def save_runtime(agent: Any, *, pattern_neon: list | None = None) -> None:
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        payload = dump_runtime(agent)
+        payload = dump_runtime(agent, pattern_neon=pattern_neon)
         tmp = RUNTIME_PATH.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         tmp.replace(RUNTIME_PATH)
@@ -193,13 +206,19 @@ def restore_runtime(agent: Any) -> dict:
         if data.get("current_price"):
             agent.current_price = float(data["current_price"])
 
+        neon = data.get("pattern_neon")
+        if isinstance(neon, list):
+            summary["pattern_neon"] = [e for e in neon if isinstance(e, dict)][-200:]
+
         summary = {
+            **summary,
             "restored": True,
             "trades": len(agent.trades),
             "is_active": bool(agent.is_active),
             "hold": bool(agent.session_hold_mode),
             "pair": agent.active_pair,
             "saved_at": data.get("saved_at"),
+            "pattern_neon_count": len(summary.get("pattern_neon") or []),
         }
         print(
             f"[ENGINE RUNTIME] Restored: active={summary['is_active']} "
