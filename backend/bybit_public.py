@@ -38,12 +38,32 @@ def sanitize_price(price) -> float | None:
     return value
 
 
-async def fetch_ticker_last_price(client: httpx.AsyncClient, symbol: str) -> float | None:
+def _ticker_item(payload: dict) -> dict:
+    rows = (payload.get("result") or {}).get("list") or []
+    if not rows or not isinstance(rows[0], dict):
+        return {}
+    return rows[0]
+
+
+async def fetch_ticker_quote(client: httpx.AsyncClient, symbol: str) -> dict | None:
+    """Public linear ticker: last, bid1, ask1. None if the request fails."""
     resp = await client.get(ticker_url(symbol))
     if resp.status_code != 200:
         return None
-    item = resp.json().get("result", {}).get("list", [{}])[0]
-    return sanitize_price(item.get("lastPrice"))
+    item = _ticker_item(resp.json())
+    last = sanitize_price(item.get("lastPrice"))
+    bid = sanitize_price(item.get("bid1Price"))
+    ask = sanitize_price(item.get("ask1Price"))
+    if last is None and bid is None and ask is None:
+        return None
+    return {"last": last, "bid": bid, "ask": ask}
+
+
+async def fetch_ticker_last_price(client: httpx.AsyncClient, symbol: str) -> float | None:
+    quote = await fetch_ticker_quote(client, symbol)
+    if not quote:
+        return None
+    return quote.get("last")
 
 
 async def fetch_kline_rows(
