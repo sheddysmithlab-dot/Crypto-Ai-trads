@@ -332,12 +332,27 @@ def playbook_lines(
     if not rule:
         return []
     lines = [f"FAMILY PLAYBOOK ({fam} / {timeframe_key or '?'}):"]
+    # Match the code dual-gate ceiling so the brief does not demand stale DB floors.
+    brain_cap, rr_cap = 4.0, 2.0
+    of_cap = 45.0
+    try:
+        from brain import TIMEFRAMES
+        tf = (timeframe_key or "1m").strip().lower()
+        cfg = TIMEFRAMES.get(tf) or TIMEFRAMES.get("1m")
+        if cfg is not None:
+            brain_cap = float(cfg.min_score)
+            rr_cap = float(cfg.min_rr)
+    except Exception:
+        pass
     if rule.get("min_of_score") is not None:
-        lines.append(f"- min OF score: {float(rule['min_of_score']):.0f}")
+        shown_of = min(float(rule["min_of_score"]), of_cap)
+        lines.append(f"- min OF score: {shown_of:.0f}")
     if rule.get("min_brain_score") is not None:
-        lines.append(f"- min brain score: {float(rule['min_brain_score']):.1f}")
+        shown_sc = min(float(rule["min_brain_score"]), brain_cap)
+        lines.append(f"- min brain score: {shown_sc:.1f}")
     if rule.get("min_rr") is not None:
-        lines.append(f"- min R:R: {float(rule['min_rr']):.2f}")
+        shown_rr = min(float(rule["min_rr"]), rr_cap)
+        lines.append(f"- min R:R: {shown_rr:.2f}")
     sc = int(rule.get("sample_count") or 0)
     wr = rule.get("win_rate")
     if sc > 0 and wr is not None:

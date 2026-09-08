@@ -464,15 +464,15 @@ async def consult_ai_provider(context):
     score_txt = "—" if trap_score is None else str(trap_score)
     tf_l = timeframe.strip().lower()
     if is_scalp_tf(tf_l):
-        thr = 85
+        thr = 45
     else:
-        thr = 65
+        thr = 45
 
     prompt = (
         f"PATTERN DETECTED → confirm {side} {pattern} / trap score {score_txt}. "
         f"Pair {pair} {timeframe}. "
         f"Analyze LONG/SHORT, trap/inverse/fake-breakout per policy. "
-        f"Reply YES only if confidence ≥ {thr}% (overall ≥55; 5m traps ≥60; other traps ≥70); else NO. "
+        f"Reply YES only if confidence ≥ {thr}% (overall ≥45; 1m/5m traps ≥50; other traps ≥60); else NO. "
         f"One word only: YES or NO."
     )
     system = (
@@ -3636,14 +3636,12 @@ class AITradingAgent:
             self._ai_skip_until = 0.0
             return
         self._ai_fail_streak = int(self._ai_fail_streak or 0) + 1
-        # Brief cool-down so flaky AI does not stall the multi-pair scan loop.
-        if self._ai_fail_streak >= 2:
-            self._ai_skip_until = time.time() + 90.0
+        # Do not freeze the whole scan after AI failures — each setup still needs YES.
+        self._ai_skip_until = 0.0
 
     def ai_consult_allowed(self) -> bool:
-        """False during AI cool-down after consecutive provider failures."""
-        until = float(getattr(self, "_ai_skip_until", 0) or 0)
-        return time.time() >= until
+        """AI failures do not pause the scan. Each setup still requires a YES."""
+        return True
 
     def refresh_feed_health(self) -> None:
         """Freeze new entries only if market ticks go stale (true feed outage)."""

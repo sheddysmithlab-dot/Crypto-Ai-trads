@@ -195,16 +195,16 @@ VALUES
 
 -- Global engine formulas (exit / risk / OF / fire / engine / sizing)
 INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_num, note) VALUES
-('PROFIT_LOCK_PCT','exit','number',0.85,'Profit book arm %'),
-('PROFIT_TRAIL_GIVEBACK_PCT','exit','number',0.15,'Trail giveback %'),
-('PROFIT_TRAIL_FIRST_GIVEBACK_PCT','exit','number',0.15,'First trail giveback %'),
-('LOSS_PROTECT_PCT','exit','number',0.75,'Soft loss lock arm %'),
-('LOSS_BAND_PCT','exit','number',1.00,'Hard loss floor %'),
-('LOSS_RECOVERY_RETRACE_PCT','exit','number',0.25,'Loss lock trail %'),
-('LOSS_LOCK_CLEAR_PCT','exit','number',0.20,'Unlock to profit book %'),
-('LOSS_PROTECT_PCT_1M','exit','number',0.75,'1m loss arm'),
-('LOSS_BAND_PCT_1M','exit','number',1.00,'1m hard band'),
-('PROFIT_HARD_PCT_1M','exit','number',0.85,'1m profit arm alias'),
+('PROFIT_LOCK_PCT','exit','number',0.50,'Profit book arm %'),
+('PROFIT_TRAIL_GIVEBACK_PCT','exit','number',0.10,'Trail giveback %'),
+('PROFIT_TRAIL_FIRST_GIVEBACK_PCT','exit','number',0.10,'First trail giveback %'),
+('LOSS_PROTECT_PCT','exit','number',0.50,'Soft loss lock arm %'),
+('LOSS_BAND_PCT','exit','number',0.70,'Hard loss floor %'),
+('LOSS_RECOVERY_RETRACE_PCT','exit','number',0.10,'Loss lock trail %'),
+('LOSS_LOCK_CLEAR_PCT','exit','number',0.25,'Unlock to profit book %'),
+('LOSS_PROTECT_PCT_1M','exit','number',0.50,'1m loss arm'),
+('LOSS_BAND_PCT_1M','exit','number',0.70,'1m hard band'),
+('PROFIT_HARD_PCT_1M','exit','number',0.50,'1m profit arm alias'),
 ('FLIP_EXIT_MIN_GROSS_PCT','exit','number',0.25,'Min gross to flip-exit'),
 ('MICRO_CAP_LOSS_ARM_PCT','exit','number',0.25,'Micro-cap loss arm'),
 ('MICRO_CAP_LOSS_BAND_PCT','exit','number',0.35,'Micro-cap loss band'),
@@ -229,16 +229,16 @@ INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_n
 ('MAX_CONCURRENT_TRADES','risk','number',10,'Global max open trades'),
 ('MAX_SAME_SIDE_AUTO_PER_PAIR','risk','number',3,'Same-side auto per pair'),
 ('ONE_M_MAX_CONCURRENT','risk','number',3,'Per-pair scalp max concurrent'),
-('THR_SCORE','of','number',75,'Base OF floor'),
-('THR_SCORE_5M','of','number',75,'5m OF floor'),
-('THR_SCORE_1M','of','number',75,'1m OF floor'),
-('THR_SCORE_CLASSIC_PATTERN','of','number',75,'Doji/classic OF floor'),
-('THR_SCORE_ENGULFING','of','number',75,'Engulfing OF floor'),
-('THR_SCORE_INSIDE_BAR','of','number',75,'Inside-bar OF floor'),
-('THR_SCORE_IMBALANCE_1M','of','number',75,'Imbalance scalp floor'),
-('THR_SCORE_TRAP','of','number',90,'Trap floor HTF'),
-('THR_SCORE_TRAP_5M','of','number',80,'Trap floor 5m'),
-('THR_SCORE_TRAP_1M','of','number',80,'Trap floor 1m'),
+('THR_SCORE','of','number',45,'Base OF floor'),
+('THR_SCORE_5M','of','number',45,'5m OF floor'),
+('THR_SCORE_1M','of','number',45,'1m OF floor'),
+('THR_SCORE_CLASSIC_PATTERN','of','number',45,'Doji/classic OF floor'),
+('THR_SCORE_ENGULFING','of','number',45,'Engulfing OF floor'),
+('THR_SCORE_INSIDE_BAR','of','number',45,'Inside-bar OF floor'),
+('THR_SCORE_IMBALANCE_1M','of','number',45,'Imbalance scalp floor'),
+('THR_SCORE_TRAP','of','number',60,'Trap floor HTF'),
+('THR_SCORE_TRAP_5M','of','number',50,'Trap floor 5m'),
+('THR_SCORE_TRAP_1M','of','number',50,'Trap floor 1m'),
 ('CANDLE_ONLY_FIRE','of','bool',1,'Allow candle-only fire'),
 ('THR_PRESSURE','of','number',0.60,'OF pressure threshold'),
 ('THR_RV_VOL','of','number',1.20,'Relative volume threshold'),
@@ -257,9 +257,10 @@ INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_n
 ('SCORE_FLOOR_EPS','of','number',0.05,'OF score floor epsilon'),
 ('LOOKBACK','of','number',20,'OF lookback candles'),
 ('MIN_CONFIRM_BODY_PCT','fire','number',0.03,'Min body % for color confirm'),
+('SCALP_CONFIRM_MIN_CONSECUTIVE','fire','number',1,'Fire on 1st matching CLOSED candle'),
 ('ONE_M_CONFIRM_SKIP_TICKS','fire','number',1,'1m skip N matching ticks'),
 ('ONE_M_MIN_BARS_BETWEEN_FIRES','fire','number',3,'Min bars between scalp fires'),
-('ONE_M_CONFIRM_MAX_BARS','fire','number',2,'Hard skip if no color confirm in N bars'),
+('ONE_M_CONFIRM_MAX_BARS','fire','number',2,'Try 1st then 2nd CLOSED confirm; else skip'),
 ('SKIP_FIRST_DETECT','fire','bool',1,'Skip first HTF detect after arm'),
 ('SKIP_FIRST_DETECT_SCALP','fire','bool',0,'Skip first scalp detect'),
 ('ENGINE_BOOT_MAX_SEC','engine','number',60,'Boot overlay max sec'),
@@ -273,16 +274,20 @@ INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_j
 
 -- Enable candle-family trading (safe re-run)
 UPDATE engine_formulas SET value_num = 1 WHERE formula_key = 'CANDLE_ONLY_FIRE' AND (value_num IS NULL OR value_num <> 1);
-UPDATE engine_formulas SET value_num = 80 WHERE formula_key = 'THR_SCORE_TRAP_1M' AND (value_num IS NULL OR value_num < 80);
-UPDATE engine_formulas SET value_num = 2, note = 'Hard skip if no color confirm in N bars'
-  WHERE formula_key = 'ONE_M_CONFIRM_MAX_BARS' AND (value_num IS NULL OR value_num <> 2);
-UPDATE engine_formulas SET value_num = 0.85, note = 'Profit book arm %' WHERE formula_key = 'PROFIT_LOCK_PCT';
-UPDATE engine_formulas SET value_num = 0.15, note = 'Trail giveback %' WHERE formula_key IN ('PROFIT_TRAIL_GIVEBACK_PCT','PROFIT_TRAIL_FIRST_GIVEBACK_PCT');
-UPDATE engine_formulas SET value_num = 0.75, note = 'Soft loss lock arm %' WHERE formula_key IN ('LOSS_PROTECT_PCT','LOSS_PROTECT_PCT_1M');
-UPDATE engine_formulas SET value_num = 1.00, note = 'Hard loss floor %' WHERE formula_key IN ('LOSS_BAND_PCT','LOSS_BAND_PCT_1M');
-UPDATE engine_formulas SET value_num = 0.25, note = 'Loss lock trail %' WHERE formula_key = 'LOSS_RECOVERY_RETRACE_PCT';
-UPDATE engine_formulas SET value_num = 0.85, note = '1m profit arm alias' WHERE formula_key = 'PROFIT_HARD_PCT_1M';
+UPDATE engine_formulas SET value_num = 2, note = 'Try 1st then 2nd CLOSED confirm; else skip'
+  WHERE formula_key = 'ONE_M_CONFIRM_MAX_BARS';
+INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_num, note) VALUES
+('SCALP_CONFIRM_MIN_CONSECUTIVE','fire','number',1,'Fire on 1st matching CLOSED candle');
+UPDATE engine_formulas SET value_num = 1, note = 'Fire on 1st matching CLOSED candle (window=2 then skip)'
+  WHERE formula_key = 'SCALP_CONFIRM_MIN_CONSECUTIVE';
+-- Exit / score knobs below are SEEDS only (run once if empty). Cursor AI owns retunes —
+-- do NOT blindly re-run these UPDATEs after AI has observed and changed values.
+UPDATE engine_formulas SET value_num = 0.50, note = 'Seed profit book arm % (AI may retune)' WHERE formula_key = 'PROFIT_LOCK_PCT';
+UPDATE engine_formulas SET value_num = 0.10, note = 'Seed trail giveback % (AI may retune)' WHERE formula_key IN ('PROFIT_TRAIL_GIVEBACK_PCT','PROFIT_TRAIL_FIRST_GIVEBACK_PCT');
+UPDATE engine_formulas SET value_num = 0.50, note = 'Seed soft loss lock % (AI may retune)' WHERE formula_key IN ('LOSS_PROTECT_PCT','LOSS_PROTECT_PCT_1M');
+UPDATE engine_formulas SET value_num = 0.70, note = 'Seed hard loss floor % (AI may retune)' WHERE formula_key IN ('LOSS_BAND_PCT','LOSS_BAND_PCT_1M');
+UPDATE engine_formulas SET value_num = 0.10, note = 'Seed loss trail % (AI may retune)' WHERE formula_key = 'LOSS_RECOVERY_RETRACE_PCT';
+UPDATE engine_formulas SET value_num = 0.50, note = 'Seed 1m profit arm alias (AI may retune)' WHERE formula_key = 'PROFIT_HARD_PCT_1M';
 UPDATE family_engine_rules
-  SET candle_soft = 1,
-      min_of_score = CASE WHEN min_of_score IS NULL OR min_of_score > 55 THEN 50 ELSE min_of_score END
-  WHERE locked = 0;
+  SET candle_soft = 1
+  WHERE locked = 0 AND (candle_soft IS NULL OR candle_soft = 0);

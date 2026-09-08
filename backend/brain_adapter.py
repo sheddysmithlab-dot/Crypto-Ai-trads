@@ -93,7 +93,7 @@ _CONFIRM_SYSTEM = (
     "UNLIMITED mode: you may use tools, read this project, and outside research to "
     "maximize expected profit / minimize loss / avoid late entries before deciding. "
     "Only reply YES if judged confidence meets the TF floor in the brief "
-    "(overall ≥55%; 5m named traps ≥60%; other named traps ≥70%). Otherwise reply NO. "
+    "(overall ≥45%; 1m/5m named traps ≥50%; other named traps ≥60%). Otherwise reply NO. "
     "Final answer line must be exactly one word: YES or NO."
 )
 
@@ -150,10 +150,11 @@ def _brain_side_ok(
     ov_sc, ov_rr = family_rules.effective_brain_floors(
         timeframe_key, family=fam, brain_strategy=_brain_strategy_from_think(think)
     )
+    # Family DB may only loosen the code floor, never raise it (live rows were 12–16).
     if ov_sc is not None:
-        min_sc = float(ov_sc)
+        min_sc = min(min_sc, float(ov_sc))
     if ov_rr is not None:
-        min_rr = float(ov_rr)
+        min_rr = min(min_rr, float(ov_rr))
 
     sig = think.get("signal")
     if sig is not None:
@@ -436,17 +437,40 @@ async def _confirm_setup_with_ai(
     """
     provider = getattr(settings, "ai_provider", "none")
     api_key = getattr(settings, "ai_api_key", "") or ""
-    if provider == "none" or not api_key:
+    forced_model = ""
+    if provider == "none":
         print("[AI-CONFIRM] AI not configured — skip trade.")
         return None
 
-    try:
-        from main import agent as _agent
-        if not _agent.ai_consult_allowed():
-            print("[AI-CONFIRM] Cool-down active — skip trade.")
-            return None
-    except Exception:
-        pass
+    # Cursor bridge is disabled in this build. Confirm on Z.ai so YES/NO can return.
+    if provider in ("cursor", "cursor-ai", "cursor_sdk"):
+        try:
+            import cursor_ai
+            cursor_ready = bool(cursor_ai.is_cursor_configured())
+        except Exception:
+            cursor_ready = False
+        if not cursor_ready:
+            zkey = ""
+            zai_ok = False
+            try:
+                from api_secrets import get_zai_api_key, is_zai_configured
+                zkey = (get_zai_api_key() or "").strip()
+                zai_ok = bool(is_zai_configured() and zkey)
+            except Exception:
+                zkey = ""
+                zai_ok = False
+            if zai_ok:
+                print("[AI-CONFIRM] Cursor bridge off — confirming via Z.ai.")
+                provider = "z-ai"
+                api_key = zkey
+                forced_model = "glm-4.5-flash"
+            elif not api_key:
+                print("[AI-CONFIRM] AI not configured — skip trade.")
+                return None
+
+    if not api_key:
+        print("[AI-CONFIRM] AI not configured — skip trade.")
+        return None
 
     _DEFAULTS = {
         "cursor": {"base_url": None, "model": "composer-2.5", "auth": "bearer"},
@@ -517,7 +541,7 @@ async def _confirm_setup_with_ai(
     if not base_url:
         print(f"[AI-CONFIRM] No base_url for '{provider}' — skip trade.")
         return None
-    model = getattr(settings, "ai_model", None) or cfg["model"]
+    model = forced_model or getattr(settings, "ai_model", None) or cfg["model"]
 
     headers = {"Content-Type": "application/json"}
     if cfg["auth"] == "api-key":
@@ -1155,7 +1179,7 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
             "(NO / unclear / unreachable = skip, no fail-open); next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
-            f"Order-flow conf floor: overall ≥55% / 5m traps ≥60% / other traps ≥70% "
+            f"Order-flow conf floor: overall ≥45% / 1m/5m traps ≥50% / other traps ≥60% "
             f"(AI YES only at/above setup floor). "
             f"{tf_cfg.note}"
         ),
@@ -1188,7 +1212,7 @@ def strategy_system_blurb() -> str:
         "   fake breakout, reversal trap (effort vs result; volume & buyer/seller pressure).\n"
         "3) Combined analysis → AI API (GLM/OpenAI) → BUY / SELL / HOLD.\n"
         "4) Next-candle fire + path SL/TP 0.5%/0.7% + opposite-side flip-exit.\n"
-        "5) If AI offline: skip the trade (no fail-open). Floors: overall≥65 / 5m trap≥70 / else trap≥80.\n"
+        "5) If AI offline: skip the trade (no fail-open). Floors: overall≥45 / 1m/5m trap≥50 / else trap≥60.\n"
     )
 
 

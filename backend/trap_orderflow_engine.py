@@ -40,21 +40,21 @@ THR_Z_TVOL = 1.0
 THR_FAKE_WICK = 0.30
 THR_BREAK_ATR = 0.10
 THR_BALANCED = 0.05
-THR_SCORE = 55.0  # overall trade confidence floor (non-trap setups, all TFs)
-THR_SCORE_5M = 55.0  # 5m non-trap / scalp floor
-THR_SCORE_1M = 55.0
-THR_SCORE_IMBALANCE_1M = float(os.environ.get("THR_SCORE_IMBALANCE_1M", "55"))
-THR_SCORE_INSIDE_BAR = float(os.environ.get("THR_SCORE_INSIDE_BAR", "55"))
+THR_SCORE = 45.0  # overall trade confidence floor (non-trap setups, all TFs)
+THR_SCORE_5M = 45.0  # 5m non-trap / scalp floor
+THR_SCORE_1M = 45.0
+THR_SCORE_IMBALANCE_1M = float(os.environ.get("THR_SCORE_IMBALANCE_1M", "45"))
+THR_SCORE_INSIDE_BAR = float(os.environ.get("THR_SCORE_INSIDE_BAR", "45"))
 # Classic/doji + engulfing use the same OF floor as other non-trap setups (≥55).
-THR_SCORE_CLASSIC_PATTERN = float(os.environ.get("THR_SCORE_CLASSIC_PATTERN", "55"))
-THR_SCORE_ENGULFING = float(os.environ.get("THR_SCORE_ENGULFING", "55"))
+THR_SCORE_CLASSIC_PATTERN = float(os.environ.get("THR_SCORE_CLASSIC_PATTERN", "45"))
+THR_SCORE_ENGULFING = float(os.environ.get("THR_SCORE_ENGULFING", "45"))
 # Candle-only bypass off by default — require real OF match + score floor.
 CANDLE_ONLY_FIRE_ENABLED = os.environ.get("CANDLE_ONLY_FIRE", "0").strip().lower() in (
     "1", "true", "yes",
 )
-THR_SCORE_TRAP = 70.0  # named trap fires (15m+)
-THR_SCORE_TRAP_5M = 60.0  # named trap fires on 5m
-THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "60"))
+THR_SCORE_TRAP = 60.0  # named trap fires (15m+)
+THR_SCORE_TRAP_5M = 50.0  # named trap fires on 5m
+THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "50"))
 STRUCTURE_OPPOSITE_PENALTY = 12.0  # OF vs structure trap conflict — subtract from firing side
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20

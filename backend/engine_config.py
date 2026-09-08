@@ -182,6 +182,15 @@ def apply_to_runtime() -> dict[str, Any]:
             "SCORE_FLOOR_EPS",
             "LOOKBACK",
         ):
+            if name.startswith("THR_SCORE") and name in _CACHE and _CACHE[name] is not None:
+                try:
+                    code_floor = float(getattr(toe, name))
+                    db_floor = float(_CACHE[name])
+                    # Live formula rows may only loosen the code OF floor, never raise it.
+                    if db_floor > code_floor:
+                        _CACHE[name] = code_floor
+                except (TypeError, ValueError):
+                    pass
             _set(toe, name)
         if "CANDLE_ONLY_FIRE" in _CACHE:
             toe.CANDLE_ONLY_FIRE_ENABLED = get_bool("CANDLE_ONLY_FIRE", False)
