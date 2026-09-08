@@ -40,21 +40,21 @@ THR_Z_TVOL = 1.0
 THR_FAKE_WICK = 0.30
 THR_BREAK_ATR = 0.10
 THR_BALANCED = 0.05
-THR_SCORE = 75.0  # overall trade confidence floor (non-trap setups, all TFs)
-THR_SCORE_5M = 75.0  # 5m non-trap / scalp floor
-THR_SCORE_1M = 75.0
-THR_SCORE_IMBALANCE_1M = float(os.environ.get("THR_SCORE_IMBALANCE_1M", "75"))
-THR_SCORE_INSIDE_BAR = float(os.environ.get("THR_SCORE_INSIDE_BAR", "75"))
-# Classic/doji + engulfing use the same OF floor as other non-trap setups (≥75).
-THR_SCORE_CLASSIC_PATTERN = float(os.environ.get("THR_SCORE_CLASSIC_PATTERN", "75"))
-THR_SCORE_ENGULFING = float(os.environ.get("THR_SCORE_ENGULFING", "75"))
+THR_SCORE = 65.0  # overall trade confidence floor (non-trap setups, all TFs)
+THR_SCORE_5M = 65.0  # 5m non-trap / scalp floor
+THR_SCORE_1M = 65.0
+THR_SCORE_IMBALANCE_1M = float(os.environ.get("THR_SCORE_IMBALANCE_1M", "65"))
+THR_SCORE_INSIDE_BAR = float(os.environ.get("THR_SCORE_INSIDE_BAR", "65"))
+# Classic/doji + engulfing use the same OF floor as other non-trap setups (≥65).
+THR_SCORE_CLASSIC_PATTERN = float(os.environ.get("THR_SCORE_CLASSIC_PATTERN", "65"))
+THR_SCORE_ENGULFING = float(os.environ.get("THR_SCORE_ENGULFING", "65"))
 # Candle-only bypass off by default — require real OF match + score floor.
 CANDLE_ONLY_FIRE_ENABLED = os.environ.get("CANDLE_ONLY_FIRE", "0").strip().lower() in (
     "1", "true", "yes",
 )
-THR_SCORE_TRAP = 90.0  # named trap fires (15m+)
-THR_SCORE_TRAP_5M = 80.0  # named trap fires on 5m
-THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "80"))
+THR_SCORE_TRAP = 80.0  # named trap fires (15m+)
+THR_SCORE_TRAP_5M = 70.0  # named trap fires on 5m
+THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "70"))
 STRUCTURE_OPPOSITE_PENALTY = 12.0  # OF vs structure trap conflict — subtract from firing side
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
@@ -112,7 +112,7 @@ def is_candle_soft_strategy(
 
 
 def thr_score_for_tf(exec_tf: str | None) -> float:
-    """Base OF confidence floor (0–100) for non-trap / scalp setups — ≥75 all TFs."""
+    """Base OF confidence floor (0–100) for non-trap / scalp setups — ≥65 all TFs."""
     tf = (exec_tf or "").strip().lower()
     if tf == "5m":
         return THR_SCORE_5M
@@ -138,7 +138,7 @@ def thr_score_for_setup(
     brain_strategy: str | None = None,
     family: str | None = None,
 ) -> float:
-    """Floor: classic/doji ≥75; engulfing ≥75; inside_bar ≥75; traps ≥80/90; else ≥75.
+    """Floor: classic/doji ≥65; engulfing ≥65; inside_bar ≥65; traps ≥70/80; else ≥65.
 
     Family DB cannot lower this floor. Candle-only labels do not zero it.
     """
@@ -829,7 +829,7 @@ def evaluate_trap_orderflow(
         else:
             short_score += 8
 
-    # NO TRADE gates — classic/doji ≥75; engulfing ≥75; traps ≥80/90; else ≥75
+    # NO TRADE gates — classic/doji ≥65; engulfing ≥65; traps ≥70/80; else ≥65
     setup_name = (setup_1 or setup_5 or {}).get("name") if (setup_1 or setup_5) else None
     strat_norm = _norm_strategy(brain_strategy)
     side_norm = (brain_side or "").strip().upper()

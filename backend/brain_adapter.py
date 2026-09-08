@@ -33,7 +33,7 @@ from trap_orderflow_engine import (
 ENGINE_NAME = "ai_driven_brain_v2"
 ENTRY_PATTERN_NAME = "AI_BRAIN_V2"
 # Detect-fire only on a last-bar brain signal. Raw candle matches do not fire.
-DETECT_FIRE_MIN_SCORE = 8.0
+DETECT_FIRE_MIN_SCORE = 6.0
 
 # ─── timeframe normalisation ──────────────────────────────────────────────────
 _TF_NORM: Dict[str, str] = {
@@ -93,7 +93,7 @@ _CONFIRM_SYSTEM = (
     "UNLIMITED mode: you may use tools, read this project, and outside research to "
     "maximize expected profit / minimize loss / avoid late entries before deciding. "
     "Only reply YES if judged confidence meets the TF floor in the brief "
-    "(overall ≥75%; 5m named traps ≥80%; other named traps ≥90%). Otherwise reply NO. "
+    "(overall ≥65%; 5m named traps ≥70%; other named traps ≥80%). Otherwise reply NO. "
     "Final answer line must be exactly one word: YES or NO."
 )
 
@@ -1155,7 +1155,7 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
             "(NO / unclear / unreachable = skip, no fail-open); next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
-            f"Order-flow conf floor: overall ≥75% / 5m traps ≥80% / other traps ≥90% "
+            f"Order-flow conf floor: overall ≥65% / 5m traps ≥70% / other traps ≥80% "
             f"(AI YES only at/above setup floor). "
             f"{tf_cfg.note}"
         ),
@@ -1183,12 +1183,12 @@ def strategy_system_blurb() -> str:
         "AI-DRIVEN CANDLESTICK BRAIN + ORDER-FLOW TRAP ENGINE (unified 1m rulebook):\n"
         "Same entry/exit training on every chart TF from 1m through 1D.\n"
         "1) brain.py: patterns, market structure, classic trap & reverse (10th-man), ML bias "
-        "(min confluence score 6, min R:R 2, HTF alignment + noise guard — identical on all TFs).\n"
+        "(min confluence score 5, min R:R 2, HTF alignment + noise guard — identical on all TFs).\n"
         "2) Order-flow TRAP DETECTION ENGINE: buy/sell trap, absorption, exhaustion,\n"
         "   fake breakout, reversal trap (effort vs result; volume & buyer/seller pressure).\n"
         "3) Combined analysis → AI API (GLM/OpenAI) → BUY / SELL / HOLD.\n"
         "4) Next-candle fire + path SL/TP 0.5%/0.7% + opposite-side flip-exit.\n"
-        "5) If AI offline: strong OF setup (overall≥75 / 5m trap≥80 / else trap≥90) or brain.py verdict as fallback.\n"
+        "5) If AI offline: skip the trade (no fail-open). Floors: overall≥65 / 5m trap≥70 / else trap≥80.\n"
     )
 
 
