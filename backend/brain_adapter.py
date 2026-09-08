@@ -33,7 +33,7 @@ from trap_orderflow_engine import (
 ENGINE_NAME = "ai_driven_brain_v2"
 ENTRY_PATTERN_NAME = "AI_BRAIN_V2"
 # Detect-fire only on a last-bar brain signal. Raw candle matches do not fire.
-DETECT_FIRE_MIN_SCORE = 6.0
+DETECT_FIRE_MIN_SCORE = 5.0
 
 # ─── timeframe normalisation ──────────────────────────────────────────────────
 _TF_NORM: Dict[str, str] = {
@@ -93,7 +93,7 @@ _CONFIRM_SYSTEM = (
     "UNLIMITED mode: you may use tools, read this project, and outside research to "
     "maximize expected profit / minimize loss / avoid late entries before deciding. "
     "Only reply YES if judged confidence meets the TF floor in the brief "
-    "(overall ≥65%; 5m named traps ≥70%; other named traps ≥80%). Otherwise reply NO. "
+    "(overall ≥55%; 5m named traps ≥60%; other named traps ≥70%). Otherwise reply NO. "
     "Final answer line must be exactly one word: YES or NO."
 )
 
@@ -1155,7 +1155,7 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
             "(NO / unclear / unreachable = skip, no fail-open); next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
-            f"Order-flow conf floor: overall ≥65% / 5m traps ≥70% / other traps ≥80% "
+            f"Order-flow conf floor: overall ≥55% / 5m traps ≥60% / other traps ≥70% "
             f"(AI YES only at/above setup floor). "
             f"{tf_cfg.note}"
         ),

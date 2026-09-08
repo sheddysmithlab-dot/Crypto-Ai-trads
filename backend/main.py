@@ -472,7 +472,7 @@ async def consult_ai_provider(context):
         f"PATTERN DETECTED → confirm {side} {pattern} / trap score {score_txt}. "
         f"Pair {pair} {timeframe}. "
         f"Analyze LONG/SHORT, trap/inverse/fake-breakout per policy. "
-        f"Reply YES only if confidence ≥ {thr}% (overall ≥65; 5m traps ≥70; other traps ≥80); else NO. "
+        f"Reply YES only if confidence ≥ {thr}% (overall ≥55; 5m traps ≥60; other traps ≥70); else NO. "
         f"One word only: YES or NO."
     )
     system = (
@@ -1289,7 +1289,7 @@ class AITradingAgent:
         self.timeframe_seconds = 60
 
     # Cap = every mapped Bybit pair (frontend TRADING_PAIRS / BYBIT_SYMBOL_MAP).
-    MAX_WATCHLIST = 32
+    MAX_WATCHLIST = 64
 
     def get_scan_pairs(self) -> list[str]:
         """Pairs the AI scans for patterns + fires on.
@@ -4038,9 +4038,6 @@ FIRST_DETECT_SKIPPED: set[str] = set()
 SKIP_TRADE_PATTERNS = frozenset(
     {
         "MA_COMPRESSION_CONSOLIDATION_ZONE",
-        "IMBALANCE",
-        "QUALIFIED_IMBALANCE",
-        "RAW_IMBALANCE",
     }
 )
 
@@ -4373,7 +4370,8 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
         # max_concurrent still limits how many positions can be OPEN at once.
         max_pairs=int(getattr(agent, "MAX_WATCHLIST", 32) or 32),
         progress_cb=_progress,
-        lot_ok=_lot_ok if avail > 0 else None,
+        # Do not drop coins for min-lot before scoring — those were staying disabled.
+        lot_ok=None,
     )
     thr = float(built["threshold"])
     new_fire = list(built["qualified"])

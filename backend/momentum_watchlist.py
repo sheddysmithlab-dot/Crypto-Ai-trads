@@ -162,7 +162,10 @@ async def build_momentum_watchlist(
     scores = await score_universe(
         symbol_map, engine_tf, progress_cb=progress_cb, lot_ok=lot_ok
     )
-    qualified = [r["pair"] for r in scores if r["passed"]]
+    # Passed coins first, then previously skipped/disabled coins so they can trade again.
+    passed = [r["pair"] for r in scores if r["passed"]]
+    skipped = [r["pair"] for r in scores if not r["passed"] and r.get("pair")]
+    qualified = passed + skipped
     if max_pairs > 0:
         qualified = qualified[: int(max_pairs)]
 

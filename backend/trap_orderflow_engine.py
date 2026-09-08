@@ -40,21 +40,21 @@ THR_Z_TVOL = 1.0
 THR_FAKE_WICK = 0.30
 THR_BREAK_ATR = 0.10
 THR_BALANCED = 0.05
-THR_SCORE = 65.0  # overall trade confidence floor (non-trap setups, all TFs)
-THR_SCORE_5M = 65.0  # 5m non-trap / scalp floor
-THR_SCORE_1M = 65.0
-THR_SCORE_IMBALANCE_1M = float(os.environ.get("THR_SCORE_IMBALANCE_1M", "65"))
-THR_SCORE_INSIDE_BAR = float(os.environ.get("THR_SCORE_INSIDE_BAR", "65"))
-# Classic/doji + engulfing use the same OF floor as other non-trap setups (≥65).
-THR_SCORE_CLASSIC_PATTERN = float(os.environ.get("THR_SCORE_CLASSIC_PATTERN", "65"))
-THR_SCORE_ENGULFING = float(os.environ.get("THR_SCORE_ENGULFING", "65"))
+THR_SCORE = 55.0  # overall trade confidence floor (non-trap setups, all TFs)
+THR_SCORE_5M = 55.0  # 5m non-trap / scalp floor
+THR_SCORE_1M = 55.0
+THR_SCORE_IMBALANCE_1M = float(os.environ.get("THR_SCORE_IMBALANCE_1M", "55"))
+THR_SCORE_INSIDE_BAR = float(os.environ.get("THR_SCORE_INSIDE_BAR", "55"))
+# Classic/doji + engulfing use the same OF floor as other non-trap setups (≥55).
+THR_SCORE_CLASSIC_PATTERN = float(os.environ.get("THR_SCORE_CLASSIC_PATTERN", "55"))
+THR_SCORE_ENGULFING = float(os.environ.get("THR_SCORE_ENGULFING", "55"))
 # Candle-only bypass off by default — require real OF match + score floor.
 CANDLE_ONLY_FIRE_ENABLED = os.environ.get("CANDLE_ONLY_FIRE", "0").strip().lower() in (
     "1", "true", "yes",
 )
-THR_SCORE_TRAP = 80.0  # named trap fires (15m+)
-THR_SCORE_TRAP_5M = 70.0  # named trap fires on 5m
-THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "70"))
+THR_SCORE_TRAP = 70.0  # named trap fires (15m+)
+THR_SCORE_TRAP_5M = 60.0  # named trap fires on 5m
+THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "60"))
 STRUCTURE_OPPOSITE_PENALTY = 12.0  # OF vs structure trap conflict — subtract from firing side
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
@@ -181,50 +181,8 @@ def _apply_imbalance_block(
     brain_side: str | None = None,
     brain_strategy: str | None = None,
 ) -> TrapOFResult:
-    """Hard skip imbalance-only fires — unless engulfing/doji candle-only remaps them."""
-    if result.final_signal not in ("LONG", "SHORT"):
-        return result
-    if not is_imbalance_fire_pattern(result.pattern):
-        return result
-    side_norm = (brain_side or "").strip().upper()
-    want = "LONG" if side_norm == "BUY" else "SHORT" if side_norm == "SELL" else None
-    if candle_soft and want and result.final_signal == want:
-        strat = _norm_strategy(brain_strategy) or "classic_pattern"
-        max_sc = max(float(result.long_score), float(result.short_score))
-        return TrapOFResult(
-            timeframe=result.timeframe,
-            pattern=f"CANDLE_{strat.upper()}",
-            bias_5m=result.bias_5m,
-            buy_pressure=result.buy_pressure,
-            sell_pressure=result.sell_pressure,
-            buy_volume_ratio=result.buy_volume_ratio,
-            sell_volume_ratio=result.sell_volume_ratio,
-            long_score=result.long_score,
-            short_score=result.short_score,
-            final_signal=want,
-            confidence=max(max_sc, 40.0) / 100.0,
-            primary_reason=(
-                f"candle-only {strat} fire — imbalance remapped "
-                f"(was {result.pattern})"
-            ),
-            details=result.details,
-        )
-    max_sc = max(float(result.long_score), float(result.short_score))
-    return TrapOFResult(
-        timeframe=result.timeframe,
-        pattern=result.pattern,
-        bias_5m=result.bias_5m,
-        buy_pressure=result.buy_pressure,
-        sell_pressure=result.sell_pressure,
-        buy_volume_ratio=result.buy_volume_ratio,
-        sell_volume_ratio=result.sell_volume_ratio,
-        long_score=result.long_score,
-        short_score=result.short_score,
-        final_signal="NO_TRADE",
-        confidence=max_sc / 100.0,
-        primary_reason=f"IMBALANCE entries disabled (was {result.pattern})",
-        details=result.details,
-    )
+    """Imbalance entries are allowed. Do not force them to NO_TRADE."""
+    return result
 
 
 @dataclass
