@@ -27,6 +27,7 @@ from auth import (
 from bybit_public import (
     fetch_kline_rows,
     fetch_ticker_last_price,
+    fetch_ticker_quote,
     sanitize_price as _sanitize_market_price,
 )
 from session_schedule import schedule_store
@@ -67,7 +68,7 @@ from volume_spread_system import (
     reset_blue_box_state,
     build_blue_box_chart_overlay,
 )
-from bybit_executor import BybitAgent
+from bybit_executor import BybitAgent, _is_post_only_reject
 from ml_trading_memory import (
     fetch_ml,
     list_ml_toc,
@@ -90,7 +91,13 @@ from pathlib import Path
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "DATA"
 
-from timeframe_profiles import capital_pct_fraction, get_timeframe_profile, is_scalp_tf
+from timeframe_profiles import (
+    capital_pct_fraction,
+    get_exit_ladder,
+    get_timeframe_profile,
+    is_scalp_tf,
+    uses_maker_entry,
+)
 
 # Load backend/.env before any credential reads (cwd-safe path).
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -303,7 +310,7 @@ class SettingsStore:
         if env_mode in ("mainnet", "testnet"):
             self.bybit_environment = env_mode
 
-        if self.ai_provider == "cursor" and self.ai_api_key:
+        if False and self.ai_provider == "cursor" and self.ai_api_key:
             print(f"[SETTINGS] Cursor AI configured (model={self.ai_model}).")
         elif is_zai_configured():
             print(f"[SETTINGS] Z.ai AI loaded (model={self.ai_model}, provider={self.ai_provider}).")
@@ -549,7 +556,9 @@ async def consult_ai_provider(context):
 # Bybit linear taker fee (percent points) + India GST on the fee line.
 # Trade history: Trading Fee 0.055% + GST 18% of fee → all-in ≈ 0.0649% of fill value.
 BYBIT_TAKER_FEE_PCT_DEFAULT = 0.055
+BYBIT_MAKER_FEE_PCT_DEFAULT = 0.02
 BYBIT_FEE_GST_MULT = float(os.environ.get("BYBIT_FEE_GST_MULT", "1.18"))
+MAKER_REST_TIMEOUT_SEC = 25
 
 
 class BybitAPIWrapper:
@@ -560,6 +569,7 @@ class BybitAPIWrapper:
         self.connected = False
         # Base taker from Bybit fee-rate API (0.055 = 0.055%). P&L uses all-in via GST.
         self.taker_fee_base_pct = BYBIT_TAKER_FEE_PCT_DEFAULT
+        self.maker_fee_base_pct = BYBIT_MAKER_FEE_PCT_DEFAULT
         # Compat alias — always all-in (base × GST). Prefer get_taker_fee_pct().
         self.taker_fee_pct = round(self.taker_fee_base_pct * BYBIT_FEE_GST_MULT, 6)
 
@@ -838,22 +848,38 @@ class BybitAPIWrapper:
         self.taker_fee_pct = all_in
         return all_in
 
-    def all_in_fee_usd(self, notional: float) -> float:
-        """Fee in USDT for a fill notional at all-in (base+GST) rate."""
-        return round(float(notional or 0) * (self.get_taker_fee_pct() / 100.0), 6)
+    def get_maker_fee_base_pct(self) -> float:
+        """Bybit maker fee % before GST (e.g. 0.02)."""
+        return float(getattr(self, "maker_fee_base_pct", None) or BYBIT_MAKER_FEE_PCT_DEFAULT)
+
+    def get_maker_fee_pct(self) -> float:
+        """All-in maker fee %: base × GST (default 0.02 × 1.18 ≈ 0.0236)."""
+        return round(self.get_maker_fee_base_pct() * float(BYBIT_FEE_GST_MULT), 6)
+
+    def role_fee_pct(self, liquidity: str | None) -> tuple[float, float]:
+        """Return (base_pct, all_in_pct) for maker or taker. Never mixes roles."""
+        if str(liquidity or "taker").lower() == "maker":
+            return self.get_maker_fee_base_pct(), self.get_maker_fee_pct()
+        return self.get_taker_fee_base_pct(), self.get_taker_fee_pct()
+
+    def all_in_fee_usd(self, notional: float, liquidity: str | None = "taker") -> float:
+        """Fee in USDT for a fill notional at that role's all-in (base+GST) rate."""
+        _base, all_in = self.role_fee_pct(liquidity)
+        return round(float(notional or 0) * (all_in / 100.0), 6)
 
     def normalize_fee_usd(
         self,
         fee_usd: float | None,
         fee_pct: float | None = None,
         notional: float | None = None,
+        liquidity: str | None = None,
     ) -> float:
-        """Upgrade pre-GST stored fees to all-in; never double-apply GST."""
+        """Upgrade pre-GST stored fees of the SAME role to all-in; never maker→taker."""
         fee = float(fee_usd or 0)
-        all_in = self.get_taker_fee_pct()
-        base = self.get_taker_fee_base_pct()
+        liq = str(liquidity or "taker").lower()
+        base, all_in = self.role_fee_pct(liq)
         if fee <= 0 and notional is not None and float(notional) > 0:
-            return self.all_in_fee_usd(notional)
+            return self.all_in_fee_usd(notional, liq)
         if fee <= 0:
             return 0.0
         if fee_pct is not None:
@@ -872,15 +898,20 @@ class BybitAPIWrapper:
         return fee
 
     def fee_structure_dict(self) -> dict:
-        base = self.get_taker_fee_base_pct()
-        all_in = self.get_taker_fee_pct()
+        taker_base = self.get_taker_fee_base_pct()
+        taker_all = self.get_taker_fee_pct()
+        maker_base = self.get_maker_fee_base_pct()
+        maker_all = self.get_maker_fee_pct()
+        gst_pct = (BYBIT_FEE_GST_MULT - 1) * 100
         return {
-            "taker_fee_base_pct": base,
+            "taker_fee_base_pct": taker_base,
             "gst_mult": float(BYBIT_FEE_GST_MULT),
-            "taker_fee_all_in_pct": all_in,
+            "taker_fee_all_in_pct": taker_all,
+            "maker_fee_base_pct": maker_base,
+            "maker_fee_all_in_pct": maker_all,
             "note": (
-                f"Bybit taker {base:g}% + GST {(BYBIT_FEE_GST_MULT - 1) * 100:.0f}% "
-                f"on fee → all-in {all_in:g}% of fill value per side"
+                f"All TF entry maker {maker_base:g}% + GST {gst_pct:.0f}% → {maker_all:g}%; "
+                f"exit taker {taker_base:g}% + GST → {taker_all:g}%."
             ),
         }
 
@@ -1042,27 +1073,34 @@ MAX_SAME_SIDE_AUTO_PER_PAIR = int(os.environ.get("MAX_SAME_SIDE_AUTO_PER_PAIR", 
 AUTO_TRADE_AUTO_EXIT_ENABLED = True  # Path lock/trail profit + protective SL (same engine)
 INVERT_AUTO_TRADE_FIRE = False
 # Profit book (gross %, LONG/SHORT symmetric) — all TFs incl. 1m:
-#   Arm @ +0.85%; lock = peak gross (continuous); trail 0.15% → floor peak−0.15
-#   (e.g. peak +1.05% → exit floor +0.90%; peak +0.95% → floor +0.80%).
-PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.85"))
-PROFIT_LOCK_STEP_PCT = float(os.environ.get("PROFIT_LOCK_STEP_PCT", "0.20"))  # unused — continuous trail
-PROFIT_TRAIL_FIRST_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "0.15"))
-PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.15"))
+#   Arm @ +0.50, trail −0.10 until lock +0.65, then trail −0.20.
+#   No +1% hard exit — trail keeps running.
+PROFIT_LOCK_PCT = float(os.environ.get("PROFIT_LOCK_PCT", "0.50"))
+PROFIT_LOCK_STEP_PCT = float(os.environ.get("PROFIT_LOCK_STEP_PCT", "0.15"))
+PROFIT_DEEP_LOCK_PCT = float(os.environ.get("PROFIT_DEEP_LOCK_PCT", "0.65"))
+PROFIT_TRAIL_FIRST_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_FIRST_GIVEBACK_PCT", "0.10"))
+PROFIT_TRAIL_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_GIVEBACK_PCT", "0.10"))
+PROFIT_TRAIL_DEEP_GIVEBACK_PCT = float(os.environ.get("PROFIT_TRAIL_DEEP_GIVEBACK_PCT", "0.20"))
+PROFIT_LOCK_CAP_PCT = float(os.environ.get("PROFIT_LOCK_CAP_PCT", "0.99"))
+PROFIT_HARD_EXIT_PCT = float(os.environ.get("PROFIT_HARD_EXIT_PCT", "1.00"))
 # Opposite-signal flip: only exit old auto trade when unrealized gross > this %;
 # at or below → keep old open and skip the new opposite fire (no tiny flip-exits).
 FLIP_EXIT_MIN_GROSS_PCT = float(os.environ.get("FLIP_EXIT_MIN_GROSS_PCT", "0.25"))
 # Do not wipe a brand-new local open just because Bybit position API lags a few seconds.
 RECONCILE_GRACE_SECONDS = float(os.environ.get("RECONCILE_GRACE_SECONDS", "30"))
-# Protective stop-loss (gross %, LONG/SHORT symmetric) — all TFs incl. 1m:
-#   −0.75% → soft LOSS LOCK arms;
-#   −0.75…−1.00% zone: 0.25% upward trail (sell line = best_recovery + 0.25);
-#   −1.00% → hard exit (LOSS_BAND_EXIT);
-#   recover to −0.20% or better → UNLOCK (no sell) → profit book @ +0.85%.
-LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.75"))  # soft lock arm
-LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0.25"))
-LOSS_RECOVERY_RETRACE_CHOPPY_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_CHOPPY_PCT", "0.25"))
-LOSS_LOCK_CLEAR_PCT = float(os.environ.get("LOSS_LOCK_CLEAR_PCT", "0.20"))  # unlock → profit book
-LOSS_BAND_PCT = float(os.environ.get("LOSS_BAND_PCT", "1.00"))  # hard floor / instant exit
+# Protective stop-loss (gross %, LONG/SHORT symmetric) — inverse of profit book.
+#   −0.50% → LOSS LOCK arms (no sell on the way up);
+#   failed bounce: exit if price drops trail from the bounce high;
+#   trail 0.10 until worst reaches −0.65, then trail 0.20;
+#   −0.70% → hard exit (never wait for −1.00%);
+#   recover to −0.25% or better (from below) → UNLOCK, no sell → profit book.
+LOSS_PROTECT_PCT = float(os.environ.get("LOSS_PROTECT_PCT", "0.50"))  # soft lock arm
+LOSS_DEEP_LOCK_PCT = float(os.environ.get("LOSS_DEEP_LOCK_PCT", "0.65"))
+LOSS_RECOVERY_RETRACE_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_PCT", "0.10"))
+LOSS_DEEP_RETRACE_PCT = float(os.environ.get("LOSS_DEEP_RETRACE_PCT", "0.20"))
+LOSS_RECOVERY_RETRACE_CHOPPY_PCT = float(os.environ.get("LOSS_RECOVERY_RETRACE_CHOPPY_PCT", "0.10"))
+LOSS_LOCK_CLEAR_PCT = float(os.environ.get("LOSS_LOCK_CLEAR_PCT", "0.25"))  # unlock → profit book
+LOSS_BAND_PCT = float(os.environ.get("LOSS_BAND_PCT", "0.70"))  # hard floor / instant exit
 # Legacy 1m aliases (now same trail policy as other TFs — kept for env compatibility).
 LOSS_PROTECT_PCT_1M = float(os.environ.get("LOSS_PROTECT_PCT_1M", str(LOSS_PROTECT_PCT)))
 LOSS_BAND_PCT_1M = float(os.environ.get("LOSS_BAND_PCT_1M", str(LOSS_BAND_PCT)))
@@ -1146,15 +1184,15 @@ class AITradingAgent:
     STRUCTURE_SL_GRACE_SEC = float(os.environ.get("STRUCTURE_SL_GRACE_SEC", "2.0"))
     # TF hard stop (gross % loss) — align with path hard band −0.80%.
     HARD_STOP_PCT_BY_TF: dict[str, float] = {
-        "30s": float(os.environ.get("HARD_STOP_30S", "0.80")),
-        "1m": float(os.environ.get("HARD_STOP_1M", "0.80")),
-        "3m": float(os.environ.get("HARD_STOP_3M", "0.80")),
-        "5m": float(os.environ.get("HARD_STOP_5M", "0.80")),
-        "10m": float(os.environ.get("HARD_STOP_10M", "0.80")),
-        "15m": float(os.environ.get("HARD_STOP_15M", "0.80")),
-        "30m": float(os.environ.get("HARD_STOP_30M", "0.80")),
-        "1h": float(os.environ.get("HARD_STOP_1H", "0.80")),
-        "1D": float(os.environ.get("HARD_STOP_1D", "0.80")),
+        "30s": float(os.environ.get("HARD_STOP_30S", "0.55")),
+        "1m": float(os.environ.get("HARD_STOP_1M", "0.70")),
+        "3m": float(os.environ.get("HARD_STOP_3M", "0.85")),
+        "5m": float(os.environ.get("HARD_STOP_5M", "1.00")),
+        "10m": float(os.environ.get("HARD_STOP_10M", "1.20")),
+        "15m": float(os.environ.get("HARD_STOP_15M", "1.40")),
+        "30m": float(os.environ.get("HARD_STOP_30M", "1.70")),
+        "1h": float(os.environ.get("HARD_STOP_1H", "2.00")),
+        "1D": float(os.environ.get("HARD_STOP_1D", "3.00")),
     }
 
     def __init__(self):
@@ -1367,16 +1405,22 @@ class AITradingAgent:
         else:
             self.peak_net_pct = max(float(t.get("peak_gross_pct") or 0) for t in auto)
 
-    def hard_stop_pct_for_trade(self, trade: dict) -> float:
-        """Effective hard-stop magnitude (positive %) = min(TF stop, absolute max loss)."""
-        tf = (trade.get("timeframe_key") or "").strip()
+    def _trade_tf_key(self, trade: dict | None = None) -> str:
+        tf = str((trade or {}).get("timeframe_key") or "").strip()
         if not tf:
-            tf = SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
-        tf_stop = float(self.HARD_STOP_PCT_BY_TF.get(tf, self.HARD_STOP_PCT_BY_TF.get("5m", 0.40)))
+            tf = str(SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m"))
+        return tf
+
+    def _exit_ladder_for(self, trade: dict | None = None) -> dict:
+        return get_exit_ladder(self._trade_tf_key(trade))
+
+    def hard_stop_pct_for_trade(self, trade: dict) -> float:
+        """Hard-stop magnitude (positive %) from the TF ladder. Micro-caps stay tighter."""
+        tf_stop = float(self._exit_ladder_for(trade)["hard"])
         pair = (trade.get("pair") or "").strip().upper()
         if pair in MICRO_CAP_PAIRS:
             tf_stop = min(tf_stop, float(MICRO_CAP_HARD_STOP_PCT))
-        return min(tf_stop, float(self.STRICT_EXIT_MAX_LOSS_PCT))
+        return tf_stop
 
     def _is_micro_cap_pair(self, trade: dict) -> bool:
         return (trade.get("pair") or "").strip().upper() in MICRO_CAP_PAIRS
@@ -1460,34 +1504,43 @@ class AITradingAgent:
             )
             mark = entry
 
-        if t["side"] == "LONG":
+        side = str(t.get("side") or "LONG").strip().upper()
+        if side in ("BUY", "LONG"):
+            side = "LONG"
+        elif side in ("SELL", "SHORT"):
+            side = "SHORT"
+        if side == "LONG":
             gross_pct = ((mark - entry) / entry) * 100
         else:
             gross_pct = ((entry - mark) / entry) * 100
 
-        entry_fee_pct = float(t.get("entry_fee_pct") or bybit_api.get_taker_fee_pct())
-        all_in_pct = bybit_api.get_taker_fee_pct()
-        # Upgrade legacy opens booked at base 0.055% (no GST) to all-in ~0.0649%.
-        if entry_fee_pct < all_in_pct * 0.98:
-            entry_fee_pct = all_in_pct
-        entry_fee_usd = bybit_api.normalize_fee_usd(
-            t.get("entry_fee_usd"),
-            t.get("entry_fee_pct"),
-            t.get("position_size"),
-        )
-        exit_fee_pct = all_in_pct * (mark / entry)
+        notional = float(t.get("position_size") or 0)
+        entry_liq = str(t.get("entry_liquidity") or "taker").lower()
+        _role_base, role_all_in = bybit_api.role_fee_pct(entry_liq)
+        stored_entry_pct = t.get("entry_fee_pct")
+        if stored_entry_pct is None:
+            entry_fee_pct = role_all_in
+        else:
+            entry_fee_pct = float(stored_entry_pct)
+            # Upgrade same-role pre-GST only. Never promote maker to taker.
+            if (
+                entry_fee_pct > 0
+                and entry_fee_pct <= _role_base * 1.05
+                and entry_fee_pct < role_all_in * 0.98
+            ):
+                entry_fee_pct = role_all_in
+        entry_fee_usd = round(abs(notional * (entry_fee_pct / 100.0)), 4) if notional > 0 else 0.0
+        exit_fee_pct = abs(float(bybit_api.get_taker_fee_pct()))
+        entry_fee_pct = abs(float(entry_fee_pct))
+        # Fee is a cost: always subtract so profit shrinks and loss grows.
         if for_close:
             net_pct = gross_pct - entry_fee_pct - exit_fee_pct
         else:
-            # Unrealized: do not mark exit fee — that was painting winners red.
             net_pct = gross_pct - entry_fee_pct
 
-        gross_usd = t["position_size"] * (gross_pct / 100)
-        exit_fee_usd = t["position_size"] * (exit_fee_pct / 100) if for_close else 0.0
-        if for_close:
-            net_usd = gross_usd - entry_fee_usd - exit_fee_usd
-        else:
-            net_usd = gross_usd - entry_fee_usd
+        gross_usd = notional * (gross_pct / 100.0)
+        exit_fee_usd = round(notional * (exit_fee_pct / 100.0), 4) if for_close else 0.0
+        net_usd = gross_usd - entry_fee_usd - exit_fee_usd
 
         return {
             "gross_pct": gross_pct,
@@ -1498,6 +1551,8 @@ class AITradingAgent:
             "entry_fee_pct": entry_fee_pct,
             "exit_fee_pct": exit_fee_pct if for_close else 0.0,
             "entry_fee_usd": entry_fee_usd,
+            "entry_liquidity": entry_liq,
+            "exit_liquidity": "taker" if for_close else None,
             "mark_price": mark,
         }
 
@@ -1514,12 +1569,17 @@ class AITradingAgent:
             "gross_pnl_pct": 0.0,
             "net_pnl_usd": 0.0,
             "entry_fee_usd": trade["entry_fee_usd"],
+            "entry_fee_pct": trade.get("entry_fee_pct"),
+            "entry_liquidity": trade.get("entry_liquidity") or "taker",
             "exit_fee_usd": 0.0,
+            "exit_fee_pct": 0.0,
+            "exit_liquidity": None,
             "status": "active",
             "closed_reason": None,
             "source": trade.get("source", "auto"),
             "protected": trade.get("source") == "manual",
             "signal_candle_time": trade.get("signal_candle_time"),
+            "detect_candle_time": trade.get("detect_candle_time"),
             "pattern": trade.get("pattern"),
             "opened_at": trade.get("opened_at"),
             "timeframe_key": trade.get("timeframe_key"),
@@ -1532,42 +1592,56 @@ class AITradingAgent:
             print(f"[MYSQL] open persist skipped: {exc}")
 
     def get_entry_candle_highlights(self) -> list[dict]:
-        """Candles where auto trades fired or exited — scoped per pair for chart neon."""
+        """Detect / fire / exit candles for chart neon — scoped per pair."""
         seen: set[tuple[str, int, str]] = set()
         out: list[dict] = []
+
+        def _chart_sec(raw) -> int | None:
+            if raw is None:
+                return None
+            try:
+                v = int(raw)
+            except (TypeError, ValueError):
+                return None
+            return int(v // 1000) if v > 1_000_000_000_000 else v
+
+        def _add(pair: str, chart_time: int | None, stage: str, row: dict, **extra) -> None:
+            if chart_time is None or not pair:
+                return
+            key = (pair, chart_time, stage)
+            if key in seen:
+                return
+            seen.add(key)
+            out.append({
+                "time": chart_time,
+                "pair": pair,
+                "side": row.get("side", "LONG"),
+                "pattern": row.get("pattern") or (
+                    "Trade exit" if stage == "exited" else "Pattern"
+                ),
+                "opened_at": row.get("opened_at") if stage != "exited" else row.get("closed_at"),
+                "stage": stage,
+                **extra,
+            })
+
         for row in self.trade_history:
             if row.get("source") == "manual":
                 continue
             pair = row.get("pair") or ""
-            raw = row.get("signal_candle_time")
-            if raw is not None:
-                chart_time = int(raw // 1000) if raw > 1_000_000_000_000 else int(raw)
-                key = (pair, chart_time, "fired")
-                if key not in seen:
-                    seen.add(key)
-                    out.append({
-                        "time": chart_time,
-                        "pair": pair,
-                        "side": row.get("side", "LONG"),
-                        "pattern": row.get("pattern"),
-                        "opened_at": row.get("opened_at"),
-                        "stage": "fired",
-                    })
-            exit_raw = row.get("exit_candle_time")
-            if exit_raw is not None and row.get("status") == "sold":
-                exit_time = int(exit_raw // 1000) if exit_raw > 1_000_000_000_000 else int(exit_raw)
-                key = (pair, exit_time, "exited")
-                if key not in seen:
-                    seen.add(key)
-                    out.append({
-                        "time": exit_time,
-                        "pair": pair,
-                        "side": row.get("side", "LONG"),
-                        "pattern": row.get("pattern") or "Trade exit",
-                        "opened_at": row.get("closed_at"),
-                        "stage": "exited",
-                        "reason": row.get("closed_reason"),
-                    })
+            fire_t = _chart_sec(row.get("signal_candle_time"))
+            detect_t = _chart_sec(row.get("detect_candle_time"))
+            # Detect on the lock candle (left of fire) so chart order is detect → fire.
+            if detect_t is not None and detect_t != fire_t:
+                _add(pair, detect_t, "detected", row)
+            _add(pair, fire_t, "fired", row)
+            if row.get("status") == "sold":
+                _add(
+                    pair,
+                    _chart_sec(row.get("exit_candle_time")),
+                    "exited",
+                    row,
+                    reason=row.get("closed_reason"),
+                )
         return out
 
     def _finalize_trade_history(self, trade, metrics, reason):
@@ -1584,7 +1658,12 @@ class AITradingAgent:
                 row["gross_pnl_pct"] = round(metrics["gross_pct"], 4)
                 row["gross_pnl_usd"] = round(float(metrics.get("gross_usd") or 0), 2)
                 row["net_pnl_usd"] = round(metrics["net_usd"], 2)
+                row["entry_fee_pct"] = trade.get("entry_fee_pct")
+                row["entry_fee_usd"] = trade.get("entry_fee_usd") or 0
+                row["entry_liquidity"] = trade.get("entry_liquidity") or "taker"
                 row["exit_fee_usd"] = round(metrics["exit_fee_usd"], 4)
+                row["exit_fee_pct"] = float(metrics.get("exit_fee_pct") or 0)
+                row["exit_liquidity"] = "taker"
                 row["status"] = "sold"
                 row["closed_reason"] = reason
                 row["closed_at"] = time.time()
@@ -1606,7 +1685,11 @@ class AITradingAgent:
                 "gross_pnl_usd": round(float(metrics.get("gross_usd") or 0), 2),
                 "net_pnl_usd": round(metrics["net_usd"], 2),
                 "entry_fee_usd": trade.get("entry_fee_usd") or 0,
+                "entry_fee_pct": trade.get("entry_fee_pct"),
+                "entry_liquidity": trade.get("entry_liquidity") or "taker",
                 "exit_fee_usd": round(metrics["exit_fee_usd"], 4),
+                "exit_fee_pct": float(metrics.get("exit_fee_pct") or 0),
+                "exit_liquidity": "taker",
                 "status": "sold",
                 "closed_reason": reason,
                 "closed_at": time.time(),
@@ -1688,10 +1771,13 @@ class AITradingAgent:
                 continue
             m_open = self._trade_metrics(t, for_close=False)
             open_gross += float(m_open["gross_usd"])
-            # Always all-in (base+GST) so Session Broker Fee matches Bybit Trade History.
+            # Role all-in (base+GST). Maker entry stays maker — do not default to taker.
             open_fees += float(
                 m_open.get("entry_fee_usd")
-                or bybit_api.all_in_fee_usd(t.get("position_size"))
+                or bybit_api.all_in_fee_usd(
+                    t.get("position_size"),
+                    t.get("entry_liquidity") or "taker",
+                )
             )
 
         closed_gross = 0.0
@@ -1704,21 +1790,24 @@ class AITradingAgent:
                 continue
             closed_count += 1
             notional = float(row.get("position_size") or 0)
+            entry_liq = row.get("entry_liquidity") or "taker"
             entry_f = bybit_api.normalize_fee_usd(
                 row.get("entry_fee_usd"),
                 row.get("entry_fee_pct"),
                 notional,
+                liquidity=entry_liq,
             )
             exit_f = bybit_api.normalize_fee_usd(
                 row.get("exit_fee_usd"),
                 row.get("exit_fee_pct"),
                 notional,
+                liquidity="taker",
             )
             if entry_f <= 0 and notional > 0:
-                entry_f = bybit_api.all_in_fee_usd(notional)
+                entry_f = bybit_api.all_in_fee_usd(notional, entry_liq)
             if exit_f <= 0 and notional > 0:
-                # Closed without exit fee recorded — estimate one all-in fill.
-                exit_f = bybit_api.all_in_fee_usd(notional)
+                # Closed without exit fee recorded — estimate one taker fill.
+                exit_f = bybit_api.all_in_fee_usd(notional, "taker")
             # Closed = buy + sell both happened → add both fees.
             closed_fees += entry_f + exit_f
             stored_gross = row.get("gross_pnl_usd")
@@ -2099,6 +2188,7 @@ class AITradingAgent:
         bybit_symbol=None,
         pattern=None,
         signal_candle_time=None,
+        detect_candle_time=None,
         taapi_action=None,
         sl_price=None,
         tp_price=None,
@@ -2111,6 +2201,7 @@ class AITradingAgent:
         strategy=None,
         brain_verdict=None,
         train_context=None,
+        entry_liquidity=None,
     ):
         """ RULE 1: Opens a position as a Market Order (RULE 7) with simulated minor slippage.
         Manual entries default to 1% margin x 100x leverage. Auto entries pass
@@ -2155,11 +2246,14 @@ class AITradingAgent:
                 print(f"[PILLAR 3: AI AGENT] {self.last_open_skip_reason}.")
                 return None
 
-            ok_sc, sc_msg = self.same_chart_score_beats_last(trade_pair, score)
-            if not ok_sc:
-                self.last_open_skip_reason = sc_msg
-                print(f"[PILLAR 3: AI AGENT] {self.last_open_skip_reason}.")
-                return None
+            if _score_gate_waived(pattern=pattern, family=family, strategy=strategy):
+                print(f"[PILLAR 3: AI AGENT] score stack waived for tweezer on {trade_pair}")
+            else:
+                ok_sc, sc_msg = self.same_chart_score_beats_last(trade_pair, score)
+                if not ok_sc:
+                    self.last_open_skip_reason = sc_msg
+                    print(f"[PILLAR 3: AI AGENT] {self.last_open_skip_reason}.")
+                    return None
 
         # AI Agent Instructions: global max_concurrent; 1m also caps per pair/chart.
         blocked = concurrent_entry_blocked(self, trade_pair)
@@ -2233,8 +2327,13 @@ class AITradingAgent:
         if qty is None and position_size_usd is not None:
             qty = compute_order_qty(position_size_usd, filled_price, bybit_symbol=bybit_symbol)
 
-        # RULE 6: Live Entry Fee, based on Bybit's current Taker fee tier
-        entry_fee_pct = bybit_api.get_taker_fee_pct()
+        # RULE 6: Live entry fee. Maker fills use maker all-in; else taker.
+        liq = str(entry_liquidity or "taker").lower()
+        if liq not in ("maker", "taker"):
+            liq = "taker"
+        if source == "manual":
+            liq = "taker"
+        entry_fee_pct = bybit_api.get_maker_fee_pct() if liq == "maker" else bybit_api.get_taker_fee_pct()
         entry_fee_usd = round(position_size * (entry_fee_pct / 100), 4)
 
         tf_key = timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
@@ -2251,11 +2350,12 @@ class AITradingAgent:
         clean_sl = None
         clean_tp = None
         # Probe loss tier from filled entry (trade dict not built yet).
-        _probe = {"entry": filled_price}
+        _probe = {"entry": filled_price, "timeframe_key": tf_key}
         trail_pct, arm_pct, band_pct, _is_small, _tier = self._loss_policy_for_trade(_probe)
+        lock_start = self._profit_lock_start_pct(_probe)
         if source == "auto":
             loss_pct = arm_pct
-            profit_pct = PATH_TP_WIDE_PCT
+            profit_pct = lock_start
             try:
                 import family_rules as _fr
                 fam_sl, fam_tp = _fr.effective_sl_tp_pct(
@@ -2296,6 +2396,7 @@ class AITradingAgent:
             "qty": qty,
             "entry_fee_pct": entry_fee_pct,
             "entry_fee_usd": entry_fee_usd,
+            "entry_liquidity": liq,
             "source": source,
             "opened_at": time.time(),
             "peak_gross_pct": 0.0,
@@ -2314,6 +2415,8 @@ class AITradingAgent:
             "strategy": strategy,
             "brain_verdict": brain_verdict,
             "signal_candle_time": signal_candle_time,
+            # Closed bar where pattern locked (may differ from fire / signal candle).
+            "detect_candle_time": detect_candle_time,
             "taapi_action": taapi_action,
             "sl_price": clean_sl,
             "tp_price": clean_tp,
@@ -2324,7 +2427,7 @@ class AITradingAgent:
             "exit_mode": "path_sl" if source == "auto" else "manual",
             "entry_pattern": ENTRY_PATTERN_NAME,
             # Path SL + profit lock/trail state (auto):
-            #   Path SL: −0.60% soft / −0.80% hard + trail; profit arm +0.65% peak-trail (all TFs incl. 1m)
+            #   1m: profit arm +0.50% trail −0.10%; SL soft −0.50% trail 0.10% hard −0.70%
             "path_last_gross_pct": 0.0,
             "path_adverse_streak": 0,
             "path_favorable_streak": 0,
@@ -2333,7 +2436,7 @@ class AITradingAgent:
             "path_continuous_dump": False,
             "path_continuous_run": False,
             "profit_lock": False,
-            "profit_lock_level": None,  # ratchet: 0.50 → (1m: 0.65) → +0.20 …
+            "profit_lock_level": None,  # ratchet: peak gross; 1m floor = peak − 0.10
             "loss_protect": False,
             "loss_deep_hold": False,  # True once gross ≤ hard floor band
             "loss_adverse_extreme_gross": None,  # worst trough after protect (most negative)
@@ -2342,7 +2445,7 @@ class AITradingAgent:
             "loss_recovery_peak_price": None,
             "path_sl_pct": band_pct,
             "loss_protect_pct": arm_pct,
-            "path_tp_pct": PROFIT_LOCK_PCT,
+            "path_tp_pct": lock_start,
         }
         self.trades.append(trade)
         self.set_pair_mark(trade_pair, filled_price)
@@ -2492,11 +2595,22 @@ class AITradingAgent:
             out.update({
                 "current": round(float(mark), px_decimals),
                 "gross_pnl_pct": round(m["gross_pct"], 4),
-                # UI trade list: price profit only (no fee). Fees roll up in header.
+                "gross_pnl_usd": round(float(m.get("gross_usd") or 0), 2),
                 "pnl": round(m["gross_pct"], 4),
                 "net_pnl_usd": round(m["net_usd"], 2),
-                "exit_fee_usd": round(m["exit_fee_usd"], 4),
-                "status": "locked" if trade.get("is_lock_active") else "active",
+                "entry_fee_pct": round(float(m.get("entry_fee_pct") or 0), 6),
+                "entry_fee_usd": round(float(m.get("entry_fee_usd") or 0), 4),
+                "entry_liquidity": (trade.get("entry_liquidity") or "taker"),
+                "exit_fee_pct": 0.0,
+                "exit_fee_usd": 0.0,
+                "exit_liquidity": None,
+                "status": (
+                    "locked" if trade.get("is_lock_active")
+                    else "sl_lock" if trade.get("loss_protect") or trade.get("is_stop_active")
+                    else "active"
+                ),
+                "loss_protect": bool(trade.get("loss_protect")),
+                "is_stop_active": bool(trade.get("is_stop_active")),
                 "protected": trade.get("source") == "manual",
                 "peak_gross_pct": round(float(trade.get("peak_gross_pct") or 0), 4),
                 "sell_trigger_pct": (
@@ -2530,6 +2644,8 @@ class AITradingAgent:
         for row in sold_rows:
             out = dict(row)
             out.setdefault("protected", out.get("source") == "manual")
+            out.setdefault("entry_liquidity", "taker")
+            out.setdefault("exit_liquidity", "taker")
             # Prefer stored gross for list display.
             if out.get("gross_pnl_pct") is not None:
                 out["pnl"] = out["gross_pnl_pct"]
@@ -2637,35 +2753,45 @@ class AITradingAgent:
     def _loss_policy_for_trade(self, trade: dict) -> tuple[float, float, float, bool, str]:
         """Return (trail_pct, arm_pct, band_pct, is_small_coin, tier_label).
 
-        Micro-cap pairs: soft lock @ −0.25%, hard exit @ −0.35%.
-        All other TFs incl. 1m: soft −0.60%, trail +0.20%, hard −0.80%.
+        Micro-cap pairs stay tighter. All other trades use the TF ladder
+        (1m < 5m < 15m < 1h < 1D).
         """
+        ladder = self._exit_ladder_for(trade)
         if self._is_micro_cap_pair(trade):
             return (
-                LOSS_RECOVERY_RETRACE_PCT,
+                float(ladder["trail"]),
                 MICRO_CAP_LOSS_ARM_PCT,
                 MICRO_CAP_LOSS_BAND_PCT,
                 True,
                 "micro_cap",
             )
-        tier = "1m" if self._is_1m_trade(trade) else "normal"
-        return LOSS_RECOVERY_RETRACE_PCT, LOSS_PROTECT_PCT, LOSS_BAND_PCT, False, tier
+        return float(ladder["trail"]), float(ladder["soft"]), float(ladder["hard"]), False, ladder["timeframe"]
 
     def _loss_lock_clear_pct_for_trade(self, trade: dict) -> float:
-        """Unlock threshold (recover to −X% or better)."""
-        return float(LOSS_LOCK_CLEAR_PCT)
+        """Unlock threshold (recover to −X% or better) — half the TF soft stop."""
+        return float(self._exit_ladder_for(trade)["unlock"])
 
     def _loss_retrace_for_trade(self, trade: dict) -> float:
-        """Upward recovery trail in loss zone (sell line = best_recovery + this)."""
-        return float(LOSS_RECOVERY_RETRACE_PCT)
+        """Failed-bounce giveback = this TF's trail."""
+        return float(self._exit_ladder_for(trade)["trail"])
 
-    def _loss_trail_sell_line(self, trade: dict, *, arm_pct: float | None = None) -> float:
-        """Sell line while loss lock armed: best_recovery + 0.20% (e.g. −0.55 → −0.35)."""
-        trail = self._loss_retrace_for_trade(trade)
-        arm = float(arm_pct if arm_pct is not None else LOSS_PROTECT_PCT)
-        best = trade.get("loss_recovery_peak_gross")
-        anchor = float(best) if best is not None else -arm
-        return anchor + trail
+    def _loss_bounce_started(self, trade: dict) -> bool:
+        """True once price has bounced strictly above the worst since lock."""
+        rec = trade.get("loss_recovery_peak_gross")
+        adv = trade.get("loss_adverse_extreme_gross")
+        if rec is None or adv is None:
+            return False
+        return float(rec) > float(adv) + 1e-9
+
+    def _loss_trail_sell_line(self, trade: dict, *, arm_pct: float | None = None) -> float | None:
+        """Sell line = bounce high − trail. None until a real bounce exists.
+
+        Does not sell the bounce itself — only a giveback from that high.
+        """
+        if not self._loss_bounce_started(trade):
+            return None
+        rec = float(trade.get("loss_recovery_peak_gross"))
+        return rec - self._loss_retrace_for_trade(trade)
 
     def _loss_band_pct(self) -> float:
         """Hard loss floor (−0.70%)."""
@@ -2682,7 +2808,7 @@ class AITradingAgent:
         trade["path_last_gross_pct"] = gross_pct
         lock_start = self._profit_lock_start_pct(trade)
 
-        # Soft lock @ arm%; trail in arm…band; hard floor @ band% (all TFs incl. 1m).
+        # Soft lock @ arm%; failed-bounce trail; hard floor @ band% (all TFs incl. 1m).
         if gross_pct <= -arm_pct:
             trade["loss_protect"] = True
         if gross_pct <= -band_pct:
@@ -2690,7 +2816,8 @@ class AITradingAgent:
         if trade.get("loss_protect"):
             self._update_loss_protect_extremes(trade, gross_pct, mark)
             clear_pct = self._loss_lock_clear_pct_for_trade(trade)
-            if gross_pct >= -clear_pct - 1e-9:
+            # Unlock only above the hard floor — a −0.70 tick must stay locked for the exit.
+            if gross_pct > -band_pct + 1e-9 and gross_pct >= -clear_pct - 1e-9:
                 self._clear_loss_protect_lock(trade)
 
         trade["path_sl_pct"] = band_pct
@@ -2708,10 +2835,10 @@ class AITradingAgent:
             trade["lock_level_pct"] = lock_lvl
             trade["sell_trigger_pct"] = trail_stop
         elif trade.get("loss_protect"):
-            active_stop = band_pct if trade.get("loss_deep_hold") else arm_pct
+            sell_line = self._loss_trail_sell_line(trade, arm_pct=arm_pct)
             trade["is_stop_active"] = True
-            trade["stop_level_pct"] = -active_stop
-            trade["sell_trigger_pct"] = self._loss_trail_sell_line(trade, arm_pct=arm_pct)
+            trade["stop_level_pct"] = -band_pct
+            trade["sell_trigger_pct"] = sell_line if sell_line is not None else -band_pct
             trade["path_tp_pct"] = lock_start
             trade["is_lock_active"] = False
         else:
@@ -2738,14 +2865,12 @@ class AITradingAgent:
             trade["sl_price"] = round(sl, price_decimals_for_mark(entry))
             trade["tp_price"] = round(tp, price_decimals_for_mark(entry))
         elif trade.get("loss_protect"):
-            active_stop = band_pct if trade.get("loss_deep_hold") else arm_pct
-            sl, tp = self._fixed_exit_prices(
-                entry, side, loss_pct=active_stop, profit_pct=lock_start
-            )
-            if sl is not None:
-                trade["sl_price"] = sl
-            if tp is not None:
-                trade["tp_price"] = tp
+            sell_line = self._loss_trail_sell_line(trade, arm_pct=arm_pct)
+            stop_gross = float(sell_line) if sell_line is not None else -band_pct
+            sl = self._mark_from_gross_pct(entry, side, stop_gross)
+            tp = self._mark_from_gross_pct(entry, side, lock_start)
+            trade["sl_price"] = round(sl, price_decimals_for_mark(entry))
+            trade["tp_price"] = round(tp, price_decimals_for_mark(entry))
         else:
             sl, tp = self._fixed_exit_prices(
                 entry, side, loss_pct=arm_pct, profit_pct=lock_start
@@ -2756,8 +2881,12 @@ class AITradingAgent:
                 trade["tp_price"] = tp
 
     def _profit_lock_start_pct(self, trade: dict | None = None) -> float:
-        """Profit arm: +0.65% trail book on all TFs (incl. 1m)."""
-        return float(PROFIT_LOCK_PCT)
+        """Profit arm from the TF ladder (1m +0.50 … 1D +2.50)."""
+        return float(self._exit_ladder_for(trade)["profit"])
+
+    def _profit_hard_exit_pct(self, trade: dict | None = None) -> float | None:
+        """No +1% profit lock and no hard profit exit. Trail 0.20 books the winner."""
+        return None
 
     def _is_scalp_trade(self, trade: dict | None = None) -> bool:
         """1m and 5m share the same scalp entry/confirm pipeline (exit may differ on 1m)."""
@@ -2771,20 +2900,19 @@ class AITradingAgent:
         return tf == "1m"
 
     def _profit_giveback_for_lock(self, lock_lvl: float, trade: dict | None = None) -> float:
-        """Trail giveback from peak lock — 0.10% on all TFs."""
-        return float(PROFIT_TRAIL_GIVEBACK_PCT)
+        """Trail −0.10 until lock reaches +0.65, then −0.20. No 1% hard book."""
+        if float(lock_lvl) + 1e-9 >= float(PROFIT_DEEP_LOCK_PCT):
+            return float(PROFIT_TRAIL_DEEP_GIVEBACK_PCT)
+        return float(PROFIT_TRAIL_FIRST_GIVEBACK_PCT)
 
     def _ratchet_profit_lock_level(self, trade: dict, gross_pct: float) -> float:
-        """Continuous profit trail: lock ratchets with peak gross (never backward).
-
-        Examples: peak +0.73% → floor +0.63%; peak +0.58% → floor +0.48%.
-        """
+        """Peak lock, never backward. No 0.99 clip — HTF can run past 1%."""
         trade["profit_lock"] = True
         start = self._profit_lock_start_pct(trade)
         g = float(gross_pct)
         prev = trade.get("profit_lock_level")
         base = float(prev) if prev is not None else start
-        level = max(base, g)
+        level = max(base, g, start)
         trade["profit_lock_level"] = float(level)
         return float(trade["profit_lock_level"])
 
@@ -2804,11 +2932,21 @@ class AITradingAgent:
     def _update_loss_protect_extremes(
         self, trade: dict, gross_pct: float, mark: float | None
     ) -> None:
-        """While soft loss lock is armed: track best recovery PnL (never move backward)."""
+        """Track worst adverse and bounce high. A new trough clears the bounce.
+
+        Recovery peak is set only after price is strictly better than the worst,
+        so a continued slide does not look like a failed bounce.
+        """
         side = trade.get("side")
-        # Optional: still record worst adverse for logs (does not reset recovery)
         adv = trade.get("loss_adverse_extreme_gross")
-        if adv is None or gross_pct < float(adv) - 1e-9:
+        new_worst = adv is None or gross_pct < float(adv) - 1e-9
+        if new_worst:
+            prev_rec = trade.get("loss_recovery_peak_gross")
+            bounce_was = (
+                prev_rec is not None
+                and adv is not None
+                and float(prev_rec) > float(adv) + 1e-9
+            )
             trade["loss_adverse_extreme_gross"] = gross_pct
             if mark is not None and mark > 0:
                 if side == "LONG":
@@ -2819,26 +2957,33 @@ class AITradingAgent:
                     ext = trade.get("loss_adverse_extreme_price")
                     if ext is None or mark > float(ext):
                         trade["loss_adverse_extreme_price"] = float(mark)
-
-        # Best recovery anchor — ratchet forward only, never reset
-        rec = trade.get("loss_recovery_peak_gross")
-        if rec is None:
-            trade["loss_recovery_peak_gross"] = gross_pct
-            if mark is not None and mark > 0:
-                trade["loss_recovery_peak_price"] = float(mark)
+            if bounce_was:
+                # Keep the bounce high if this tick already failed the trail,
+                # so the exit check still sees the high on a gap through the line.
+                sell_line = float(prev_rec) - self._loss_retrace_for_trade(trade)
+                if gross_pct > sell_line + 1e-9:
+                    trade["loss_recovery_peak_gross"] = None
+                    trade["loss_recovery_peak_price"] = None
             return
 
-        if gross_pct > float(rec) + 1e-9:
-            trade["loss_recovery_peak_gross"] = gross_pct
-            if mark is not None and mark > 0:
-                # Best recovery price: LONG = higher mark, SHORT = lower mark
-                rec_px = trade.get("loss_recovery_peak_price")
-                if side == "LONG":
-                    if rec_px is None or mark > float(rec_px):
-                        trade["loss_recovery_peak_price"] = float(mark)
-                elif side == "SHORT":
-                    if rec_px is None or mark < float(rec_px):
-                        trade["loss_recovery_peak_price"] = float(mark)
+        worst = float(trade.get("loss_adverse_extreme_gross"))
+        if gross_pct <= worst + 1e-9:
+            return
+
+        rec = trade.get("loss_recovery_peak_gross")
+        if rec is not None and gross_pct <= float(rec) + 1e-9:
+            return
+        trade["loss_recovery_peak_gross"] = gross_pct
+        if mark is not None and mark > 0:
+            rec_px = trade.get("loss_recovery_peak_price")
+            if side == "LONG":
+                if rec_px is None or mark > float(rec_px):
+                    trade["loss_recovery_peak_price"] = float(mark)
+            elif side == "SHORT":
+                if rec_px is None or mark < float(rec_px):
+                    trade["loss_recovery_peak_price"] = float(mark)
+            elif rec_px is None:
+                trade["loss_recovery_peak_price"] = float(mark)
 
     def _mark_from_gross_pct(self, entry: float, side: str, gross_pct: float) -> float:
         """Price that realizes exactly gross_pct for side (paper SL/TP fill clamp)."""
@@ -2847,16 +2992,21 @@ class AITradingAgent:
         return entry * (1.0 - float(gross_pct) / 100.0)
 
     def _evaluate_fixed_pct_exit(self, trade: dict, mark: float) -> str | None:
-        """Single path-exit engine: profit locks + two-tier loss stop.
+        """Single path-exit engine: stepped profit book + inverse failed-bounce SL.
 
-        All TFs (incl. 1m): profit trail book + soft lock / recovery trail / hard band.
+        Profit: +0.50/−0.10 until +0.65, then −0.20. No +1% hard exit.
+        Loss: lock −0.50, trail only if bounce fails, hard ≤ −0.70, unlock −0.25.
         LONG/SHORT symmetric on gross %. Fees stay out of the trigger.
         """
         trade.pop("_exit_fill_mark", None)
         entry = float(trade.get("entry") or 0)
         if entry <= 0:
             return None
-        side = trade.get("side")
+        side = str(trade.get("side") or "").strip().upper()
+        if side in ("BUY", "LONG"):
+            side = "LONG"
+        elif side in ("SELL", "SHORT"):
+            side = "SHORT"
         if side not in ("LONG", "SHORT"):
             return None
 
@@ -2884,7 +3034,17 @@ class AITradingAgent:
             elif target_gross < 0 and gross_pct < target_gross - 1e-9:
                 trade["_exit_fill_mark"] = self._mark_from_gross_pct(entry, side, target_gross)
 
-        # 1) Profit step-locks (all TFs incl. 1m)
+        hard_profit = self._profit_hard_exit_pct(trade)
+        # 1) Hard profit book disabled — never exit at +1%.
+        if hard_profit is not None and gross_pct >= float(hard_profit) - 1e-9:
+            _arm_paper_fill(hard_profit)
+            return (
+                f"PROFIT_HARD_EXIT | {side} hard_book=+{hard_profit:g}% now={gross_pct:.3f}% "
+                f"(lock cap +{PROFIT_LOCK_CAP_PCT:g}%) "
+                f"tier={tier} mark={mark:.6f} entry={entry:.6f}"
+            )
+
+        # 2) Profit lock: −0.10 until +0.65, then −0.20. No hard book at +1%.
         if gross_pct >= lock_start:
             self._ratchet_profit_lock_level(trade, gross_pct)
 
@@ -2894,7 +3054,10 @@ class AITradingAgent:
             lock_giveback = lock_lvl - gross_pct
             if lock_giveback >= giveback_need - 1e-9:
                 fill_at = lock_lvl - giveback_need
-                _arm_paper_fill(fill_at)
+                if paper and gross_pct < fill_at - 1e-9:
+                    trade["_exit_fill_mark"] = self._mark_from_gross_pct(entry, side, fill_at)
+                else:
+                    _arm_paper_fill(fill_at)
                 floor_pct = lock_lvl - giveback_need
                 return (
                     f"PROFIT_LOCK_EXIT | {side} peak_lock={lock_lvl:.3f}% now={gross_pct:.3f}% "
@@ -2904,47 +3067,42 @@ class AITradingAgent:
                 )
             return None
 
-        # 2) Soft lock @ arm%; trail in arm…band; hard exit @ band%.
+        # 3) Hard loss first, then unlock, then failed-bounce trail.
+        if gross_pct <= -band_pct + 1e-9:
+            _arm_paper_fill(-band_pct)
+            self._clear_loss_protect_lock(trade)
+            return (
+                f"LOSS_BAND_EXIT | {side} hard_stop=−{band_pct:g}% now={gross_pct:.3f}% "
+                f"(lock −{arm_pct:g}, trail until just before −{band_pct:g}%) "
+                f"tier={tier} mark={mark:.6f} entry={entry:.6f}"
+            )
+
         if gross_pct <= -arm_pct:
             trade["loss_protect"] = True
-        if gross_pct <= -band_pct:
-            trade["loss_deep_hold"] = True
+            trade["loss_deep_hold"] = gross_pct <= -float(LOSS_DEEP_LOCK_PCT)
 
         if trade.get("loss_protect"):
             self._update_loss_protect_extremes(trade, gross_pct, mark)
 
-            # Recover to −clear% or better → unlock, no sell; profit book takes over.
+            # Bounce back to −clear% or better → drop lock, no sell, profit book can arm.
             if gross_pct >= -clear_pct - 1e-9:
                 self._clear_loss_protect_lock(trade)
                 return None
 
-            # Hard floor @ band% — instant exit (prevents deep bleed).
-            if gross_pct <= -band_pct - 1e-9:
-                _arm_paper_fill(-band_pct)
+            sell_line = self._loss_trail_sell_line(trade, arm_pct=arm_pct)
+            if sell_line is not None and gross_pct <= sell_line + 1e-9:
+                trail_need = self._loss_retrace_for_trade(trade)
+                best = float(trade.get("loss_recovery_peak_gross") or gross_pct)
+                if paper and gross_pct < sell_line - 1e-9:
+                    trade["_exit_fill_mark"] = self._mark_from_gross_pct(entry, side, sell_line)
                 self._clear_loss_protect_lock(trade)
                 return (
-                    f"LOSS_BAND_EXIT | {side} hard_stop=−{band_pct:g}% now={gross_pct:.3f}% "
-                    f"(trail zone −{arm_pct:g}…−{band_pct:g}%) "
-                    f"tier={tier} mark={mark:.6f} entry={entry:.6f}"
-                )
-
-            # Recovery trail while still above hard floor.
-            best = float(
-                trade.get("loss_recovery_peak_gross")
-                if trade.get("loss_recovery_peak_gross") is not None
-                else gross_pct
-            )
-            sell_line = best + trail_pct
-            if gross_pct >= sell_line - 1e-9:
-                _arm_paper_fill(sell_line)
-                self._clear_loss_protect_lock(trade)
-                return (
-                    f"LOSS_RECOVERY_TRAIL | {side} lock={best:.3f}% "
+                    f"LOSS_RECOVERY_TRAIL | {side} bounce_high={best:.3f}% "
                     f"sell_line={sell_line:.3f}% now={gross_pct:.3f}% "
-                    f"(+{trail_pct:g}% trail in −{arm_pct:g}…−{band_pct:g}% zone) "
+                    f"(failed bounce −{trail_need:g}% from high; hard @ −{band_pct:g}%) "
                     f"tier={tier} mark={mark:.6f} entry={entry:.6f}"
                 )
-            return None  # HOLD in trail zone until bounce, unlock, or hard floor
+            return None  # HOLD until failed bounce, unlock, or hard floor
 
         return None
 
@@ -3018,6 +3176,7 @@ class AITradingAgent:
             )
 
         self._finalize_trade_history(trade, metrics, reason)
+        _stamp_side_exit_cooldown(trade, metrics, reason)
         print(
             f"[PILLAR 3: AI AGENT] Closed {trade['side']} #{trade['id']} on {trade['pair']} "
             f"| net=${metrics['net_usd']:.2f} ({metrics['net_pct']:.3f}%)"
@@ -3420,8 +3579,7 @@ class AITradingAgent:
             f"[AI ENGINE] Armed — trading READY now "
             f"(boot UI scan-driven, max {ENGINE_BOOT_MAX_SEC:g}s). "
             f"Momentum watchlist gate pending. "
-            f"Detect on closed candle → scalp: lock + consecutive green/red ticks "
-            f"(wrong-color bar skipped, max {ONE_M_CONFIRM_MAX_BARS} bars); "
+            f"Detect on closed candle → fire immediately, no confirm candle; "
             f"other TFs: next candle open + matching color. "
             f"First detect per pair is skipped."
         )
@@ -3450,12 +3608,15 @@ class AITradingAgent:
         self.momentum_scan_stage = str(stage or "")
 
     def persist_runtime(self, force: bool = False) -> None:
-        """Checkpoint engine state so restart/outage does not wipe open book."""
+        """Checkpoint open book + chart neon so restarts keep detect→confirm→fire history."""
         now = time.time()
         if not force and (now - float(self._last_runtime_save or 0)) < 2.0:
             return
         self._last_runtime_save = now
-        save_runtime(self)
+        try:
+            save_runtime(self, pattern_neon=list(PATTERN_NEON_STAGES[-200:]))
+        except TypeError:
+            save_runtime(self)
 
     def note_market_feed(self) -> None:
         """Call on every live price tick — clears feed-stale freeze when healthy."""
@@ -3842,10 +4003,15 @@ LAST_CANDLE_TIMESTAMPS = {}
 PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
 # 1m only: last auto fire candle open-time per pair (blocks fires after a gap).
 LAST_AUTO_FIRE_CANDLE_MS: dict[str, int] = {}
+# After a pattern confirms+fires, block same-pattern re-scan (no SKIPPED neon spam).
+LAST_FIRED_PATTERN: dict[str, dict] = {}
+# Path exit cooldown: profit → same side off next 5 candles; loss → opposite side off.
+SIDE_EXIT_COOLDOWN: dict[str, dict] = {}
+SIDE_EXIT_COOLDOWN_BARS = 5
 ONE_M_MIN_BARS_BETWEEN_FIRES = 3  # fire on N → next fire earliest N+3 (was 5)
-# 1m/5m: after pattern+AI lock, wait up to N bars for live green/red START (not candle close).
-# Hard skip if color confirm does not complete within the next N bars after detect.
-ONE_M_CONFIRM_MAX_BARS = int(os.environ.get("ONE_M_CONFIRM_MAX_BARS", "2"))
+# After detect: first closed candle is the confirm. Matching green/red → fire. Else skip+rescan.
+ONE_M_CONFIRM_MAX_BARS = int(os.environ.get("ONE_M_CONFIRM_MAX_BARS", "1"))
+ONE_M_CONFIRM_START_BAR = int(os.environ.get("ONE_M_CONFIRM_START_BAR", "1"))
 # 1m only: skip this many matching color ticks before fire (1 = pehla skip, dusra pe fire).
 ONE_M_CONFIRM_SKIP_TICKS = int(os.environ.get("ONE_M_CONFIRM_SKIP_TICKS", "1"))
 ONE_M_MAX_CONCURRENT = 3  # hard cap PER PAIR while chart TF is 1m (fee control)
@@ -3879,6 +4045,24 @@ SKIP_TRADE_PATTERNS = frozenset(
 )
 
 _bybit_executor_agent = None
+
+
+def _score_gate_waived(detect: dict | None = None, *, pattern: str | None = None, family: str | None = None, strategy: str | None = None) -> bool:
+    """Tweezer fires on equal high/low close — confluence/stack score must not block it."""
+    d = detect or {}
+    blob = " ".join(
+        str(x or "")
+        for x in (
+            pattern,
+            family,
+            strategy,
+            d.get("pattern"),
+            d.get("candle_pattern"),
+            d.get("family"),
+            d.get("strategy"),
+        )
+    ).lower()
+    return "tweezer" in blob
 
 
 def _pattern_is_trade_skipped(detect: dict | None) -> str | None:
@@ -3949,18 +4133,37 @@ def _push_pattern_neon(
         "reason": reason,
         "opened_at": time.time() if stage in ("fired", "exited") else None,
     }
-    # Same pair+bar+stage → replace; other stages on the same bar stay (fire + exit).
+    # Same pair+bar: replace same stage; drop lower pipeline stages so confirming
+    # does not sit under fired/skipped (chart looked like double orange neon).
+    stage_rank = {
+        "detected": 1,
+        "confirming": 2,
+        "skipped": 3,
+        "fired": 4,
+        "exited": 5,
+        "exit": 5,
+    }
+    new_rank = stage_rank.get(str(stage), 0)
     kept: list[dict] = []
     for prev in PATTERN_NEON_STAGES:
-        if (
-            prev.get("pair") == pair
-            and int(prev.get("time") or 0) == tsec
-            and str(prev.get("stage") or "") == str(stage)
-        ):
+        if prev.get("pair") != pair or int(prev.get("time") or 0) != tsec:
+            kept.append(prev)
             continue
-        kept.append(prev)
+        prev_stage = str(prev.get("stage") or "")
+        if prev_stage == str(stage):
+            continue
+        prev_rank = stage_rank.get(prev_stage, 0)
+        # Keep only higher-or-equal unrelated stages (e.g. exited over fired).
+        if prev_rank > new_rank:
+            kept.append(prev)
     kept.append(entry)
-    PATTERN_NEON_STAGES[:] = kept[-120:]
+    PATTERN_NEON_STAGES[:] = kept[-200:]
+    # Persist neon often enough that a recreate mid-confirm keeps the pipeline visible.
+    try:
+        if stage in ("detected", "confirming", "fired", "skipped", "exited"):
+            agent.persist_runtime(force=False)
+    except Exception:
+        pass
 
 
 def _exit_candle_time_ms(trade: dict | None = None) -> int:
@@ -3976,6 +4179,133 @@ def _exit_candle_time_ms(trade: dict | None = None) -> int:
 def _clear_entry_pipeline() -> None:
     PENDING_ENTRY_SIGNALS.clear()
     LAST_AUTO_FIRE_CANDLE_MS.clear()
+    LAST_FIRED_PATTERN.clear()
+
+
+def _normalize_pattern_key(pattern: str | None, family: str | None = None) -> str:
+    """Stable key so 'INSIDE BAR' / 'inside_bar' / family match the same cooldown."""
+    raw = (pattern or family or "").strip().lower().replace("_", " ")
+    return " ".join(raw.split())
+
+
+def _mark_pattern_cooldown(
+    pair: str,
+    *,
+    pattern: str | None = None,
+    family: str | None = None,
+    candle_ms: int = 0,
+    side: str | None = None,
+    why: str = "done",
+) -> None:
+    """After fire OR skip — block same-pattern re-scan for cooldown bars."""
+    if not pair or not _normalize_pattern_key(pattern, family):
+        return
+    LAST_FIRED_PATTERN[pair] = {
+        "pattern": pattern,
+        "family": family,
+        "candle_ms": int(candle_ms or 0),
+        "side": side,
+        "why": why,
+    }
+
+
+def _same_pattern_cooldown_active(
+    pair: str,
+    pattern: str | None,
+    family: str | None,
+    close_time_ms: int,
+    interval_ms: int,
+) -> bool:
+    """True when this pattern already fired OR skipped recently — do not re-scan."""
+    rec = LAST_FIRED_PATTERN.get(pair)
+    if not rec:
+        return False
+    key = _normalize_pattern_key(pattern, family)
+    last_key = _normalize_pattern_key(rec.get("pattern"), rec.get("family"))
+    if not key or not last_key or key != last_key:
+        return False
+    last_ms = int(rec.get("candle_ms") or 0)
+    if last_ms <= 0 or close_time_ms <= 0:
+        return False
+    # Cover confirm window + scalp fire spacing (at least 2 bars after fire/skip).
+    bars = max(2, int(ONE_M_CONFIRM_MAX_BARS), int(ONE_M_MIN_BARS_BETWEEN_FIRES))
+    return int(close_time_ms) <= last_ms + bars * max(int(interval_ms), 1)
+
+
+def _side_exit_cooldown_key(pair: str, timeframe_key: str) -> str:
+    return f"{(pair or '').strip()}|{(timeframe_key or '').strip()}"
+
+
+def _trade_side_long_short(raw: str | None) -> str | None:
+    side = str(raw or "").strip().upper()
+    if side in ("BUY", "LONG"):
+        return "LONG"
+    if side in ("SELL", "SHORT"):
+        return "SHORT"
+    return None
+
+
+def _stamp_side_exit_cooldown(trade: dict, metrics: dict, reason: str) -> None:
+    """Stamp path auto-exit only. Manual / flip close does not start the 5-candle ban."""
+    why = str(reason or "")
+    if not (why.startswith("PROFIT_LOCK_EXIT") or why.startswith("LOSS_")):
+        return
+    if str(trade.get("source") or "") == "manual":
+        return
+    exit_side = _trade_side_long_short(trade.get("side"))
+    pair = (trade.get("pair") or "").strip()
+    tf = str(trade.get("timeframe_key") or "").strip()
+    if not exit_side or not pair or not tf:
+        return
+    net_pct = float((metrics or {}).get("net_pct") or 0)
+    result = "profit" if net_pct > 0 else "loss"
+    interval_ms = _timeframe_interval_ms(tf)
+    now_ms = int(time.time() * 1000)
+    exit_bar = (now_ms // interval_ms) * interval_ms
+    SIDE_EXIT_COOLDOWN[_side_exit_cooldown_key(pair, tf)] = {
+        "exit_side": exit_side,
+        "result": result,
+        "exit_bar_ms": int(exit_bar),
+        "interval_ms": int(interval_ms),
+        "bars": int(SIDE_EXIT_COOLDOWN_BARS),
+        "net_pct": net_pct,
+    }
+    blocked = exit_side if result == "profit" else ("SHORT" if exit_side == "LONG" else "LONG")
+    print(
+        f"[SIDE-COOLDOWN] {pair} @ {tf}: {result} {exit_side} exit "
+        f"net={net_pct:.3f}% — block {blocked} next {SIDE_EXIT_COOLDOWN_BARS} candles "
+        f"after bar@{exit_bar}"
+    )
+
+
+def _side_exit_blocks(
+    pair: str,
+    timeframe_key: str,
+    action: str,
+    close_time_ms: int,
+) -> str | None:
+    """Block same side after profit, opposite side after loss, for the next 5 candles."""
+    rec = SIDE_EXIT_COOLDOWN.get(_side_exit_cooldown_key(pair, timeframe_key))
+    if not rec:
+        return None
+    want = _trade_side_long_short("LONG" if action == "BUY" else "SHORT" if action == "SELL" else action)
+    if want not in ("LONG", "SHORT"):
+        return None
+    exit_bar = int(rec.get("exit_bar_ms") or 0)
+    interval = int(rec.get("interval_ms") or 0)
+    bars = int(rec.get("bars") or SIDE_EXIT_COOLDOWN_BARS)
+    if exit_bar <= 0 or interval <= 0 or close_time_ms <= 0:
+        return None
+    # Exit candle itself is not counted. The following `bars` closed candles are.
+    if not (exit_bar < int(close_time_ms) <= exit_bar + bars * interval):
+        return None
+    exit_side = rec.get("exit_side")
+    result = rec.get("result")
+    if result == "profit" and want == exit_side:
+        return f"profit {exit_side} exit — same side blocked next {bars} candles"
+    if result == "loss" and want != exit_side:
+        return f"loss {exit_side} exit — opposite side blocked next {bars} candles"
+    return None
 
 
 def _reset_scan_candle_baseline() -> None:
@@ -3987,6 +4317,7 @@ def _reset_scan_candle_baseline() -> None:
     """
     LAST_CANDLE_TIMESTAMPS.clear()
     FIRST_DETECT_SKIPPED.clear()
+    SIDE_EXIT_COOLDOWN.clear()
     _clear_entry_pipeline()
 
 
@@ -4410,12 +4741,10 @@ def reset_bybit_executor_agent():
 def agent_policy_summary() -> str:
     """Policy text shown in System Log."""
     return (
-        "CANDLESTICK BRAIN + path exit | "
-        f"profit arm +{PROFIT_LOCK_PCT:g}% peak-trail −{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
-        f"(e.g. +0.85→floor +0.75); "
-        f"LOCK −{LOSS_PROTECT_PCT:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
-        f"in −{LOSS_PROTECT_PCT:g}…−{LOSS_BAND_PCT:g}% (hard @ −{LOSS_BAND_PCT:g}%); "
-        f"unlock @−{LOSS_LOCK_CLEAR_PCT:g}% → profit +{PROFIT_LOCK_PCT:g}% | "
+        "CANDLESTICK BRAIN + TF ladder | maker entry / taker exit all TFs | "
+        "1m +0.50/0.10/−0.50/−0.70 · 5m +0.70/0.15/−0.70/−1.00 · "
+        "15m +1.00/0.20/−1.00/−1.40 · 1h +1.50/0.25/−1.50/−2.00 · "
+        "1D +2.50/0.40/−2.50/−3.00 | "
         "manual BUY/SELL + emergency sell-all"
     )
 
@@ -4678,9 +5007,16 @@ async def fetch_forming_candle(
 
 
 MIN_CONFIRM_BODY_PCT = float(os.environ.get("MIN_CONFIRM_BODY_PCT", "0.03"))
-# All scalp TFs: need this many *consecutive* matching-color ticks before fire.
-# 1m still uses ONE_M_CONFIRM_SKIP_TICKS (skip N, fire on N+1) when higher.
-SCALP_CONFIRM_MIN_CONSECUTIVE = int(os.environ.get("SCALP_CONFIRM_MIN_CONSECUTIVE", "2"))
+# After detect: need this many matching CLOSED candles to fire (default 1).
+# Window = ONE_M_CONFIRM_MAX_BARS (default 2): try 1st close, else 2nd, else skip.
+# Closed-only policy makes consecutive=1 safe (no mid-bar / start-tick direct fire).
+SCALP_CONFIRM_MIN_CONSECUTIVE = max(
+    1, int(os.environ.get("SCALP_CONFIRM_MIN_CONSECUTIVE", "1") or 1)
+)
+# Extra safety: ignore re-polls on the same forming bar when counting confirm matches.
+SCALP_CONFIRM_ONE_MATCH_PER_BAR = os.environ.get(
+    "SCALP_CONFIRM_ONE_MATCH_PER_BAR", "1"
+).strip().lower() in ("1", "true", "yes")
 
 
 def _candle_body_confirms_side(side: str, open_px: float, close_px: float) -> bool:
@@ -4728,6 +5064,70 @@ def _candle_body_opposes_side(side: str, open_px: float, close_px: float) -> boo
     return False
 
 
+def _is_1m_maker_tf(timeframe_key: str | None) -> bool:
+    """Maker limit entry on every chart TF (name kept for call sites)."""
+    return uses_maker_entry(timeframe_key)
+
+
+def _snap_maker_limit_price(side: str, confirm_close: float, bid: float | None, ask: float | None, tick: float | None) -> float | None:
+    """LONG sits on bid (never crosses ask). SHORT sits on ask (never crosses bid)."""
+    try:
+        close_px = float(confirm_close)
+    except (TypeError, ValueError):
+        return None
+    if close_px <= 0:
+        return None
+    if side == "LONG":
+        anchor = bid if bid and bid > 0 else close_px
+        raw = min(close_px, anchor)
+        if ask and ask > 0 and raw >= ask:
+            raw = ask
+            if tick and tick > 0:
+                raw = ask - tick
+    else:
+        anchor = ask if ask and ask > 0 else close_px
+        raw = max(close_px, anchor)
+        if bid and bid > 0 and raw <= bid:
+            raw = bid
+            if tick and tick > 0:
+                raw = bid + tick
+    if raw <= 0:
+        return None
+    step = float(tick) if tick and tick > 0 else 0.0
+    if step > 0:
+        steps = raw / step
+        if side == "LONG":
+            snapped = math.floor(steps + 1e-9) * step
+        else:
+            snapped = math.ceil(steps - 1e-9) * step
+        raw = snapped
+    if raw <= 0:
+        return None
+    decimals = price_decimals_for_mark(raw)
+    return round(raw, decimals)
+
+
+def _paper_maker_touched(side: str, limit_px: float, quote: dict | None) -> bool:
+    if not quote or limit_px <= 0:
+        return False
+    last = quote.get("last")
+    bid = quote.get("bid")
+    ask = quote.get("ask")
+    if side == "LONG":
+        if ask and ask <= limit_px:
+            return True
+        return bool(last and last <= limit_px)
+    if bid and bid >= limit_px:
+        return True
+    return bool(last and last >= limit_px)
+
+
+def _maker_rest_deadline_ms(now_ms: int, interval_ms: int) -> int:
+    bar = max(int(interval_ms), 1)
+    next_open = ((int(now_ms) // bar) + 1) * bar
+    return int(min(now_ms + MAKER_REST_TIMEOUT_SEC * 1000, next_open))
+
+
 async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
     """Scan last CLOSED candle for pattern; queue entry then fire on confirm/open.
 
@@ -4747,7 +5147,14 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     # queued signal alive for the fire candle plus at least 45s of grace.
     fire_grace_ms = max(interval_ms, 45_000)
 
-    async def _skip_pending(pending: dict, reason: str, *, fire_candle_ms: int | None = None) -> bool:
+    async def _skip_pending(pending: dict, reason: str, *, fire_candle_ms: int | None = None, rescan: bool = False) -> bool:
+        if pending.get("maker_order_id") and bybit_api.mode == "LIVE_TRADING":
+            executor = get_bybit_executor_agent()
+            if executor is not None:
+                executor.cancel_order(
+                    pending.get("maker_symbol") or bybit_symbol,
+                    str(pending.get("maker_order_id")),
+                )
         detect = pending.get("detect") or {}
         side = pending.get("side") or ("LONG" if detect.get("action") == "BUY" else "SHORT")
         candle_ms = int(fire_candle_ms or pending.get("fire_candle_time") or pending.get("signal_candle_time") or 0)
@@ -4798,7 +5205,19 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             }
         )
         PENDING_ENTRY_SIGNALS.pop(pair, None)
-        print(f"[BRAIN] SKIPPED {side} {pair}: {reason}")
+        if rescan:
+            LAST_FIRED_PATTERN.pop(pair, None)
+            print(f"[BRAIN] SKIPPED {side} {pair}: {reason} — rescan for new detect")
+        else:
+            _mark_pattern_cooldown(
+                pair,
+                pattern=detect.get("pattern"),
+                family=detect.get("family"),
+                candle_ms=candle_ms,
+                side=side,
+                why="skipped",
+            )
+            print(f"[BRAIN] SKIPPED {side} {pair}: {reason}")
         try:
             import cursor_ai
             cat = "trade_delay" if any(
@@ -4887,9 +5306,12 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 f"{side} already open on {pair} (max {MAX_SAME_SIDE_AUTO_PER_PAIR} same-side)",
                 fire_candle_ms=fire_candle_ms,
             )
-        ok_sc, sc_msg = agent.same_chart_score_beats_last(pair, detect.get("score"))
-        if not ok_sc:
-            return await _skip_pending(pending, sc_msg, fire_candle_ms=fire_candle_ms)
+        if _score_gate_waived(detect):
+            print(f"[BRAIN] score stack waived for tweezer {side} {pair}")
+        else:
+            ok_sc, sc_msg = agent.same_chart_score_beats_last(pair, detect.get("score"))
+            if not ok_sc:
+                return await _skip_pending(pending, sc_msg, fire_candle_ms=fire_candle_ms)
         if agent.has_duplicate_auto_entry(
             side, pair, detect.get("pattern"), detect_candle_ms, candle_close or float(detect.get("entry") or 0)
         ):
@@ -4899,9 +5321,32 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 fire_candle_ms=fire_candle_ms,
             )
 
-        mark_px = agent.mark_price_for(pair) or float(detect.get("entry") or candle_close or 0)
+        # Scalp closed-candle confirm: entry = confirm CLOSE (never stale pair mark).
+        # MAGMA bug: confirm close=0.2546 but stale mark=0.2583 → fake −0.7% hard exit.
+        confirm_close = float(pending.get("confirm_close") or 0)
+        detect_close = float(pending.get("detect_close") or 0)
+        live_mark = float(agent.mark_price_for(pair) or 0)
+        if confirm_close > 0 and pending.get("mode") in (
+            "confirm_1m", "confirm_scalp", "detect_fire",
+        ):
+            mark_px = confirm_close
+        else:
+            mark_px = live_mark or float(detect.get("entry") or 0) or detect_close
+        maker_fill_px = float(pending.get("maker_fill_price") or 0)
+        if maker_fill_px > 0:
+            mark_px = maker_fill_px
         if not mark_px or mark_px <= 0:
             return await _skip_pending(pending, f"No usable mark price for {pair}", fire_candle_ms=fire_candle_ms)
+        agent.set_pair_mark(pair, mark_px)
+        if (
+            confirm_close > 0
+            and live_mark > 0
+            and abs(live_mark - confirm_close) / confirm_close > 0.002
+        ):
+            print(
+                f"[BRAIN] entry mark override {pair}: stale_live={live_mark} "
+                f"→ confirm_close={confirm_close}"
+            )
 
         plan = compute_auto_trade_plan(agent, price=mark_px, pair=pair)
         if plan is None:
@@ -4914,10 +5359,12 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
         brain_sl = detect.get("sl")
         brain_tp = detect.get("tp")
-        arm_pct = LOSS_PROTECT_PCT
-        band_pct = LOSS_BAND_PCT
-        clear_pct = LOSS_LOCK_CLEAR_PCT
-        lock_pct = PROFIT_LOCK_PCT
+        ladder = get_exit_ladder(timeframe_key)
+        arm_pct = float(ladder["soft"])
+        band_pct = float(ladder["hard"])
+        clear_pct = float(ladder["unlock"])
+        lock_pct = float(ladder["profit"])
+        trail_pct = float(ladder["trail"])
         if (
             brain_sl
             and brain_tp
@@ -4933,11 +5380,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 float(mark_px), side, loss_pct=arm_pct, profit_pct=lock_pct
             )
             exit_label = (
-                f"loss lock −{arm_pct:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
-                f"in −{arm_pct:g}…−{band_pct:g}% (hard @ −{band_pct:g}%); "
-                f"unlock @−{clear_pct:g}% → profit +{lock_pct:g}% | "
-                f"profit peak-trail arm +{lock_pct:g}%/−{PROFIT_TRAIL_GIVEBACK_PCT:g}% "
-                f"(floor = peak − {PROFIT_TRAIL_GIVEBACK_PCT:g}%) "
+                f"{ladder['timeframe']} maker entry / taker exit · "
+                f"loss lock −{arm_pct:g}% trail {trail_pct:g} hard −{band_pct:g}% "
+                f"unlock −{clear_pct:g}% · profit +{lock_pct:g} trail {trail_pct:g} "
                 f"SL={sl_price} TP={tp_price}"
             )
             if brain_sl and brain_tp and float(brain_sl) > 0 and float(brain_tp) > 0:
@@ -4946,17 +5391,28 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 )
 
         rr = detect.get("risk_reward") or (FIXED_EXIT_PROFIT_PCT / FIXED_EXIT_LOSS_PCT)
+        qty_override = pending.get("maker_fill_qty")
+        plan_qty = float(qty_override) if qty_override else plan["qty"]
+        plan_usd = plan["position_usd"]
+        if maker_fill_px > 0 and qty_override:
+            plan_usd = round(float(plan_qty) * float(mark_px), 2)
+        entry_liq = pending.get("entry_liquidity") or (
+            "maker" if _is_1m_maker_tf(timeframe_key) and maker_fill_px > 0 else "taker"
+        )
+        skip_x = bool(pending.get("skip_exchange_open")) or maker_fill_px > 0
         trade = agent.open_trade(
             side=side,
             reason=detect.get("reason") or f"Brain {detect.get('pattern')}",
             source="auto",
-            position_size_usd=plan["position_usd"],
-            qty=plan["qty"],
+            position_size_usd=plan_usd,
+            qty=plan_qty,
+            skip_exchange_open=skip_x,
             entry_price=mark_px,
             bybit_symbol=bybit_symbol,
             pattern=detect.get("pattern"),
-            # Chart FIRED neon on the entry candle (next bar open after detect).
+            # Chart: detect neon on lock candle; FIRED neon on confirm/entry candle.
             signal_candle_time=int(fire_candle_ms),
+            detect_candle_time=int(detect_candle_ms),
             taapi_action=detect["action"],
             sl_price=sl_price,
             tp_price=tp_price,
@@ -4969,6 +5425,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             strategy=detect.get("strategy"),
             brain_verdict=detect.get("brain_verdict"),
             train_context=detect,
+            entry_liquidity=entry_liq,
         )
         if not trade:
             return await _skip_pending(
@@ -4980,8 +5437,18 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         PENDING_ENTRY_SIGNALS.pop(pair, None)
         if is_scalp_tf(timeframe_key):
             LAST_AUTO_FIRE_CANDLE_MS[pair] = int(fire_candle_ms)
+        _mark_pattern_cooldown(
+            pair,
+            pattern=detect.get("pattern"),
+            family=detect.get("family"),
+            candle_ms=int(fire_candle_ms),
+            side=side,
+            why="fired",
+        )
         fire_label = (
-            "scalp green/red start"
+            "1m maker limit fill"
+            if pending.get("maker_filled")
+            else "scalp green/red start"
             if pending.get("mode") in ("confirm_1m", "confirm_scalp")
             else "next-candle open"
         )
@@ -5029,362 +5496,246 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         )
         return True
 
-    # --- 1a) Scalp confirm-lock: fire only on consecutive matching-color ticks ---
-    # LONG → live > open (green); SHORT → live < open (red).
-    # Wrong-color body on a bar invalidates that bar (no wick-recovery fire).
-    # Skip counter resets on any non-match so ticks must be consecutive.
+    async def _cancel_resting_order(pending: dict) -> None:
+        order_id = pending.get("maker_order_id")
+        symbol = pending.get("maker_symbol") or bybit_symbol
+        if not order_id or bybit_api.mode != "LIVE_TRADING":
+            return
+        executor = get_bybit_executor_agent()
+        if executor is None:
+            return
+        ok, err = executor.cancel_order(symbol, str(order_id))
+        if not ok:
+            print(f"[MAKER] cancel failed {pair} {order_id}: {err}")
+
+    async def _arm_maker_rest(pending: dict, *, retry: bool = False) -> bool:
+        detect = dict(pending.get("detect") or {})
+        side = pending.get("side") or "LONG"
+        fire_ms = int(pending.get("fire_candle_time") or 0)
+        confirm_close = float(pending.get("confirm_close") or 0)
+        if confirm_close <= 0:
+            return await _skip_pending(pending, "maker rest: no confirm close", fire_candle_ms=fire_ms)
+        quote = await fetch_ticker_quote(client, bybit_symbol)
+        bid = (quote or {}).get("bid")
+        ask = (quote or {}).get("ask")
+        tick = bybit_instruments.tick_size(bybit_symbol)
+        limit_px = _snap_maker_limit_price(side, confirm_close, bid, ask, tick)
+        if not limit_px or limit_px <= 0:
+            return await _skip_pending(pending, "maker rest: no bid/ask price", fire_candle_ms=fire_ms)
+        plan = compute_auto_trade_plan(agent, price=limit_px, pair=pair)
+        if plan is None:
+            return await _skip_pending(
+                pending,
+                "Size plan failed — coin min lot/notional too large for available balance "
+                f"(${agent.get_available_capital():.2f})",
+                fire_candle_ms=fire_ms,
+            )
+        now_ms = int(time.time() * 1000)
+        pending["mode"] = "maker_resting"
+        pending["maker_limit"] = limit_px
+        pending["maker_qty"] = plan["qty"]
+        pending["maker_symbol"] = bybit_symbol
+        pending["maker_placed_at"] = time.time()
+        pending["maker_deadline_ms"] = _maker_rest_deadline_ms(now_ms, interval_ms)
+        pending["maker_retries"] = int(pending.get("maker_retries") or 0) + (1 if retry else 0)
+        pending["entry_liquidity"] = "maker"
+        if bybit_api.mode == "LIVE_TRADING":
+            executor = get_bybit_executor_agent()
+            if executor is None:
+                return await _skip_pending(pending, "maker rest: Bybit executor unavailable", fire_candle_ms=fire_ms)
+            ok, err, order_id = executor.place_post_only_limit(
+                symbol=bybit_symbol,
+                side=side,
+                qty=plan["qty"],
+                price=limit_px,
+                pattern=str(detect.get("pattern") or ""),
+            )
+            if not ok:
+                if _is_post_only_reject(err) and int(pending.get("maker_retries") or 0) < 1:
+                    pending["maker_retries"] = 1
+                    print(f"[MAKER] PostOnly reject {pair} — one retry at fresh bid/ask")
+                    return await _arm_maker_rest(pending, retry=True)
+                return await _fallback_taker_fire(
+                    pending, f"maker not filled ({err or 'post-only reject'})"
+                )
+            pending["maker_order_id"] = order_id
+            print(f"[LIVE] Bybit REST -> POST-ONLY LIMIT {side} {pair} @ {limit_px}")
+        else:
+            pending["maker_order_id"] = None
+            print(f"[PAPER] Bybit virtual POST-ONLY LIMIT {side} {pair} @ {limit_px}")
+        PENDING_ENTRY_SIGNALS[pair] = pending
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=fire_ms or int(pending.get("signal_candle_time") or 0),
+            stage="maker_resting",
+            side=side,
+            action=detect.get("action"),
+            pattern=detect.get("pattern"),
+            reason=f"MAKER REST @ {limit_px} — wait fill (not a trade yet)",
+        )
+        return False
+
+    async def _open_maker_fill(pending: dict, fill_px: float, fill_qty: float | None) -> bool:
+        pending["maker_filled"] = True
+        pending["maker_fill_price"] = float(fill_px)
+        pending["skip_exchange_open"] = True
+        pending["entry_liquidity"] = "maker"
+        if fill_qty and float(fill_qty) > 0:
+            pending["maker_fill_qty"] = float(fill_qty)
+        PENDING_ENTRY_SIGNALS[pair] = pending
+        return await _execute_queued_fire(pending)
+
+    async def _poll_maker_rest(pending: dict) -> bool:
+        side = pending.get("side") or "LONG"
+        fire_ms = int(pending.get("fire_candle_time") or 0)
+        limit_px = float(pending.get("maker_limit") or 0)
+        now_ms = int(time.time() * 1000)
+        deadline = int(pending.get("maker_deadline_ms") or 0)
+        detect = pending.get("detect") or {}
+
+        async def _timeout_skip(why: str) -> bool:
+            await _cancel_resting_order(pending)
+            return await _skip_pending(pending, why, fire_candle_ms=fire_ms)
+
+        if deadline and now_ms >= deadline:
+            return await _fallback_taker_fire(pending, "maker not filled")
+
+        if bybit_api.mode == "LIVE_TRADING":
+            order_id = pending.get("maker_order_id")
+            executor = get_bybit_executor_agent()
+            if executor is None or not order_id:
+                return await _fallback_taker_fire(pending, "maker not filled")
+            status, row = executor.get_order(bybit_symbol, str(order_id))
+            if status != "ok" or not row:
+                _push_pattern_neon(
+                    pair=pair,
+                    candle_time_ms=fire_ms,
+                    stage="maker_resting",
+                    side=side,
+                    action=detect.get("action"),
+                    pattern=detect.get("pattern"),
+                    reason=f"MAKER REST @ {limit_px} — wait fill (not a trade yet)",
+                )
+                return False
+            order_status = str(row.get("orderStatus") or "")
+            try:
+                filled_qty = float(row.get("cumExecQty") or 0)
+            except (TypeError, ValueError):
+                filled_qty = 0.0
+            avg = _sanitize_market_price(row.get("avgPrice")) or limit_px
+            if order_status in ("Filled", "PartiallyFilledCanceled"):
+                if filled_qty > 0 or order_status == "Filled":
+                    if order_status != "Filled":
+                        await _cancel_resting_order(pending)
+                    return await _open_maker_fill(pending, float(avg or limit_px), filled_qty or None)
+            if order_status == "PartiallyFilled" and filled_qty > 0 and deadline and now_ms >= deadline:
+                await _cancel_resting_order(pending)
+                return await _open_maker_fill(pending, float(avg or limit_px), filled_qty)
+            if order_status in ("Cancelled", "Rejected", "Deactivated"):
+                if int(pending.get("maker_retries") or 0) < 1:
+                    pending["maker_retries"] = 1
+                    return await _arm_maker_rest(pending, retry=True)
+                return await _fallback_taker_fire(pending, "maker not filled")
+            _push_pattern_neon(
+                pair=pair,
+                candle_time_ms=fire_ms,
+                stage="maker_resting",
+                side=side,
+                action=detect.get("action"),
+                pattern=detect.get("pattern"),
+                reason=f"MAKER REST @ {limit_px} — wait fill (not a trade yet)",
+            )
+            return False
+
+        quote = await fetch_ticker_quote(client, bybit_symbol)
+        if _paper_maker_touched(side, limit_px, quote):
+            return await _open_maker_fill(pending, limit_px, pending.get("maker_qty"))
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=fire_ms,
+            stage="maker_resting",
+            side=side,
+            action=detect.get("action"),
+            pattern=detect.get("pattern"),
+            reason=f"MAKER REST @ {limit_px} — wait fill (not a trade yet)",
+        )
+        return False
+
+    async def _fallback_taker_fire(pending: dict, why: str) -> bool:
+        """Detect fire must open. Maker miss/reject becomes an immediate taker entry."""
+        await _cancel_resting_order(pending)
+        pending["maker_filled"] = False
+        pending["maker_fill_price"] = None
+        pending["skip_exchange_open"] = False
+        pending["entry_liquidity"] = "taker"
+        pending["mode"] = "detect_fire"
+        PENDING_ENTRY_SIGNALS[pair] = pending
+        print(f"[BRAIN] {pair} {why} — taker fire")
+        return await _execute_queued_fire(pending)
+
+    async def _dispatch_confirmed_fire(pending: dict) -> bool:
+        # Pattern detect fires immediately. Do not rest a maker that can skip the trade.
+        if pending.get("mode") == "detect_fire" or pending.get("maker_filled"):
+            pending["entry_liquidity"] = pending.get("entry_liquidity") or "taker"
+            return await _execute_queued_fire(pending)
+        if _is_1m_maker_tf(timeframe_key) and not pending.get("maker_filled"):
+            return await _arm_maker_rest(pending)
+        return await _execute_queued_fire(pending)
+
+    resting = PENDING_ENTRY_SIGNALS.get(pair)
+    if (
+        resting
+        and resting.get("timeframe_key") == timeframe_key
+        and resting.get("mode") == "maker_resting"
+    ):
+        return await _poll_maker_rest(resting)
+
+    async def _fire_on_detect(pending: dict) -> bool:
+        """Pattern detect is the fire. No confirm-candle scan."""
+        detect = pending.get("detect") or {}
+        side = pending.get("side") or "LONG"
+        detect_ms = int(pending.get("signal_candle_time") or 0)
+        close_px = float(pending.get("detect_close") or detect.get("entry") or 0)
+        if close_px > 0:
+            pending["confirm_close"] = close_px
+            pending["confirm_open"] = close_px
+        if detect_ms > 0:
+            pending["fire_candle_time"] = detect_ms
+        pending["mode"] = "detect_fire"
+        pending["confirm_matched"] = True
+        PENDING_ENTRY_SIGNALS[pair] = pending
+        if not agent.trading_ready():
+            _push_pattern_neon(
+                pair=pair,
+                candle_time_ms=detect_ms,
+                stage="detected",
+                side=side,
+                action=detect.get("action"),
+                pattern=detect.get("pattern"),
+                reason=f"Detect fire held · warmup {agent.warmup_remaining_sec():.0f}s",
+            )
+            return False
+        print(
+            f"[BRAIN] FIRE ON DETECT {side} {pair} pattern={detect.get('pattern')} "
+            f"close={close_px} bar@{detect_ms}"
+        )
+        return await _dispatch_confirmed_fire(pending)
+
+    # --- 1a) Leftover confirm locks: fire on the detect candle, no scan ---
     pending = PENDING_ENTRY_SIGNALS.get(pair)
     if (
         pending
         and pending.get("timeframe_key") == timeframe_key
-        and pending.get("mode") in ("confirm_1m", "confirm_scalp")
+        and pending.get("mode") in ("confirm_1m", "confirm_scalp", "detect_fire")
     ):
-        side = pending.get("side") or "LONG"
-        detect = pending.get("detect") or {}
-        detect_ms = int(pending.get("signal_candle_time") or 0)
-        want = "green" if side == "LONG" else "red"
-        max_bars = int(ONE_M_CONFIRM_MAX_BARS)
-        tf_l = str(timeframe_key or "").strip().lower()
-        is_1m_confirm = tf_l == "1m"
-        # Need N consecutive matching ticks before fire (1m can raise via SKIP_TICKS).
-        skip_ticks_needed = max(
-            int(SCALP_CONFIRM_MIN_CONSECUTIVE) - 1,
-            int(ONE_M_CONFIRM_SKIP_TICKS) if is_1m_confirm else 0,
-        )
+        return await _fire_on_detect(pending)
 
-        try:
-            forming = await fetch_forming_candle(client, bybit_symbol, timeframe_key)
-        except Exception as exc:
-            print(f"[BRAIN] scalp confirm forming-candle fail {pair}: {exc}")
-            return False
-        if not forming:
-            return False
-
-        bar_start = int(forming.get("close_time") or 0)
-        open_px = float(forming.get("open") or 0)
-        # Prefer live WS mark; else forming-bar close; else public ticker.
-        live_px = float(agent.mark_price_for(pair) or 0)
-        forming_close = float(forming.get("close") or 0)
-        if live_px <= 0 and forming_close > 0:
-            live_px = forming_close
-        if live_px <= 0:
-            try:
-                tick = await fetch_ticker_last_price(client, bybit_symbol)
-                if tick and float(tick) > 0:
-                    live_px = float(tick)
-            except Exception:
-                pass
-        if live_px > 0:
-            agent.set_pair_mark(pair, live_px)
-        if open_px <= 0 or live_px <= 0 or bar_start <= 0:
-            return False
-
-        # Still on the detect candle — wait until the NEXT bar opens.
-        if bar_start <= detect_ms:
-            _push_pattern_neon(
-                pair=pair,
-                candle_time_ms=detect_ms + interval_ms,
-                stage="confirming",
-                side=side,
-                action=detect.get("action"),
-                pattern=detect.get("pattern"),
-                reason=f"Lock {side} — wait next bar for {want} start",
-            )
-            return False
-
-        # How many bars into the confirm window (1 = first bar after detect).
-        bars_into = max(1, int((bar_start - detect_ms) // max(interval_ms, 1)))
-        pending["confirm_bars_seen"] = bars_into
-        pending["last_confirm_candle_ms"] = bar_start
-
-        # New confirm bar → clear prior skip/match state from previous bar.
-        if int(pending.get("confirm_skip_bar_ms") or 0) != bar_start:
-            pending["confirm_skip_bar_ms"] = bar_start
-            pending["confirm_match_skips"] = 0
-            pending["confirm_matched"] = False
-
-        # Timeout: past max bars with no matching color tick → skip.
-        if bars_into > max_bars:
-            PENDING_ENTRY_SIGNALS[pair] = pending
-            return await _skip_pending(
-                pending,
-                f"HARD SKIP: no {want} confirm within next {max_bars} candles",
-                fire_candle_ms=bar_start,
-            )
-
-        # Chart color for confirmation: prefer exchange kline close (what user sees),
-        # fall back to live mark. Both must not oppose; match uses confirm_px.
-        confirm_px = forming_close if forming_close > 0 else live_px
-        # If kline and mark disagree, require BOTH to confirm (blocks wick flicker).
-        matched_kline = (
-            _candle_body_confirms_side(side, open_px, forming_close)
-            if forming_close > 0
-            else True
-        )
-        matched_live = _candle_body_confirms_side(side, open_px, live_px)
-        matched = matched_kline and matched_live and _candle_body_confirms_side(
-            side, open_px, confirm_px
-        )
-        opposed = _candle_body_opposes_side(side, open_px, confirm_px) or (
-            forming_close > 0 and _candle_body_opposes_side(side, open_px, forming_close)
-        ) or _candle_body_opposes_side(side, open_px, live_px)
-
-        if opposed:
-            pending["confirm_bar_invalid_ms"] = bar_start
-            pending["confirm_match_skips"] = 0
-            pending["confirm_matched"] = False
-            PENDING_ENTRY_SIGNALS[pair] = pending
-            _push_pattern_neon(
-                pair=pair,
-                candle_time_ms=bar_start,
-                stage="confirming",
-                side=side,
-                action=detect.get("action"),
-                pattern=detect.get("pattern"),
-                reason=f"Wrong color vs {want} — bar invalid {bars_into}/{max_bars}",
-            )
-            return False
-
-        # This bar already painted opposite color earlier — never fire on it.
-        if int(pending.get("confirm_bar_invalid_ms") or 0) == bar_start:
-            pending["confirm_match_skips"] = 0
-            pending["confirm_matched"] = False
-            PENDING_ENTRY_SIGNALS[pair] = pending
-            _push_pattern_neon(
-                pair=pair,
-                candle_time_ms=bar_start,
-                stage="confirming",
-                side=side,
-                action=detect.get("action"),
-                pattern=detect.get("pattern"),
-                reason=f"Hold {side} — wait next bar for {want} ({bars_into}/{max_bars})",
-            )
-            return False
-
-        # Matched earlier during warmup — re-verify color still matches, then fire.
-        if pending.get("confirm_matched") and int(pending.get("fire_candle_time") or 0) > 0:
-            if not matched:
-                pending["confirm_matched"] = False
-                pending["confirm_match_skips"] = 0
-                PENDING_ENTRY_SIGNALS[pair] = pending
-                _push_pattern_neon(
-                    pair=pair,
-                    candle_time_ms=bar_start,
-                    stage="confirming",
-                    side=side,
-                    action=detect.get("action"),
-                    pattern=detect.get("pattern"),
-                    reason=f"Color lost — wait {want} again {bars_into}/{max_bars}",
-                )
-                return False
-            if not agent.trading_ready():
-                _push_pattern_neon(
-                    pair=pair,
-                    candle_time_ms=int(pending["fire_candle_time"]),
-                    stage="confirming",
-                    side=side,
-                    action=detect.get("action"),
-                    pattern=detect.get("pattern"),
-                    reason=f"Confirm matched · warmup hold {agent.warmup_remaining_sec():.0f}s",
-                )
-                return False
-            return await _execute_queued_fire(pending)
-
-        if matched:
-            skipped = int(pending.get("confirm_match_skips") or 0)
-            # Consecutive matching ticks: skip first N, fire on next.
-            if skipped < skip_ticks_needed:
-                pending["confirm_match_skips"] = skipped + 1
-                PENDING_ENTRY_SIGNALS[pair] = pending
-                _push_pattern_neon(
-                    pair=pair,
-                    candle_time_ms=bar_start,
-                    stage="confirming",
-                    side=side,
-                    action=detect.get("action"),
-                    pattern=detect.get("pattern"),
-                    reason=f"{want} tick #{skipped + 1} skipped — wait next {want} tick",
-                )
-                system_log.push_agent_chat(
-                    f"CONFIRM {side} on {pair}: skip {want} tick #{skipped + 1}/"
-                    f"{skip_ticks_needed} @ live={live_px} open={open_px} "
-                    f"(bar {bars_into}/{max_bars}) — need consecutive {want}",
-                    status="match",
-                    details={
-                        "pair": pair,
-                        "side": side,
-                        "confirm_bar": bar_start,
-                        "live": live_px,
-                        "open": open_px,
-                        "seen": bars_into,
-                        "skipped": skipped + 1,
-                    },
-                )
-                print(
-                    f"[BRAIN] {side} {pair} skip {want} tick #{skipped + 1}: "
-                    f"live={live_px} open={open_px} bar@{bar_start} — wait next"
-                )
-                return False
-
-            # Final color gate right before arming fire.
-            if not (
-                _candle_body_confirms_side(side, open_px, live_px)
-                and (
-                    forming_close <= 0
-                    or _candle_body_confirms_side(side, open_px, forming_close)
-                )
-            ):
-                pending["confirm_match_skips"] = 0
-                PENDING_ENTRY_SIGNALS[pair] = pending
-                return False
-
-            pending["fire_candle_time"] = bar_start
-            pending["confirm_matched"] = True
-            PENDING_ENTRY_SIGNALS[pair] = pending
-            if not agent.trading_ready():
-                _push_pattern_neon(
-                    pair=pair,
-                    candle_time_ms=bar_start,
-                    stage="confirming",
-                    side=side,
-                    action=detect.get("action"),
-                    pattern=detect.get("pattern"),
-                    reason=f"{want} confirmed · warmup hold",
-                )
-                system_log.push_agent_chat(
-                    f"CONFIRM {side} on {pair}: {want} confirmed @ live={live_px} "
-                    f"open={open_px} (bar {bars_into}/{max_bars}) — warmup hold",
-                    status="match",
-                    details={
-                        "pair": pair,
-                        "side": side,
-                        "confirm_bar": bar_start,
-                        "live": live_px,
-                        "open": open_px,
-                        "seen": bars_into,
-                    },
-                )
-                return False
-            need_ticks = skip_ticks_needed + 1
-            _push_pattern_neon(
-                pair=pair,
-                candle_time_ms=bar_start,
-                stage="confirming",
-                side=side,
-                action=detect.get("action"),
-                pattern=detect.get("pattern"),
-                reason=f"{want} x{need_ticks} consecutive → firing now",
-            )
-            system_log.push_agent_chat(
-                f"CONFIRM {side} on {pair}: {want} x{need_ticks} consecutive @ live={live_px} "
-                f"open={open_px} (bar {bars_into}/{max_bars}) → fire NOW",
-                status="match",
-                details={
-                    "pair": pair,
-                    "side": side,
-                    "confirm_bar": bar_start,
-                    "live": live_px,
-                    "open": open_px,
-                    "seen": bars_into,
-                },
-            )
-            print(
-                f"[BRAIN] {side} {pair} {want}-confirm x{need_ticks}: "
-                f"live={live_px} open={open_px} bar@{bar_start} → fire"
-            )
-            return await _execute_queued_fire(pending)
-
-        # Wrong color / flat — reset consecutive counter; keep lock; poll again.
-        pending["confirm_match_skips"] = 0
-        pending["confirm_matched"] = False
-        PENDING_ENTRY_SIGNALS[pair] = pending
-        _push_pattern_neon(
-            pair=pair,
-            candle_time_ms=bar_start,
-            stage="confirming",
-            side=side,
-            action=detect.get("action"),
-            pattern=detect.get("pattern"),
-            reason=f"Hold {side} — wait {want} start {bars_into}/{max_bars}",
-        )
-        return False
-
-    # --- 1b) Non-scalp: fire queued signal once next candle OPENed + color confirms ---
+    # --- 1b) Any leftover queued signal: fire on detect, no color scan ---
     pending = PENDING_ENTRY_SIGNALS.get(pair)
     if pending and pending.get("timeframe_key") == timeframe_key:
-        fire_candle_ms = int(pending["fire_candle_time"])
-        now_ms = int(time.time() * 1000)
-        deadline_ms = fire_candle_ms + interval_ms + fire_grace_ms
-        warmup_hold = not agent.trading_ready()
-        side = pending.get("side") or "LONG"
-        want = "green" if side == "LONG" else "red"
-        # During warmup: keep scanning/queue alive, but do not fire or expire yet.
-        if warmup_hold:
-            if now_ms >= fire_candle_ms:
-                _push_pattern_neon(
-                    pair=pair,
-                    candle_time_ms=fire_candle_ms,
-                    stage="confirming",
-                    side=side,
-                    action=(pending.get("detect") or {}).get("action"),
-                    pattern=(pending.get("detect") or {}).get("pattern"),
-                    reason=f"Warmup hold · trades unlock in {agent.warmup_remaining_sec():.0f}s",
-                )
-        # Expire only after fire candle + grace (scan/AI lag must not kill the entry).
-        elif now_ms > deadline_ms:
-            await _skip_pending(pending, "Next-candle fire window expired", fire_candle_ms=fire_candle_ms)
-        elif now_ms >= fire_candle_ms:
-            # Color pattern gate: do not fire if confirm candle is wrong color.
-            try:
-                forming = await fetch_forming_candle(client, bybit_symbol, timeframe_key)
-            except Exception as exc:
-                print(f"[BRAIN] next_open color-check fail {pair}: {exc}")
-                forming = None
-            open_px = float((forming or {}).get("open") or 0)
-            form_close = float((forming or {}).get("close") or 0)
-            live_px = float(agent.mark_price_for(pair) or 0)
-            if live_px <= 0:
-                live_px = form_close
-            bar_start = int((forming or {}).get("close_time") or 0)
-            # Only check color once we are on the fire candle (or later).
-            on_fire_bar = bar_start <= 0 or bar_start >= fire_candle_ms
-            if on_fire_bar and open_px > 0 and live_px > 0:
-                confirm_px = form_close if form_close > 0 else live_px
-                if _candle_body_opposes_side(side, open_px, confirm_px):
-                    return await _skip_pending(
-                        pending,
-                        f"Next-candle color mismatch — need {want}, got opposite",
-                        fire_candle_ms=fire_candle_ms,
-                    )
-                if not _candle_body_confirms_side(side, open_px, confirm_px):
-                    _push_pattern_neon(
-                        pair=pair,
-                        candle_time_ms=fire_candle_ms,
-                        stage="confirming",
-                        side=side,
-                        action=(pending.get("detect") or {}).get("action"),
-                        pattern=(pending.get("detect") or {}).get("pattern"),
-                        reason=f"Waiting {want} color on fire candle",
-                    )
-                    return False
-            _push_pattern_neon(
-                pair=pair,
-                candle_time_ms=fire_candle_ms,
-                stage="confirming",
-                side=side,
-                action=(pending.get("detect") or {}).get("action"),
-                pattern=(pending.get("detect") or {}).get("pattern"),
-                reason=f"{want} confirmed → firing",
-            )
-            if await _execute_queued_fire(pending):
-                return True
-    elif pending and pending.get("timeframe_key") != timeframe_key:
+        return await _fire_on_detect(pending)
+    if pending and pending.get("timeframe_key") != timeframe_key:
         PENDING_ENTRY_SIGNALS.pop(pair, None)
-
-    # Locked confirm on this pair → never run a fresh brain/AI detect underneath.
-    existing_lock = PENDING_ENTRY_SIGNALS.get(pair)
-    if existing_lock and existing_lock.get("mode") in ("confirm_1m", "confirm_scalp"):
-        return False
 
     # --- 2) Scan only the latest CLOSED candle (forming bar already dropped) ---
     lookback = max(MIN_CANDLES, 100)
@@ -5503,6 +5854,46 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 print(f"[CURSOR-AI] no_fire schedule note: {exc}")
         return False
 
+    # Already fired OR skipped this pattern recently → no 2nd scan / no SKIPPED neon.
+    if _same_pattern_cooldown_active(
+        pair,
+        detect.get("pattern"),
+        detect.get("family"),
+        close_time,
+        interval_ms,
+    ):
+        why = (LAST_FIRED_PATTERN.get(pair) or {}).get("why") or "done"
+        print(
+            f"[BRAIN] same-pattern cooldown {pair}: {detect.get('pattern')} "
+            f"@ {close_time} — skip re-scan (already {why})"
+        )
+        return False
+
+    side_block = _side_exit_blocks(pair, timeframe_key, detect.get("action"), close_time)
+    if side_block:
+        side = "LONG" if detect["action"] == "BUY" else "SHORT"
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=close_time,
+            stage="skipped",
+            side=side,
+            action=detect.get("action"),
+            pattern=detect.get("pattern"),
+            reason=side_block,
+        )
+        system_log.push_agent_chat(
+            f"SKIPPED {side} {pair}: {side_block}",
+            status="no_match",
+            details={
+                "pair": pair,
+                "side": side,
+                "pattern": detect.get("pattern"),
+                "reason": "side_exit_cooldown",
+            },
+        )
+        print(f"[BRAIN] SIDE COOLDOWN {side} {pair}: {side_block}")
+        return False
+
     blocked_pat = _pattern_is_trade_skipped(detect)
     if blocked_pat:
         side = "LONG" if detect["action"] == "BUY" else "SHORT"
@@ -5514,6 +5905,14 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             action=detect.get("action"),
             pattern=detect.get("pattern"),
             reason=f"Pattern blocked: {blocked_pat}",
+        )
+        _mark_pattern_cooldown(
+            pair,
+            pattern=detect.get("pattern"),
+            family=detect.get("family"),
+            candle_ms=close_time,
+            side=side,
+            why="skipped",
         )
         system_log.push_agent_chat(
             f"SKIPPED {side} on {pair}: {blocked_pat} (no trade on this pattern)",
@@ -5546,6 +5945,14 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             action=detect.get("action"),
             pattern=detect.get("pattern"),
             reason="First detect skipped (safety on all charts)",
+        )
+        _mark_pattern_cooldown(
+            pair,
+            pattern=detect.get("pattern"),
+            family=detect.get("family"),
+            candle_ms=close_time,
+            side=side,
+            why="skipped",
         )
         system_log.push_agent_chat(
             f"SKIPPED first {side} on {pair}: {detect.get('pattern')} (first trade skip)",
@@ -5580,6 +5987,14 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             pattern=detect.get("pattern"),
             reason=blocked if len(blocked) <= 48 else "Max concurrent on this chart",
         )
+        _mark_pattern_cooldown(
+            pair,
+            pattern=detect.get("pattern"),
+            family=detect.get("family"),
+            candle_ms=close_time,
+            side=side,
+            why="skipped",
+        )
         return False
     if agent.daily_target_reached:
         return False
@@ -5593,24 +6008,51 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             pattern=detect.get("pattern"),
             reason="fee budget hold",
         )
+        _mark_pattern_cooldown(
+            pair,
+            pattern=detect.get("pattern"),
+            family=detect.get("family"),
+            candle_ms=close_time,
+            side=side,
+            why="skipped",
+        )
         return False
     if not agent.has_same_side_auto_capacity(side, pair):
         return False
-    ok_sc, sc_msg = agent.same_chart_score_beats_last(pair, detect.get("score"))
-    if not ok_sc:
-        _push_pattern_neon(
-            pair=pair,
-            candle_time_ms=close_time,
-            stage="skipped",
-            side=side,
-            action=detect.get("action"),
-            pattern=detect.get("pattern"),
-            reason=sc_msg if len(sc_msg) <= 48 else "Need higher score to stack",
-        )
-        return False
+    if _score_gate_waived(detect):
+        print(f"[BRAIN] score stack waived for tweezer {side} {pair} — fire on pattern")
+    else:
+        ok_sc, sc_msg = agent.same_chart_score_beats_last(pair, detect.get("score"))
+        if not ok_sc:
+            _push_pattern_neon(
+                pair=pair,
+                candle_time_ms=close_time,
+                stage="skipped",
+                side=side,
+                action=detect.get("action"),
+                pattern=detect.get("pattern"),
+                reason=sc_msg if len(sc_msg) <= 48 else "Need higher score to stack",
+            )
+            _mark_pattern_cooldown(
+                pair,
+                pattern=detect.get("pattern"),
+                family=detect.get("family"),
+                candle_ms=close_time,
+                side=side,
+                why="skipped",
+            )
+            return False
     if agent.has_duplicate_auto_entry(
         side, pair, detect.get("pattern"), close_time, candle_close or float(detect.get("entry") or 0)
     ):
+        _mark_pattern_cooldown(
+            pair,
+            pattern=detect.get("pattern"),
+            family=detect.get("family"),
+            candle_ms=close_time,
+            side=side,
+            why="skipped",
+        )
         return False
 
     # Mid-wait: keep existing lock; do not replace.
@@ -5619,24 +6061,16 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return False
 
     detect = dict(detect)
-    use_confirm_scalp = is_scalp_tf(tf_l)
-    is_1m_lock = tf_l == "1m"
-    want = "green" if side == "LONG" else "red"
     PENDING_ENTRY_SIGNALS[pair] = {
         "detect": detect,
         "side": side,
         "signal_candle_time": close_time,
-        "fire_candle_time": fire_candle_ms,
+        "fire_candle_time": close_time,
         "timeframe_key": timeframe_key,
         "detect_close": candle_close,
         "queued_at": time.time(),
-        "mode": "confirm_scalp" if use_confirm_scalp else "next_open",
-        "confirm_bars_seen": 0,
-        "last_confirm_candle_ms": close_time,
-        "confirm_matched": False,
-        "confirm_match_skips": 0,
-        "confirm_skip_bar_ms": 0,
-        "confirm_bar_invalid_ms": 0,
+        "mode": "detect_fire",
+        "confirm_matched": True,
     }
     _push_pattern_neon(
         pair=pair,
@@ -5647,122 +6081,18 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         pattern=detect.get("pattern"),
         reason=detect.get("reason"),
     )
-    if use_confirm_scalp:
-        wait_reason = f"Lock {side} — need consecutive {want} ticks (wrong color = skip bar)"
-        _push_pattern_neon(
-            pair=pair,
-            candle_time_ms=fire_candle_ms,
-            stage="confirming",
-            side=side,
-            action=detect.get("action"),
-            pattern=detect.get("pattern"),
-            reason=wait_reason,
-        )
-        system_log.push_agent_chat(
-            f"LOCKED {side} on {pair}: {detect.get('pattern')} — wait consecutive {want} ticks "
-            f"(wrong-color bar invalid, max {ONE_M_CONFIRM_MAX_BARS} bars) | AI={detect.get('ai_confirmation', 'SKIP')}",
-            status="detect",
-            details={
-                "pair": pair,
-                "side": side,
-                "mode": "confirm_scalp",
-                "max_bars": ONE_M_CONFIRM_MAX_BARS,
-                "min_consecutive": SCALP_CONFIRM_MIN_CONSECUTIVE,
-                "skip_ticks": ONE_M_CONFIRM_SKIP_TICKS if is_1m_lock else 0,
-            },
-        )
-        print(
-            f"[BRAIN] LOCKED {side} on {pair}: {detect.get('pattern')} — "
-            f"consecutive {want} ticks required "
-            f"(max {ONE_M_CONFIRM_MAX_BARS} bars) | AI={detect.get('ai_confirmation', 'SKIP')}"
-        )
-        return False
-
-    _push_pattern_neon(
-        pair=pair,
-        candle_time_ms=fire_candle_ms,
-        stage="confirming",
-        side=side,
-        action=detect.get("action"),
-        pattern=detect.get("pattern"),
-        reason=f"Fire at next candle open if {want}",
-    )
     system_log.push_agent_chat(
-        f"DETECTED {side} on {pair}: {detect.get('pattern')} — fire at next candle open if {want}",
+        f"DETECT FIRE {side} on {pair}: {detect.get('pattern')} — no confirm candle "
+        f"| AI={detect.get('ai_confirmation', 'SKIP')}",
         status="match",
         details={
             "pair": pair,
+            "side": side,
             "detect_candle": close_time,
-            "fire_candle": fire_candle_ms,
-            "pattern": detect.get("pattern"),
+            "policy": "fire_on_detect",
         },
     )
-    print(
-        f"[BRAIN] DETECTED {side} {pair} pattern={detect.get('pattern')} "
-        f"on closed@{close_time} → queue fire@{fire_candle_ms} if {want} "
-        f"(AI={detect.get('ai_confirmation', 'SKIP')})"
-    )
-
-    # AI confirm already applied in evaluate_live_entry_async (NO → never reaches here).
-
-    # If next candle already opened while we scanned, fire only if color confirms.
-    now_ms = int(time.time() * 1000)
-    pending = PENDING_ENTRY_SIGNALS.get(pair)
-    if pending and now_ms >= fire_candle_ms:
-        if not agent.trading_ready():
-            _push_pattern_neon(
-                pair=pair,
-                candle_time_ms=fire_candle_ms,
-                stage="confirming",
-                side=pending.get("side"),
-                action=(pending.get("detect") or {}).get("action"),
-                pattern=(pending.get("detect") or {}).get("pattern"),
-                reason=f"Warmup hold · trades unlock in {agent.warmup_remaining_sec():.0f}s",
-            )
-            return False
-        deadline_ms = fire_candle_ms + interval_ms + fire_grace_ms
-        if now_ms > deadline_ms:
-            await _skip_pending(pending, "Next-candle fire window expired", fire_candle_ms=fire_candle_ms)
-            return False
-        try:
-            forming = await fetch_forming_candle(client, bybit_symbol, timeframe_key)
-        except Exception:
-            forming = None
-        open_px = float((forming or {}).get("open") or 0)
-        form_close = float((forming or {}).get("close") or 0)
-        live_px = float(agent.mark_price_for(pair) or 0) or form_close
-        confirm_px = form_close if form_close > 0 else live_px
-        if open_px > 0 and confirm_px > 0:
-            if _candle_body_opposes_side(side, open_px, confirm_px):
-                return await _skip_pending(
-                    pending,
-                    f"Next-candle color mismatch — need {want}, got opposite",
-                    fire_candle_ms=fire_candle_ms,
-                )
-            if not _candle_body_confirms_side(side, open_px, confirm_px):
-                _push_pattern_neon(
-                    pair=pair,
-                    candle_time_ms=fire_candle_ms,
-                    stage="confirming",
-                    side=side,
-                    action=detect.get("action"),
-                    pattern=detect.get("pattern"),
-                    reason=f"Waiting {want} color on fire candle",
-                )
-                return False
-        _push_pattern_neon(
-            pair=pair,
-            candle_time_ms=fire_candle_ms,
-            stage="confirming",
-            side=pending.get("side"),
-            action=(pending.get("detect") or {}).get("action"),
-            pattern=(pending.get("detect") or {}).get("pattern"),
-            reason=f"{want} confirmed → firing",
-        )
-        return await _execute_queued_fire(pending)
-    return False
-
-
+    return await _fire_on_detect(PENDING_ENTRY_SIGNALS[pair])
 
 
 async def auto_buy_loop():
@@ -5790,19 +6120,9 @@ async def auto_buy_loop():
                         for p, pend in PENDING_ENTRY_SIGNALS.items()
                         if pend.get("timeframe_key") == timeframe_key
                     ]
-                    confirm_locks = [
-                        p
-                        for p, pend in PENDING_ENTRY_SIGNALS.items()
-                        if pend.get("mode") in ("confirm_1m", "confirm_scalp")
-                        and pend.get("timeframe_key") == timeframe_key
-                    ]
-                    # While a 1m pattern is locked for body confirm, pause all other pair scans.
-                    if confirm_locks:
-                        scan_list = list(dict.fromkeys(confirm_locks))
-                    else:
-                        pending_first = [p for p in pending_keys if p in PENDING_ENTRY_SIGNALS]
-                        rest = [] if frozen else [p for p in fire_pairs if p not in PENDING_ENTRY_SIGNALS]
-                        scan_list = pending_first + rest
+                    pending_first = [p for p in pending_keys if p in PENDING_ENTRY_SIGNALS]
+                    rest = [] if frozen else [p for p in fire_pairs if p not in PENDING_ENTRY_SIGNALS]
+                    scan_list = pending_first + rest
                     for pair in scan_list:
                         try:
                             await scan_and_maybe_fire_pair(client, pair, timeframe_key)
@@ -5952,11 +6272,9 @@ async def self_ping_keepalive():
 async def auto_exit_watchdog():
     """Re-check path-SL / path-TP even if a ticker tick was skipped or failed."""
     print(
-        f"[AUTO-EXIT] Watchdog online "
-        f"(profit arm +{PROFIT_LOCK_PCT:g}% peak-trail −{PROFIT_TRAIL_GIVEBACK_PCT:g}% | "
-        f"loss lock −{LOSS_PROTECT_PCT:g}% trail +{LOSS_RECOVERY_RETRACE_PCT:g}% "
-        f"in −{LOSS_PROTECT_PCT:g}…−{LOSS_BAND_PCT:g}% (hard @ −{LOSS_BAND_PCT:g}%); "
-        f"unlock @−{LOSS_LOCK_CLEAR_PCT:g}%)."
+        "[AUTO-EXIT] Watchdog online "
+        "(profit +0.50/−0.10 then +0.65/−0.20, no +1% hard exit · "
+        "SL 1m −0.50/−0.70 · 5m −0.70/−1.00 · 15m −1.00/−1.40)."
     )
     while True:
         try:
@@ -6019,6 +6337,11 @@ async def start_background_tasks():
     try:
         restored = restore_runtime(agent)
         if restored.get("restored"):
+            # Rehydrate chart neon pipeline (detect/confirming/fired) after restart.
+            neon = restored.get("pattern_neon")
+            if isinstance(neon, list) and neon:
+                PATTERN_NEON_STAGES[:] = neon[-200:]
+                print(f"[ENGINE RUNTIME] Restored {len(PATTERN_NEON_STAGES)} pattern neon stages")
             # Re-evaluate fee hold against closed book (clears false sticky pauses).
             try:
                 agent.refresh_one_m_fee_budget()
@@ -6807,7 +7130,7 @@ async def set_timeframe(payload: SetTimeframePayload):
         "status": "success",
         "message": (
             f"Backend synced to {payload.seconds}s ({tf_key}) — "
-            f"trade size {profile['capital_pct']:.0f}% capital, "
+            f"trade size {profile['capital_pct']:g}% capital, "
             f"win/lose {profile['win_rate']}/{profile['lose_rate']}."
         ),
         "seconds": agent.timeframe_seconds,

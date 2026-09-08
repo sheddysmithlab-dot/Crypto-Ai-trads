@@ -24,16 +24,16 @@ import brain as _b
 import family_rules
 from trap_orderflow_engine import (
     evaluate_trap_orderflow,
-    is_candle_soft_strategy,
     merge_with_structure_trap,
     score_below_floor,
-    score_meets_floor,
     thr_score_for_setup,
     thr_score_for_tf,
 )
 
 ENGINE_NAME = "ai_driven_brain_v2"
 ENTRY_PATTERN_NAME = "AI_BRAIN_V2"
+# Detect-fire only on a last-bar brain signal. Raw candle matches do not fire.
+DETECT_FIRE_MIN_SCORE = 8.0
 
 # ─── timeframe normalisation ──────────────────────────────────────────────────
 _TF_NORM: Dict[str, str] = {
@@ -189,8 +189,7 @@ def _of_side_ok(
 ) -> tuple[bool, float, str]:
     """Order-flow layer: final_signal must match action and side score ≥ setup floor.
 
-    Engulfing/doji (candle soft): allow when OF already tagged CANDLE_* or when
-    OF is NO_TRADE / weak but brain confluence alone is enough.
+    Strict: every family and trap. No candle-soft / CANDLE_* bypass.
     """
     if action not in ("BUY", "SELL"):
         return False, 0.0, "not actionable"
@@ -204,23 +203,13 @@ def _of_side_ok(
     side_sc = _matching_side_score(of_trap, action)
     tf = _norm_tf(timeframe_key)
     thr = thr_score_for_setup(tf, pattern, brain_strategy=strategy, family=family)
-    candle_soft = is_candle_soft_strategy(
-        strategy, family=family, pattern=pattern, timeframe_key=tf
-    )
-
-    if of_sig == want_sig:
-        if score_below_floor(side_sc, thr):
-            if candle_soft:
-                return True, side_sc, f"candle-soft OF ok (score {side_sc:.1f} < {thr:.0f})"
-            return False, side_sc, f"OF score {side_sc:.1f} < {thr:.0f}"
-        return True, side_sc, "ok"
-
-    # Candle-only: brain engulfing/doji may fire even if OF said NO_TRADE / opposite weak.
-    if candle_soft and of_sig in (None, "NO_TRADE", want_sig):
-        return True, side_sc, f"candle-only {strategy} (OF was {of_sig or 'NONE'})"
+    if thr <= 0:
+        thr = float(thr_score_for_tf(tf))
 
     if of_sig != want_sig:
         return False, side_sc, f"OF {of_sig or 'NONE'} != {want_sig}"
+    if score_below_floor(side_sc, thr):
+        return False, side_sc, f"OF score {side_sc:.1f} < {thr:.0f}"
     return True, side_sc, "ok"
 
 
@@ -230,7 +219,7 @@ def _dual_score_passes(
     think: dict,
     timeframe_key: str,
 ) -> tuple[bool, str, float, float]:
-    """Brain confluence required; OF required unless engulfing/doji candle-only."""
+    """Brain confluence and OF confidence both required. No candle-only bypass."""
     b_ok, b_sc, b_msg = _brain_side_ok(think, action, timeframe_key)
     if not b_ok:
         return False, f"Brain gate: {b_msg}", b_sc, 0.0
@@ -285,26 +274,42 @@ def _setup_label_and_score(think: dict, of_trap: Optional[dict], action: str) ->
     return (str(pattern or "setup"), score)
 
 
+def _fresh_closed_candle_fire(think: dict) -> Optional[dict]:
+    """Last closed bar brain signal only. Score must clear DETECT_FIRE_MIN_SCORE.
+
+    Raw pattern matches and stale lookback signals do not fire.
+    """
+    n = int(think.get("n") or 0)
+    if n < 2:
+        return None
+    last_i = n - 1
+    sig = think.get("signal")
+    if sig is None or int(getattr(sig, "index", -99)) != last_i:
+        return None
+    side = getattr(sig, "side", None)
+    if side not in ("BUY", "SELL"):
+        return None
+    score = float(getattr(sig, "score", 0) or 0)
+    if score < DETECT_FIRE_MIN_SCORE:
+        return None
+    pats = getattr(sig, "patterns", None) or []
+    return {
+        "action": side,
+        "pattern": (pats[0] if pats else None) or getattr(sig, "strategy", None),
+        "strategy": getattr(sig, "strategy", None),
+        "score": score,
+    }
+
+
 def _fallback_action_from_brain_and_of(
     think: dict, of_trap: Optional[dict], timeframe_key: str = "1m"
 ) -> str:
-    """Pick BUY/SELL when brain+OF pass, or candle-soft engulfing/doji on brain alone."""
+    """Pick BUY/SELL only when brain confluence and OF confidence both pass."""
     candidates: list[tuple[str, float]] = []
     for action in ("BUY", "SELL"):
         ok, _, b_sc, o_sc = _dual_score_passes(action, of_trap or {}, think, timeframe_key)
         if ok:
             candidates.append((action, o_sc + b_sc * 0.1))
-    if not candidates:
-        # Last resort: brain candle family with clear side even if OF dict missing.
-        strategy = _brain_strategy_from_think(think)
-        fam = _family_from_think(think, of_trap)
-        if is_candle_soft_strategy(
-            strategy, family=fam, timeframe_key=timeframe_key
-        ):
-            for action in ("BUY", "SELL"):
-                b_ok, b_sc, _ = _brain_side_ok(think, action, timeframe_key)
-                if b_ok:
-                    candidates.append((action, b_sc))
     if not candidates:
         return "HOLD"
     candidates.sort(key=lambda x: -x[1])
@@ -920,8 +925,12 @@ async def evaluate_live_entry_async(
         ),
     )
 
-    # Direction comes only from brain + order-flow (never invented by AI).
-    setup_action = _fallback_action_from_brain_and_of(think, of_trap, timeframe_key)
+    # Candidate side from last-bar signal or brain+OF. Never skip dual/AI.
+    fresh_pattern = _fresh_closed_candle_fire(think)
+    if fresh_pattern:
+        setup_action = fresh_pattern["action"]
+    else:
+        setup_action = _fallback_action_from_brain_and_of(think, of_trap, timeframe_key)
     setup_action = _gate_1m_of_score(setup_action or "HOLD", of_trap, timeframe_key, think=think)
 
     def _blocked(reason: str, *, ai_confirmation: str = "MISSING") -> Dict[str, Any]:
@@ -949,19 +958,11 @@ async def evaluate_live_entry_async(
             return _blocked("Backend OF signal missing — skip trade")
 
         of_sig = (of_trap or {}).get("final_signal")
-        strategy = _brain_strategy_from_think(think)
-        fam = _family_from_think(think, of_trap)
-        candle_soft = is_candle_soft_strategy(
-            strategy,
-            family=fam,
-            pattern=str((of_trap or {}).get("pattern") or ""),
-            timeframe_key=_norm_tf(timeframe_key),
-        )
         of_pat = str((of_trap or {}).get("pattern") or "")
-        if of_sig == "NO_TRADE" and not (
-            candle_soft or of_pat.upper().startswith("CANDLE_")
-        ):
-            return _blocked(f"Order-flow NO_TRADE — skip | {(of_trap or {}).get('primary_reason') or ''}")
+        if of_sig == "NO_TRADE" or of_pat.upper().startswith("CANDLE_"):
+            return _blocked(
+                f"Order-flow NO_TRADE — skip | {(of_trap or {}).get('primary_reason') or of_sig or ''}"
+            )
 
         sig = think.get("signal")
         if sig is None and think.get("trap") is None:
@@ -981,60 +982,36 @@ async def evaluate_live_entry_async(
         if provider == "none" or not api_key:
             return _blocked("AI not configured — skip trade (no fail-open)")
 
-        thr = thr_score_for_setup(tf, (of_trap or {}).get("pattern"), brain_strategy=strategy)
-        side_sc = _matching_side_score(of_trap, setup_action)
-
-        allow_of_pass = os.environ.get("AI_FAILOPEN_OF_PASS", "1").strip().lower() in (
-            "1", "true", "yes",
+        confirmed = await _confirm_setup_with_ai(
+            settings,
+            pair=pair,
+            timeframe=timeframe_key,
+            action=setup_action,
+            think=think,
+            of_trap=of_trap,
         )
-        # Scalp fast-path: dual/candle-soft already passed → skip AI when floor clears.
-        if tf in ("1m", "5m", "30s") and allow_of_pass and (
-            score_meets_floor(side_sc, thr)
-            or candle_soft
-            or of_pat.upper().startswith("CANDLE_")
-        ):
-            if candle_soft or of_pat.upper().startswith("CANDLE_"):
-                ai_confirmation = "CANDLE_PASS"
-            else:
-                ai_confirmation = "OF_PASS"
-            print(
-                f"[AI-CONFIRM] Scalp {ai_confirmation} — skip AI consult "
-                f"(brain={b_sc:.1f} OF={side_sc:.1f} thr={thr:.0f} soft={candle_soft}) on {pair}"
+        if confirmed is False:
+            side = "LONG" if setup_action == "BUY" else "SHORT"
+            pattern, score = _setup_label_and_score(think, of_trap, setup_action)
+            return _blocked(
+                f"AI rejected confirm ({side} {pattern} / trap score {score})",
+                ai_confirmation="NO",
             )
-        else:
-            confirmed = await _confirm_setup_with_ai(
-                settings,
-                pair=pair,
-                timeframe=timeframe_key,
-                action=setup_action,
-                think=think,
-                of_trap=of_trap,
+        if confirmed is not True:
+            return _blocked(
+                "AI unavailable or unclear — skip trade (no fail-open)",
+                ai_confirmation="UNAVAILABLE",
             )
-            if confirmed is False:
-                side = "LONG" if setup_action == "BUY" else "SHORT"
-                pattern, score = _setup_label_and_score(think, of_trap, setup_action)
-                return _blocked(
-                    f"AI rejected confirm ({side} {pattern} / trap score {score})",
-                    ai_confirmation="NO",
-                )
-            if confirmed is not True:
-                if allow_of_pass and score_meets_floor(side_sc, thr) and ok_dual:
-                    ai_confirmation = "OF_PASS"
-                    print(
-                        f"[AI-CONFIRM] AI unavailable — OF pass "
-                        f"(brain={b_sc:.1f} OF={side_sc:.1f}≥{thr:.0f}) on {pair}"
-                    )
-                else:
-                    return _blocked(
-                        "AI unavailable or unclear — skip trade (no fail-open)",
-                        ai_confirmation="UNAVAILABLE",
-                    )
-            else:
-                ai_confirmation = "YES"
+        ai_confirmation = "YES"
+        print(
+            f"[AI-CONFIRM] YES {setup_action} {pair} "
+            f"brain={b_sc:.1f} OF={o_sc:.1f} — dual+AI passed"
+        )
 
+    fire_action = setup_action if ai_confirmation == "YES" else "HOLD"
     out = _flatten(
         think,
-        ai_action=setup_action,
+        ai_action=fire_action,
         pair=pair,
         timeframe_key=timeframe_key,
         risk_pct_pct=risk_pct_pct,
@@ -1043,13 +1020,19 @@ async def evaluate_live_entry_async(
     )
     out["ai_confirmation"] = ai_confirmation
     out["ai_driven"] = False
-    if ai_confirmation in ("YES", "OF_PASS", "CANDLE_PASS") and out.get("action") in ("BUY", "SELL"):
-        tag = (
-            "AI=YES" if ai_confirmation == "YES"
-            else "AI=CANDLE_PASS" if ai_confirmation == "CANDLE_PASS"
-            else "AI=OF_PASS"
-        )
-        out["reason"] = f"{out.get('reason', '')} | {tag}".strip(" |")
+    if ai_confirmation == "YES" and fire_action in ("BUY", "SELL"):
+        if fresh_pattern:
+            pat = fresh_pattern.get("pattern")
+            strat = fresh_pattern.get("strategy")
+            fam = family_rules.resolve_family(pat, strat) or out.get("family")
+            out["pattern"] = pat or out.get("pattern")
+            out["candle_pattern"] = pat or out.get("candle_pattern")
+            out["strategy"] = strat or out.get("strategy")
+            out["family"] = fam
+            out["score"] = fresh_pattern.get("score") or out.get("score") or 0
+        out["action"] = fire_action
+        out["direction"] = "LONG" if fire_action == "BUY" else "SHORT"
+        out["reason"] = f"{out.get('reason', '')} | AI=YES".strip(" |")
     return out
 
 
@@ -1168,8 +1151,8 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
         "description": (
             "Unified 1m rulebook on every chart TF (1m→1D): brain.py patterns/structure/traps + ML; "
             "order-flow trap engine sets BUY/SELL only when OF/confidence clears TF floor; "
-            "AI gets a compact policy+setup brief and answers YES/NO only "
-            "(NO=skip, unreachable=fail-open); next-candle fire; path SL/TP 0.5/0.7; "
+            "AI must answer YES or the trade is skipped "
+            "(NO / unclear / unreachable = skip, no fail-open); next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
             f"Order-flow conf floor: overall ≥75% / 5m traps ≥80% / other traps ≥90% "

@@ -2320,7 +2320,12 @@ def detect_signals(candles: Sequence[Candle], timeframe: str = "1h",
     # filter by timeframe thresholds
     filtered: List[Signal] = []
     for s in signals:
-        if s.score < tf.min_score:
+        pats = getattr(s, "patterns", None) or []
+        is_tweezer = any("tweezer" in str(p).lower() for p in pats) or "tweezer" in str(
+            getattr(s, "strategy", "") or ""
+        ).lower()
+        # Tweezer top/bottom fires on equal high/low — confluence score does not block.
+        if not is_tweezer and s.score < tf.min_score:
             continue
         if s.rr < tf.min_rr:
             continue

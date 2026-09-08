@@ -107,45 +107,7 @@ def is_candle_soft_strategy(
     pattern: str | None = None,
     timeframe_key: str | None = None,
 ) -> bool:
-    """True when candle family may soft-bypass weak OF / fire candle-only.
-
-    MySQL family_engine_rules.candle_soft wins when set.
-    Else requires CANDLE_ONLY_FIRE + known candle strategy/family.
-    """
-    try:
-        import family_rules as _fr
-        ov = _fr.effective_candle_soft(
-            family=family,
-            pattern=pattern,
-            brain_strategy=brain_strategy,
-            timeframe_key=timeframe_key,
-        )
-        if ov is not None:
-            return bool(ov)
-        if family and _fr._canonical_family(family) in _fr.ALL_CANDLE_FAMILIES:
-            # Seeded candle family without explicit soft row → allow when global on
-            if CANDLE_ONLY_FIRE_ENABLED:
-                return True
-    except Exception:
-        pass
-    if not CANDLE_ONLY_FIRE_ENABLED:
-        return False
-    strat = _norm_strategy(brain_strategy)
-    if strat in _CANDLE_SOFT_STRATEGIES:
-        return True
-    if "engulf" in strat or "doji" in strat or "pin" in strat or "inside" in strat:
-        return True
-    if family:
-        fl = str(family).lower()
-        if any(
-            k in fl
-            for k in (
-                "doji", "engulf", "pin", "inside", "harami", "star", "tweezer",
-                "belt", "pierc", "soldier", "crow", "kicker", "separat",
-                "method", "strike", "meeting", "ladder", "swallow",
-            )
-        ):
-            return True
+    """Candle-soft bypass is off. Every family and trap must clear the OF floor."""
     return False
 
 
@@ -178,21 +140,9 @@ def thr_score_for_setup(
 ) -> float:
     """Floor: classic/doji ≥75; engulfing ≥75; inside_bar ≥75; traps ≥80/90; else ≥75.
 
-    Pilot family rows in family_engine_rules override OF floors when present.
+    Family DB cannot lower this floor. Candle-only labels do not zero it.
     """
     name = (pattern or "").strip().upper()
-    if name.startswith("CANDLE_"):
-        # Candle-only bypass already approved — no extra OF score gate.
-        return 0.0
-    try:
-        import family_rules as _fr
-        ov = _fr.effective_of_floor(
-            exec_tf, pattern, brain_strategy=brain_strategy, family=family
-        )
-        if ov is not None:
-            return float(ov)
-    except Exception:
-        pass
     strat = _norm_strategy(brain_strategy)
     fam_l = (family or "").strip().lower()
     if strat == "classic_pattern" or "doji" in strat or "doji" in fam_l:
