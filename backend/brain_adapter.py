@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
@@ -29,6 +30,11 @@ from trap_orderflow_engine import (
     thr_score_for_setup,
     thr_score_for_tf,
 )
+
+# One confirm at a time. Free Z.ai flash 429s or times out if every pair calls at once.
+_AI_CONFIRM_LOCK = asyncio.Lock()
+_AI_CONFIRM_NEXT = 0.0
+_AI_CONFIRM_GAP = 20.0
 
 ENGINE_NAME = "ai_driven_brain_v2"
 ENTRY_PATTERN_NAME = "AI_BRAIN_V2"
@@ -542,6 +548,17 @@ async def _confirm_setup_with_ai(
         print(f"[AI-CONFIRM] No base_url for '{provider}' — skip trade.")
         return None
     model = forced_model or getattr(settings, "ai_model", None) or cfg["model"]
+    if provider == "z-ai" and not str(model or "").lower().startswith("glm-"):
+        model = "glm-4.5-flash"
+
+    now = time.time()
+    if _AI_CONFIRM_LOCK.locked() or now < _AI_CONFIRM_NEXT:
+        wait = max(0.0, _AI_CONFIRM_NEXT - now)
+        print(
+            f"[AI-CONFIRM] rate gap {wait:.0f}s — skip this setup, "
+            "next dual-gate pass will confirm"
+        )
+        return None
 
     headers = {"Content-Type": "application/json"}
     if cfg["auth"] == "api-key":
@@ -554,23 +571,56 @@ async def _confirm_setup_with_ai(
         {"role": "user", "content": user_prompt},
     ]
 
+    resp = None
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.post(
-                f"{base_url}/chat/completions",
-                headers=headers,
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "max_tokens": 4,
-                    "temperature": 0,
-                },
-            )
-        if resp.status_code != 200:
-            print(f"[AI-CONFIRM] '{provider}' HTTP {resp.status_code} — skip trade.")
+        async with _AI_CONFIRM_LOCK:
+            global _AI_CONFIRM_NEXT
+            _AI_CONFIRM_NEXT = time.time() + _AI_CONFIRM_GAP
+            async with httpx.AsyncClient(timeout=25.0) as client:
+                for attempt in range(2):
+                    resp = await client.post(
+                        f"{base_url}/chat/completions",
+                        headers=headers,
+                        json={
+                            "model": model,
+                            "messages": messages,
+                            "max_tokens": 32,
+                            "temperature": 0,
+                            "thinking": {"type": "disabled"},
+                        },
+                    )
+                    if resp.status_code != 429:
+                        break
+                    retry_after = 4.0
+                    try:
+                        ra = resp.headers.get("retry-after")
+                        if ra:
+                            retry_after = min(float(ra), 8.0)
+                    except (TypeError, ValueError):
+                        retry_after = 4.0
+                    snippet = (resp.text or "")[:160].replace("\n", " ")
+                    print(
+                        f"[AI-CONFIRM] '{provider}' HTTP 429 "
+                        f"retry {retry_after:.0f}s ({snippet})"
+                    )
+                    if attempt == 0:
+                        await asyncio.sleep(retry_after)
+                        continue
+                    _AI_CONFIRM_NEXT = time.time() + max(_AI_CONFIRM_GAP, retry_after)
+                    _notify_ai_health(False)
+                    return None
+        if resp is None or resp.status_code != 200:
+            code = getattr(resp, "status_code", "?")
+            snippet = ""
+            try:
+                snippet = (resp.text or "")[:160].replace("\n", " ")
+            except Exception:
+                pass
+            print(f"[AI-CONFIRM] '{provider}' HTTP {code} — skip trade. {snippet}")
             _notify_ai_health(False)
             return None
-        raw = resp.json()["choices"][0]["message"]["content"].strip().upper()
+        msg = resp.json()["choices"][0]["message"]
+        raw = str(msg.get("content") or msg.get("reasoning_content") or "").strip().upper()
         _notify_ai_health(True)
         token = raw.replace(".", " ").replace(",", " ").split()[0] if raw else ""
         if token.startswith("NO"):
