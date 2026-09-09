@@ -334,7 +334,7 @@ def playbook_lines(
     lines = [f"FAMILY PLAYBOOK ({fam} / {timeframe_key or '?'}):"]
     # Match the code dual-gate ceiling so the brief does not demand stale DB floors.
     brain_cap, rr_cap = 4.0, 2.0
-    of_cap = 45.0
+    of_cap = 60.0
     try:
         from brain import TIMEFRAMES
         tf = (timeframe_key or "1m").strip().lower()

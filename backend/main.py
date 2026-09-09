@@ -459,17 +459,13 @@ async def consult_ai_provider(context):
     if trap_score is None:
         trap_score = context.get("confidence")
     score_txt = "—" if trap_score is None else str(trap_score)
-    tf_l = timeframe.strip().lower()
-    if is_scalp_tf(tf_l):
-        thr = 45
-    else:
-        thr = 45
+    thr = 60
 
     prompt = (
         f"PATTERN DETECTED → confirm {side} {pattern} / trap score {score_txt}. "
         f"Pair {pair} {timeframe}. "
         f"Analyze LONG/SHORT, trap/inverse/fake-breakout per policy. "
-        f"Reply YES only if confidence ≥ {thr}% (overall ≥45; 1m/5m traps ≥50; other traps ≥60); else NO. "
+        f"Reply YES only if confidence ≥ {thr}% (floor ≥60); else NO. "
         f"One word only: YES or NO."
     )
     system = (

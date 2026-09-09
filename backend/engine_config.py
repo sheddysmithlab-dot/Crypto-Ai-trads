@@ -186,8 +186,8 @@ def apply_to_runtime() -> dict[str, Any]:
                 try:
                     code_floor = float(getattr(toe, name))
                     db_floor = float(_CACHE[name])
-                    # Live formula rows may only loosen the code OF floor, never raise it.
-                    if db_floor > code_floor:
+                    # Code floor is the minimum. Stale MySQL rows cannot loosen below 60.
+                    if db_floor < code_floor:
                         _CACHE[name] = code_floor
                 except (TypeError, ValueError):
                     pass
