@@ -434,13 +434,8 @@ async def _confirm_setup_with_ai(
     think: dict,
     of_trap: Optional[dict],
 ) -> Optional[bool]:
-    """Ask AI to confirm an existing BUY/SELL setup (policy-aware brief).
-
-    Returns:
-      True  — YES
-      False — NO (skip trade)
-      None  — unreachable / not configured / cool-down (skip trade — no fail-open)
-    """
+    """AI confirm is removed. Dual gate decides the trade."""
+    return None
     global _AI_CONFIRM_NEXT
     provider = getattr(settings, "ai_provider", "none")
     api_key = getattr(settings, "ai_api_key", "") or ""
@@ -1048,41 +1043,13 @@ async def evaluate_live_entry_async(
         if not ok_dual:
             return _blocked(f"Dual score failed — {dual_msg} (brain={b_sc:.1f} OF={o_sc:.1f})")
 
-        if settings is None:
-            return _blocked("Backend settings missing — skip trade")
-
-        provider = getattr(settings, "ai_provider", "none")
-        api_key = getattr(settings, "ai_api_key", "") or ""
-        if provider == "none" or not api_key:
-            return _blocked("AI not configured — skip trade (no fail-open)")
-
-        confirmed = await _confirm_setup_with_ai(
-            settings,
-            pair=pair,
-            timeframe=timeframe_key,
-            action=setup_action,
-            think=think,
-            of_trap=of_trap,
-        )
-        if confirmed is False:
-            side = "LONG" if setup_action == "BUY" else "SHORT"
-            pattern, score = _setup_label_and_score(think, of_trap, setup_action)
-            return _blocked(
-                f"AI rejected confirm ({side} {pattern} / trap score {score})",
-                ai_confirmation="NO",
-            )
-        if confirmed is not True:
-            return _blocked(
-                "AI unavailable or unclear — skip trade (no fail-open)",
-                ai_confirmation="UNAVAILABLE",
-            )
-        ai_confirmation = "YES"
+        ai_confirmation = "SKIP"
         print(
-            f"[AI-CONFIRM] YES {setup_action} {pair} "
-            f"brain={b_sc:.1f} OF={o_sc:.1f} — dual+AI passed"
+            f"[DUAL-GATE] {setup_action} {pair} "
+            f"brain={b_sc:.1f} OF={o_sc:.1f} — fire without AI"
         )
 
-    fire_action = setup_action if ai_confirmation == "YES" else "HOLD"
+    fire_action = setup_action if setup_action in ("BUY", "SELL") and ai_confirmation == "SKIP" else "HOLD"
     out = _flatten(
         think,
         ai_action=fire_action,
@@ -1094,7 +1061,7 @@ async def evaluate_live_entry_async(
     )
     out["ai_confirmation"] = ai_confirmation
     out["ai_driven"] = False
-    if ai_confirmation == "YES" and fire_action in ("BUY", "SELL"):
+    if fire_action in ("BUY", "SELL"):
         if fresh_pattern:
             pat = fresh_pattern.get("pattern")
             strat = fresh_pattern.get("strategy")
@@ -1106,7 +1073,7 @@ async def evaluate_live_entry_async(
             out["score"] = fresh_pattern.get("score") or out.get("score") or 0
         out["action"] = fire_action
         out["direction"] = "LONG" if fire_action == "BUY" else "SHORT"
-        out["reason"] = f"{out.get('reason', '')} | AI=YES".strip(" |")
+        out["reason"] = f"{out.get('reason', '')} | dual-gate".strip(" |")
     return out
 
 
@@ -1164,16 +1131,20 @@ def evaluate_live_entry(
     ai_action = _fallback_action_from_brain_and_of(think, of_trap, timeframe_key)
     ai_action = _gate_1m_of_score(ai_action or "HOLD", of_trap, timeframe_key, think=think)
     if ai_action in ("BUY", "SELL"):
-        return {
-            "action": "NO_TRADE",
-            "reason": "AI confirmation required — use async scan path",
-            "engine": ENGINE_NAME,
-            "entry_pattern": ENTRY_PATTERN_NAME,
-            "timeframe_key": timeframe_key,
-            "pair": pair,
-            "ai_driven": False,
-            "ai_confirmation": "MISSING",
-        }
+        ok_dual, dual_msg, b_sc, o_sc = _dual_score_passes(
+            ai_action, of_trap, think, timeframe_key
+        )
+        if not ok_dual:
+            return {
+                "action": "NO_TRADE",
+                "reason": f"Dual score failed — {dual_msg} (brain={b_sc:.1f} OF={o_sc:.1f})",
+                "engine": ENGINE_NAME,
+                "entry_pattern": ENTRY_PATTERN_NAME,
+                "timeframe_key": timeframe_key,
+                "pair": pair,
+                "ai_driven": False,
+                "ai_confirmation": "SKIP",
+            }
     out = _flatten(
         think,
         ai_action=ai_action,
@@ -1193,7 +1164,7 @@ def enrich_signal(result: Dict[str, Any]) -> Dict[str, Any]:
     out["brain"] = {
         "engine": ENGINE_NAME,
         "entry_pattern": ENTRY_PATTERN_NAME,
-        "pipeline": ["brain_analysis", "orderflow_trap", "ai_yes_no_confirm", "risk_plan"],
+        "pipeline": ["brain_analysis", "orderflow_trap", "dual_gate", "risk_plan"],
         "pattern_label": result.get("pattern"),
         "strategy": result.get("strategy"),
         "confidence": result.get("confidence"),
@@ -1225,12 +1196,10 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
         "description": (
             "Unified 1m rulebook on every chart TF (1m→1D): brain.py patterns/structure/traps + ML; "
             "order-flow trap engine sets BUY/SELL only when OF/confidence clears TF floor; "
-            "AI must answer YES or the trade is skipped "
-            "(NO / unclear / unreachable = skip, no fail-open); next-candle fire; path SL/TP 0.5/0.7; "
+            "no AI confirm — dual gate is the fire decision; next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
-            f"Order-flow conf floor: overall ≥45% / 1m/5m traps ≥50% / other traps ≥60% "
-            f"(AI YES only at/above setup floor). "
+            f"Order-flow conf floor: overall ≥45% / 1m/5m traps ≥50% / other traps ≥60%. "
             f"{tf_cfg.note}"
         ),
         "timeframes": list(_b.TIMEFRAMES.keys()),
@@ -1260,9 +1229,9 @@ def strategy_system_blurb() -> str:
         "(min confluence score 5, min R:R 2, HTF alignment + noise guard — identical on all TFs).\n"
         "2) Order-flow TRAP DETECTION ENGINE: buy/sell trap, absorption, exhaustion,\n"
         "   fake breakout, reversal trap (effort vs result; volume & buyer/seller pressure).\n"
-        "3) Combined analysis → AI API (GLM/OpenAI) → BUY / SELL / HOLD.\n"
+        "3) Dual gate (brain + order-flow) → BUY / SELL / HOLD. No AI confirm.\n"
         "4) Next-candle fire + path SL/TP 0.5%/0.7% + opposite-side flip-exit.\n"
-        "5) If AI offline: skip the trade (no fail-open). Floors: overall≥45 / 1m/5m trap≥50 / else trap≥60.\n"
+        "5) Floors: overall≥45 / 1m/5m trap≥50 / else trap≥60.\n"
     )
 
 

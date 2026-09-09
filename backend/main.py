@@ -442,11 +442,8 @@ AI_PROVIDER_DEFAULTS = {
 }
 
 async def consult_ai_provider(context):
-    """ Asks the configured AI provider to confirm an existing BUY/SELL setup.
-    Returns:
-      True  - AI says YES
-      False - AI says NO
-      None  - no AI configured / unreachable — fail OPEN (do not block the trade). """
+    """AI confirm is removed. Dual gate decides the trade; never call a provider."""
+    return None
     provider = settings_store.ai_provider
     if provider == "none" or not settings_store.ai_api_key:
         return None
@@ -7732,24 +7729,9 @@ async def test_bybit_connection():
 
 @app.post("/settings/test-ai")
 async def test_ai_connection():
-    if settings_store.ai_provider == "none":
-        return {"success": True, "message": "Using built-in rule engine — no external AI provider configured."}
-    if not settings_store.ai_api_key:
-        return {"success": False, "message": f"Test failed: No API key configured for provider '{settings_store.ai_provider}'."}
-
-    print(f"[SETTINGS] Testing AI provider '{settings_store.ai_provider}' (model={settings_store.ai_model or 'default'})...")
-    decision = await consult_ai_provider({
-        "pair": "TEST/USDT", "condition": "Test Ping", "candle_volume": 100, "prev_candle_volume": 40,
-        "candle_height": 5, "prev_candle_height": 3, "current_price": 100,
-    })
-    if decision is None:
-        return {
-            "success": False,
-            "message": f"Test failed: could not reach '{settings_store.ai_provider}' - check the API key/base URL and try again.",
-        }
     return {
         "success": True,
-        "message": f"AI provider '{settings_store.ai_provider}' responded successfully (test decision: {'YES' if decision else 'NO'}). Provider is reachable and ready.",
+        "message": "AI confirm is removed. Entries fire on the brain + order-flow dual gate.",
     }
 
 @app.post("/settings/reset")
