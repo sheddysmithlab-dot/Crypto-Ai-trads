@@ -441,6 +441,7 @@ async def _confirm_setup_with_ai(
       False — NO (skip trade)
       None  — unreachable / not configured / cool-down (skip trade — no fail-open)
     """
+    global _AI_CONFIRM_NEXT
     provider = getattr(settings, "ai_provider", "none")
     api_key = getattr(settings, "ai_api_key", "") or ""
     forced_model = ""
@@ -574,7 +575,6 @@ async def _confirm_setup_with_ai(
     resp = None
     try:
         async with _AI_CONFIRM_LOCK:
-            global _AI_CONFIRM_NEXT
             _AI_CONFIRM_NEXT = time.time() + _AI_CONFIRM_GAP
             async with httpx.AsyncClient(timeout=25.0) as client:
                 for attempt in range(2):
