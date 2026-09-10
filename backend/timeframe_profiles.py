@@ -1,7 +1,8 @@
 """Per-chart-timeframe trading profile: win/lose display + capital + exit ladder.
 
 Momentum-lock maker entry / taker exit on every TF.
-15m keeps its own size/exit ladder; fire/entry uses the scalp pack (same as 1m).
+1m and 5m share the same fire/entry pack (detect → trap → confirm → 10th-man).
+15m also uses scalp fire; exit/size ladders stay per-TF.
 Exit size widens: 1m < 5m < 15m < 1h < 1D.
 """
 from __future__ import annotations
@@ -62,7 +63,7 @@ _ALIASES = {
 # Maker limit entry + taker market exit on every chart TF.
 MAKER_ENTRY_TFS = frozenset({"1m", "5m", "15m", "1h", "1D", "30s", "3m", "10m", "30m"})
 
-# Scalp pack: same entry/confirm/OF/fee policy (includes 15m per product request).
+# Scalp pack: same entry/confirm/OF/fee/weak-score fire policy (1m = 5m = 15m pack).
 SCALP_TFS = frozenset({"1m", "5m", "30s", "15m"})
 
 

@@ -5902,7 +5902,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 },
             )
             if tm.get("verdict") == "VETO":
-                # 1m weak-score path never skips — force ALLOW and continue.
+                # 1m/5m weak-score path never skips — force ALLOW and continue.
                 if bool(detect_mut.get("weak_score_tenth")) or bool(
                     (tm or {}).get("weak_score_tenth")
                 ):

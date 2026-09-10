@@ -41,8 +41,8 @@ THR_FAKE_WICK = 0.30
 THR_BREAK_ATR = 0.10
 THR_BALANCED = 0.05
 THR_SCORE = 75.0  # overall trade confidence floor (non-trap setups, all TFs)
-THR_SCORE_5M = 75.0  # 5m non-trap / scalp floor
 THR_SCORE_1M = 75.0
+THR_SCORE_5M = THR_SCORE_1M  # 5m fire floor matches 1m
 THR_SCORE_IMBALANCE_1M = float(os.environ.get("THR_SCORE_IMBALANCE_1M", "75"))
 THR_SCORE_INSIDE_BAR = float(os.environ.get("THR_SCORE_INSIDE_BAR", "75"))
 # Classic/doji + engulfing use the same OF floor as other non-trap setups (≥75).
@@ -53,8 +53,8 @@ CANDLE_ONLY_FIRE_ENABLED = os.environ.get("CANDLE_ONLY_FIRE", "0").strip().lower
     "1", "true", "yes",
 )
 THR_SCORE_TRAP = 75.0  # named trap fires (15m+)
-THR_SCORE_TRAP_5M = 70.0  # named trap fires on 5m
 THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "70"))
+THR_SCORE_TRAP_5M = float(os.environ.get("THR_SCORE_TRAP_5M", str(THR_SCORE_TRAP_1M)))  # same as 1m
 STRUCTURE_OPPOSITE_PENALTY = 12.0  # OF vs structure trap conflict — subtract from firing side
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
@@ -114,20 +114,16 @@ def is_candle_soft_strategy(
 def thr_score_for_tf(exec_tf: str | None) -> float:
     """Base OF confidence floor (0–100) for non-trap / scalp setups — ≥75 all TFs."""
     tf = (exec_tf or "").strip().lower()
-    if tf == "5m":
-        return THR_SCORE_5M
-    if tf in ("1m", "30s"):
+    if tf in ("1m", "5m", "30s"):
         return THR_SCORE_1M
     return THR_SCORE
 
 
 def thr_trap_for_tf(exec_tf: str | None) -> float:
-    """Named trap floor: 1m/30s ≥80; 5m ≥80; other TFs ≥90."""
+    """Named trap floor: 1m/5m/30s share scalp trap floor; other TFs use HTF floor."""
     tf = (exec_tf or "").strip().lower()
-    if tf in ("1m", "30s"):
+    if tf in ("1m", "5m", "30s"):
         return float(THR_SCORE_TRAP_1M)
-    if tf == "5m":
-        return float(THR_SCORE_TRAP_5M)
     return float(THR_SCORE_TRAP)
 
 
