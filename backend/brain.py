@@ -3740,6 +3740,7 @@ class Brain:
             "trap": latest_trap,
             "traps": traps_list,
             "stance": stance,
+            "higher_tf_trend": htf_trend,
             "ml": ml_out,
             "plan": plan,
             "verdict": verdict,

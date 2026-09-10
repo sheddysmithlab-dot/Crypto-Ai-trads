@@ -1,14 +1,11 @@
-"""Brain adapter — AI API is the driver, brain.py is the analyst.
+"""Brain adapter — 5-step live entry glue (brain.py unchanged).
 
-Flow per candle scan:
-  1. brain.py analyses the candle series fully (patterns, structure, traps, ML).
-  2. brain.py's chain-of-thought reasoning is sent to the configured AI API as a
-     system prompt + user question.
-  3. The AI model returns BUY / SELL / HOLD — that is the final trade decision.
-  4. If AI is unavailable / misconfigured, brain.py's own verdict is used as
-     a safe fallback so the bot never stops working.
-
-brain.py is never modified.  All glue lives here.
+Pipeline:
+  1) Pattern detect (last closed bar / brain signal)
+  2) Trap scanning (structure + order-flow) + dual-score qualify
+  3) Pattern confirming (main.py momentum-lock pullback)
+  4) 10th-man policy (SmartTradePolicy ALLOW/VETO)
+  5) Fire / skip (maker fill or miss — no taker chase)
 """
 from __future__ import annotations
 
@@ -279,6 +276,98 @@ def _setup_label_and_score(think: dict, of_trap: Optional[dict], action: str) ->
         pattern = (sig.patterns[0] if sig.patterns else None) or sig.strategy
         score = getattr(sig, "score", None) or getattr(sig, "confidence", None)
     return (str(pattern or "setup"), score)
+
+
+def _trap_scan_summary(think: dict, of_trap: Optional[dict], action: str) -> dict:
+    """Step 2: structure trap + order-flow trap snapshot."""
+    trap = think.get("trap") if think else None
+    of_trap = of_trap or {}
+    struct_side = getattr(trap, "side", None) if trap else None
+    struct_type = getattr(trap, "trap_type", None) if trap else None
+    of_sig = of_trap.get("final_signal")
+    conflict = False
+    if action in ("BUY", "SELL"):
+        want = "BUY" if action == "BUY" else "SELL"
+        if struct_side and struct_side != want:
+            conflict = True
+        if of_sig in ("LONG", "SHORT"):
+            of_as = "BUY" if of_sig == "LONG" else "SELL"
+            if of_as != want:
+                conflict = True
+    return {
+        "structure_trap": struct_type,
+        "structure_side": struct_side,
+        "of_signal": of_sig,
+        "of_pattern": of_trap.get("pattern"),
+        "of_line": of_trap.get("line") or of_trap.get("primary_reason"),
+        "conflict": bool(conflict),
+    }
+
+
+def tenth_man_policy(think: dict, action: str) -> dict:
+    """Step 4: Soft 10th-man ALLOW/VETO from SmartTradePolicy stance.
+
+    Soft rules (existing brain policy):
+      - stance HOLD → VETO
+      - stance side != candidate → VETO
+      - trap opposite still ALLOW (soft demotes fade, keeps pattern) with conflict flag
+    """
+    stance = (think or {}).get("stance")
+    trap = (think or {}).get("trap")
+    htf = (think or {}).get("higher_tf_trend")
+    narrative = getattr(stance, "narrative", "") if stance is not None else ""
+    source = getattr(stance, "source", None) if stance is not None else None
+    stance_action = getattr(stance, "action", None) if stance is not None else None
+
+    htf_aligned = None
+    if htf in ("uptrend", "downtrend") and action in ("BUY", "SELL"):
+        htf_aligned = (htf == "uptrend" and action == "BUY") or (
+            htf == "downtrend" and action == "SELL"
+        )
+
+    trap_side = getattr(trap, "side", None) if trap is not None else None
+    trap_conflict = bool(
+        trap_side in ("BUY", "SELL") and action in ("BUY", "SELL") and trap_side != action
+    )
+
+    base = {
+        "narrative": narrative or "",
+        "source": source,
+        "stance_action": stance_action,
+        "htf_trend": htf,
+        "htf_aligned": htf_aligned,
+        "trap_conflict": trap_conflict,
+        "trap_type": getattr(trap, "trap_type", None) if trap is not None else None,
+    }
+
+    if action not in ("BUY", "SELL"):
+        return {**base, "verdict": "VETO", "reason": "no actionable side"}
+    if stance is None:
+        return {**base, "verdict": "ALLOW", "reason": "no stance — pass through"}
+    if stance_action == "HOLD":
+        return {**base, "verdict": "VETO", "reason": "10th-man HOLD — stand aside"}
+    if stance_action in ("BUY", "SELL") and stance_action != action:
+        return {
+            **base,
+            "verdict": "VETO",
+            "reason": f"10th-man {stance_action} != candidate {action}",
+        }
+    reason = "ok"
+    if trap_conflict:
+        reason = "ok (soft: pattern preferred over conflicting trap)"
+    if htf_aligned is False:
+        reason = f"{reason}; HTF {htf} advisory only".strip("; ")
+    return {**base, "verdict": "ALLOW", "reason": reason}
+
+
+def empty_pipeline_state() -> dict:
+    return {
+        "step1_pattern": "pending",
+        "step2_trap": "pending",
+        "step3_confirm": "pending",
+        "step4_tenth_man": "pending",
+        "step5_fire": "pending",
+    }
 
 
 def _fresh_closed_candle_fire(think: dict) -> Optional[dict]:
@@ -945,14 +1034,17 @@ async def evaluate_live_entry_async(
     risk_pct: float = 0.01,
     settings=None,           # settings_store from main.py
 ) -> Dict[str, Any]:
-    """Async entry: brain + order-flow set BUY/SELL; AI must confirm YES.
+    """5-step pipeline through Step 2 (+ dual gate). Confirm / 10th-man / fire in main.
 
-    Missing brain/OF/AI signal → NO_TRADE (no fail-open).
+    Step 1 pattern detect → Step 2 trap scan → dual-score qualify.
+    Step 3–5 run in scan_and_maybe_fire_pair (confirm → 10th-man → fire/skip).
     """
     tf = _norm_tf(timeframe_key)
     risk_pct_pct = float(risk_pct) * 100.0
+    pipeline = empty_pipeline_state()
 
     if len(candles) < MIN_CANDLES:
+        pipeline["step1_pattern"] = "fail"
         return {
             "action": "NO_TRADE",
             "reason": f"Need {MIN_CANDLES}+ closed candles (have {len(candles)})",
@@ -962,15 +1054,18 @@ async def evaluate_live_entry_async(
             "pair": pair,
             "ai_driven": False,
             "ai_confirmation": "SKIP",
+            "pipeline_step": 1,
+            "pipeline": pipeline,
         }
 
-    # Run brain.py in a thread (CPU-bound)
+    # ── Step 1: pattern detect (brain) ───────────────────────────────────
     try:
         analysis = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: _run_brain(candles, tf, htf_candles, float(account_balance), risk_pct_pct)
         )
     except Exception as exc:
+        pipeline["step1_pattern"] = "fail"
         return {
             "action": "NO_TRADE",
             "reason": f"Brain analysis error: {exc}",
@@ -980,10 +1075,31 @@ async def evaluate_live_entry_async(
             "pair": pair,
             "ai_driven": False,
             "ai_confirmation": "SKIP",
+            "pipeline_step": 1,
+            "pipeline": pipeline,
         }
 
     think = analysis["think"]
+    fresh_pattern = _fresh_closed_candle_fire(think)
+    if fresh_pattern:
+        setup_action = fresh_pattern["action"]
+        pipeline["step1_pattern"] = {
+            "status": "pass",
+            "action": setup_action,
+            "pattern": fresh_pattern.get("pattern"),
+            "score": fresh_pattern.get("score"),
+        }
+        print(
+            f"[STEP1] pattern detect {setup_action} {pair} "
+            f"pattern={fresh_pattern.get('pattern')} score={fresh_pattern.get('score')}"
+        )
+    else:
+        # No last-bar pattern — OF/brain fallback still considered after Step 2.
+        setup_action = "HOLD"
+        pipeline["step1_pattern"] = {"status": "none", "action": "HOLD"}
+        print(f"[STEP1] pattern detect none {pair} — no last-bar signal")
 
+    # ── Step 2: trap scanning (structure + order-flow) ───────────────────
     of_trap = await asyncio.get_event_loop().run_in_executor(
         None,
         lambda: _run_orderflow_trap(
@@ -993,16 +1109,25 @@ async def evaluate_live_entry_async(
             candles_5m=candles_5m,
         ),
     )
-
-    # Candidate side from last-bar signal or brain+OF. Never skip dual/AI.
-    fresh_pattern = _fresh_closed_candle_fire(think)
-    if fresh_pattern:
-        setup_action = fresh_pattern["action"]
-    else:
+    if setup_action not in ("BUY", "SELL"):
         setup_action = _fallback_action_from_brain_and_of(think, of_trap, timeframe_key)
+        if setup_action in ("BUY", "SELL"):
+            pipeline["step1_pattern"] = {
+                "status": "fallback",
+                "action": setup_action,
+                "pattern": (of_trap or {}).get("pattern"),
+            }
+
+    trap_scan = _trap_scan_summary(think, of_trap, setup_action or "HOLD")
+    pipeline["step2_trap"] = {"status": "done", **trap_scan}
+    print(
+        f"[STEP2] trap scan {pair} struct={trap_scan.get('structure_trap')} "
+        f"of={trap_scan.get('of_signal')} conflict={trap_scan.get('conflict')}"
+    )
+
     setup_action = _gate_1m_of_score(setup_action or "HOLD", of_trap, timeframe_key, think=think)
 
-    def _blocked(reason: str, *, ai_confirmation: str = "MISSING") -> Dict[str, Any]:
+    def _blocked(reason: str, *, step: int, ai_confirmation: str = "MISSING") -> Dict[str, Any]:
         side = "LONG" if setup_action == "BUY" else "SHORT" if setup_action == "SELL" else None
         rejected = _flatten(
             think,
@@ -1019,35 +1144,63 @@ async def evaluate_live_entry_async(
         if side:
             rejected["direction"] = side
         rejected["reason"] = reason
+        rejected["pipeline_step"] = step
+        rejected["pipeline"] = pipeline
+        rejected["trap_scan"] = trap_scan
+        rejected["tenth_man"] = {
+            "verdict": "VETO",
+            "reason": "blocked before Step4",
+            "narrative": "",
+        }
         return rejected
 
+    # Dual-score qualify (still Step 1–2 gate — not fire)
     ai_confirmation = "MISSING"
     if setup_action in ("BUY", "SELL"):
         if not of_trap:
-            return _blocked("Backend OF signal missing — skip trade")
+            pipeline["step2_trap"]["status"] = "fail"
+            return _blocked("Backend OF signal missing — skip trade", step=2)
 
         of_sig = (of_trap or {}).get("final_signal")
         of_pat = str((of_trap or {}).get("pattern") or "")
         if of_sig == "NO_TRADE" or of_pat.upper().startswith("CANDLE_"):
+            pipeline["step2_trap"]["status"] = "fail"
             return _blocked(
-                f"Order-flow NO_TRADE — skip | {(of_trap or {}).get('primary_reason') or of_sig or ''}"
+                f"Order-flow NO_TRADE — skip | {(of_trap or {}).get('primary_reason') or of_sig or ''}",
+                step=2,
             )
 
         sig = think.get("signal")
         if sig is None and think.get("trap") is None:
-            return _blocked("Backend brain signal missing — skip trade")
+            pipeline["step1_pattern"] = {
+                **(pipeline.get("step1_pattern") if isinstance(pipeline.get("step1_pattern"), dict) else {}),
+                "status": "fail",
+            }
+            return _blocked("Backend brain signal missing — skip trade", step=1)
 
         ok_dual, dual_msg, b_sc, o_sc = _dual_score_passes(
             setup_action, of_trap, think, timeframe_key
         )
         if not ok_dual:
-            return _blocked(f"Dual score failed — {dual_msg} (brain={b_sc:.1f} OF={o_sc:.1f})")
+            pipeline["step2_trap"]["status"] = "fail"
+            return _blocked(
+                f"Dual score failed — {dual_msg} (brain={b_sc:.1f} OF={o_sc:.1f})",
+                step=2,
+            )
 
         ai_confirmation = "SKIP"
         print(
-            f"[DUAL-GATE] {setup_action} {pair} "
-            f"brain={b_sc:.1f} OF={o_sc:.1f} — fire without AI"
+            f"[STEP1-2] dual-gate pass {setup_action} {pair} "
+            f"brain={b_sc:.1f} OF={o_sc:.1f} — queue confirm"
         )
+
+    # Step 4 preview (enforced in main after Step 3 confirm)
+    tenth = tenth_man_policy(think, setup_action if setup_action in ("BUY", "SELL") else "HOLD")
+    pipeline["step4_tenth_man"] = {
+        "status": "preview",
+        "verdict": tenth.get("verdict"),
+        "reason": tenth.get("reason"),
+    }
 
     fire_action = setup_action if setup_action in ("BUY", "SELL") and ai_confirmation == "SKIP" else "HOLD"
     out = _flatten(
@@ -1061,6 +1214,11 @@ async def evaluate_live_entry_async(
     )
     out["ai_confirmation"] = ai_confirmation
     out["ai_driven"] = False
+    out["trap_scan"] = trap_scan
+    out["tenth_man"] = tenth
+    out["pipeline"] = pipeline
+    out["pipeline_step"] = 2 if fire_action in ("BUY", "SELL") else 1
+    out["higher_tf_trend"] = think.get("higher_tf_trend")
     if fire_action in ("BUY", "SELL"):
         if fresh_pattern:
             pat = fresh_pattern.get("pattern")
@@ -1073,7 +1231,17 @@ async def evaluate_live_entry_async(
             out["score"] = fresh_pattern.get("score") or out.get("score") or 0
         out["action"] = fire_action
         out["direction"] = "LONG" if fire_action == "BUY" else "SHORT"
-        out["reason"] = f"{out.get('reason', '')} | dual-gate".strip(" |")
+        out["reason"] = (
+            f"{out.get('reason', '')} | pipeline S1-S2 dual-gate | "
+            f"10th-man preview={tenth.get('verdict')}"
+        ).strip(" |")
+        pipeline["step3_confirm"] = "pending"
+        pipeline["step5_fire"] = "pending"
+    else:
+        out["action"] = "NO_TRADE"
+        if not out.get("reason"):
+            out["reason"] = "HOLD after Step1-2 — no qualifying setup"
+    out["pipeline"] = pipeline
     return out
 
 

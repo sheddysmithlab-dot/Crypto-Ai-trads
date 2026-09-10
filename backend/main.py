@@ -3607,8 +3607,8 @@ class AITradingAgent:
             f"[AI ENGINE] Armed — trading READY now "
             f"(boot UI scan-driven, max {ENGINE_BOOT_MAX_SEC:g}s). "
             f"Momentum watchlist gate pending. "
-            f"Detect on closed candle → candle-1 impulse lock (≥2×trail) → "
-            f"trail% pullback maker; miss/oppose/exhausted = skip (no taker chase). "
+            f"5-step pipeline: pattern detect → trap scan → candle-1 confirm → "
+            f"10th-man → fire/skip (pullback maker, no taker chase). "
             f"First detect per pair may be skipped."
         )
 
@@ -5167,12 +5167,13 @@ def _momentum_pullback_limit_px(side: str, extreme: float, trail_pct: float) -> 
 
 
 async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
-    """Scan last CLOSED candle for pattern; queue momentum-lock then pullback maker.
+    """5-step entry pipeline.
 
-    Flow (when MOMENTUM_LOCK_ENABLED):
-      detect + AI YES → queue momentum_lock → next forming candle impulse
-      (≥2× TF trail, same side) → trail% pullback post-only maker → fill or skip.
-      Opposite color, exhausted move (≥ TF profit), or miss → skip (no taker chase).
+    1) Pattern detect (brain last-bar)
+    2) Trap scanning (structure + order-flow) + dual-score qualify
+    3) Pattern confirming (candle-1 impulse → trail% pullback maker)
+    4) 10th-man policy (SmartTradePolicy ALLOW/VETO)
+    5) Fire on maker fill, or skip (no taker chase)
     """
     bybit_symbol = get_bybit_symbol(pair)
     if not bybit_symbol:
@@ -5482,7 +5483,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             why="fired",
         )
         fire_label = (
-            "momentum-lock pullback"
+            "Step5 pipeline fire"
             if pending.get("entry_policy") == "momentum_lock" or pending.get("no_taker_fallback")
             else "1m maker limit fill"
             if pending.get("maker_filled")
@@ -5837,7 +5838,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                     side=side,
                     action=detect.get("action"),
                     pattern=detect.get("pattern"),
-                    reason=f"impulse {impulse_pct:.2f}% · need {need:.2f}%",
+                    reason=f"Step3 impulse {impulse_pct:.2f}% · need {need:.2f}%",
                 )
                 return False
 
@@ -5855,9 +5856,20 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             pending["confirm_matched"] = True
             pending["no_taker_fallback"] = True
             pending["entry_policy"] = "momentum_lock"
+            pending["pipeline_step"] = 3
+            detect_mut = dict(pending.get("detect") or {})
+            pipe = dict(detect_mut.get("pipeline") or {})
+            pipe["step3_confirm"] = {
+                "status": "pass",
+                "impulse_pct": round(impulse_pct, 4),
+                "limit_px": float(limit_raw),
+                "trail": trail,
+            }
+            detect_mut["pipeline"] = pipe
+            pending["detect"] = detect_mut
             PENDING_ENTRY_SIGNALS[pair] = pending
             print(
-                f"[BRAIN] MOMENTUM LOCK {side} {pair} impulse={impulse_pct:.2f}% "
+                f"[STEP3] confirm {side} {pair} impulse={impulse_pct:.2f}% "
                 f"extreme={extreme} pullback={limit_raw} trail={trail:g}%"
             )
             _push_pattern_neon(
@@ -5867,8 +5879,51 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 side=side,
                 action=detect.get("action"),
                 pattern=detect.get("pattern"),
-                reason=f"locked {impulse_pct:.2f}% → pullback {limit_raw}",
+                reason=f"Step3 locked {impulse_pct:.2f}% → pullback {limit_raw}",
             )
+
+            # ── Step 4: 10th-man policy (after confirm, before fire) ──
+            tm = detect_mut.get("tenth_man") if isinstance(detect_mut.get("tenth_man"), dict) else None
+            if not tm or not tm.get("verdict"):
+                tm = {
+                    "verdict": "ALLOW",
+                    "reason": "no tenth_man payload — pass",
+                    "narrative": "",
+                }
+            pipe["step4_tenth_man"] = {
+                "status": "done",
+                "verdict": tm.get("verdict"),
+                "reason": tm.get("reason"),
+                "narrative": tm.get("narrative"),
+            }
+            detect_mut["pipeline"] = pipe
+            pending["detect"] = detect_mut
+            PENDING_ENTRY_SIGNALS[pair] = pending
+            print(
+                f"[STEP4] 10th-man {tm.get('verdict')} {side} {pair} "
+                f"— {tm.get('reason') or tm.get('narrative') or ''}"
+            )
+            system_log.push_agent_chat(
+                f"STEP4 10th-man {tm.get('verdict')} {side} {pair}: "
+                f"{tm.get('reason') or tm.get('narrative') or 'ok'}",
+                status="match" if tm.get("verdict") == "ALLOW" else "no_match",
+                details={
+                    "pair": pair,
+                    "side": side,
+                    "pipeline_step": 4,
+                    "tenth_man": tm,
+                },
+            )
+            if tm.get("verdict") == "VETO":
+                pipe["step5_fire"] = "skip"
+                detect_mut["pipeline"] = pipe
+                pending["detect"] = detect_mut
+                return await _skip_pending(
+                    pending,
+                    f"Step4 10th-man VETO: {tm.get('reason') or tm.get('narrative') or 'stand aside'}",
+                    fire_candle_ms=lock_ms,
+                )
+
             if not agent.trading_ready():
                 _push_pattern_neon(
                     pair=pair,
@@ -5877,9 +5932,14 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                     side=side,
                     action=detect.get("action"),
                     pattern=detect.get("pattern"),
-                    reason=f"Pullback held · warmup {agent.warmup_remaining_sec():.0f}s",
+                    reason=f"Step5 held · warmup {agent.warmup_remaining_sec():.0f}s",
                 )
                 return False
+            pending["pipeline_step"] = 5
+            pipe["step5_fire"] = "arming"
+            detect_mut["pipeline"] = pipe
+            pending["detect"] = detect_mut
+            print(f"[STEP5] arm pullback maker {side} {pair} @ {limit_raw}")
             return await _arm_maker_rest(pending)
 
         # Already locked but maker not armed yet (e.g. warmup) — arm now.
@@ -6276,6 +6336,25 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
 
     detect = dict(detect)
     lock_candle_ms = close_time + interval_ms
+    trap_scan = detect.get("trap_scan") if isinstance(detect.get("trap_scan"), dict) else {}
+    tenth_prev = detect.get("tenth_man") if isinstance(detect.get("tenth_man"), dict) else {}
+    pipe = dict(detect.get("pipeline") or {})
+    pipe["step1_pattern"] = pipe.get("step1_pattern") or {
+        "status": "pass",
+        "action": detect.get("action"),
+        "pattern": detect.get("pattern"),
+    }
+    pipe["step2_trap"] = pipe.get("step2_trap") or {"status": "done", **trap_scan}
+    pipe["step3_confirm"] = "pending"
+    pipe["step4_tenth_man"] = {
+        "status": "preview",
+        "verdict": tenth_prev.get("verdict"),
+        "reason": tenth_prev.get("reason"),
+    }
+    pipe["step5_fire"] = "pending"
+    detect["pipeline"] = pipe
+    detect["pipeline_step"] = 2
+
     if bool(MOMENTUM_LOCK_ENABLED):
         PENDING_ENTRY_SIGNALS[pair] = {
             "detect": detect,
@@ -6292,7 +6371,15 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             "confirm_matched": False,
             "impulse_locked": False,
             "lock_extreme": None,
+            "pipeline_step": 2,
         }
+        trap_note = ""
+        if trap_scan.get("structure_trap") or trap_scan.get("of_signal"):
+            trap_note = (
+                f" | trap={trap_scan.get('structure_trap') or '-'} "
+                f"of={trap_scan.get('of_signal') or '-'} "
+                f"conflict={trap_scan.get('conflict')}"
+            )
         _push_pattern_neon(
             pair=pair,
             candle_time_ms=close_time,
@@ -6300,23 +6387,27 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             side=side,
             action=detect.get("action"),
             pattern=detect.get("pattern"),
-            reason=detect.get("reason"),
+            reason=f"Step1-2 pass{trap_note}"[:120],
         )
         system_log.push_agent_chat(
-            f"MOMENTUM LOCK {side} on {pair}: {detect.get('pattern')} — wait candle-1 pullback "
-            f"| AI={detect.get('ai_confirmation', 'SKIP')}",
+            f"STEP1-2 {side} {pair}: {detect.get('pattern')} → queue Step3 confirm "
+            f"| 10th-man preview={tenth_prev.get('verdict', '?')}{trap_note}",
             status="match",
             details={
                 "pair": pair,
                 "side": side,
                 "detect_candle": close_time,
                 "lock_candle": lock_candle_ms,
-                "policy": "momentum_lock_pullback",
+                "pipeline_step": 2,
+                "trap_scan": trap_scan,
+                "tenth_man": tenth_prev,
+                "policy": "pipeline_5step",
             },
         )
         print(
-            f"[BRAIN] MOMENTUM LOCK queued {side} {pair} pattern={detect.get('pattern')} "
-            f"detect@{close_time} lock@{lock_candle_ms}"
+            f"[STEP1-2] queued {side} {pair} pattern={detect.get('pattern')} "
+            f"detect@{close_time} confirm@{lock_candle_ms} "
+            f"10th-preview={tenth_prev.get('verdict')}"
         )
         return False
 
@@ -6330,7 +6421,23 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         "queued_at": time.time(),
         "mode": "detect_fire",
         "confirm_matched": True,
+        "pipeline_step": 5,
     }
+    # Momentum lock off: still run Step4 before legacy fire
+    tm = tenth_prev if tenth_prev.get("verdict") else {"verdict": "ALLOW", "reason": "legacy path"}
+    if tm.get("verdict") == "VETO":
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=close_time,
+            stage="skipped",
+            side=side,
+            action=detect.get("action"),
+            pattern=detect.get("pattern"),
+            reason=f"Step4 VETO: {tm.get('reason')}",
+        )
+        PENDING_ENTRY_SIGNALS.pop(pair, None)
+        print(f"[STEP4] VETO {side} {pair}: {tm.get('reason')}")
+        return False
     _push_pattern_neon(
         pair=pair,
         candle_time_ms=close_time,
@@ -6341,7 +6448,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         reason=detect.get("reason"),
     )
     system_log.push_agent_chat(
-        f"DETECT FIRE {side} on {pair}: {detect.get('pattern')} — no confirm candle "
+        f"STEP5 legacy fire {side} on {pair}: {detect.get('pattern')} "
         f"| AI={detect.get('ai_confirmation', 'SKIP')}",
         status="match",
         details={
@@ -6349,6 +6456,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             "side": side,
             "detect_candle": close_time,
             "policy": "fire_on_detect",
+            "pipeline_step": 5,
         },
     )
     return await _fire_on_detect(PENDING_ENTRY_SIGNALS[pair])
