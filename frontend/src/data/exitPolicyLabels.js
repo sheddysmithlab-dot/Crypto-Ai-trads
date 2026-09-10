@@ -32,7 +32,7 @@ export const EXIT_POLICY_SHORT =
 export const EXIT_POLICY_CHART_OVERLAY = exitOverlayFor('1M');
 
 export const EXIT_POLICY_SYSTEM_LOG =
-  'All TF momentum-lock maker entry (candle-1 impulse → trail% pullback); exit market/taker. ' +
+  'All TF momentum-lock maker entry (≤2 bars after detect, color+impulse ≥0.09% → trail% pullback); exit market/taker. ' +
   'Ladder: 1m profit +0.50 trail 0.10 soft −0.50 hard −0.70 size 1.5% · ' +
   '5m +0.70/0.15/−0.70/−1.00 size 3% · ' +
   '15m +1.00/0.20/−1.00/−1.40 size 7% · ' +

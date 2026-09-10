@@ -101,12 +101,11 @@ export default function AiTrainingModal({ open, onClose }) {
             </div>
             <div className="min-w-0">
               <div className="text-[10px] font-bold text-violet-400 uppercase tracking-widest">
-                Cursor AI · Self-improve
+                Family playbook · MySQL
               </div>
               <h2 className="text-lg font-bold text-white mt-0.5">AI Observation & Training</h2>
               <p className="text-[11px] text-gray-500 mt-1 truncate">
-                Provider: {data?.ai_provider || '—'}
-                {data?.cursor_unlimited ? ' · unlimited agent' : ''}
+                Engine: {data?.training_engine || 'family_rules'}
                 {' · '}
                 {dbOk
                   ? 'MySQL connected'

@@ -426,11 +426,10 @@ def _seed_engine_formulas(cur) -> None:
 
 
 def _tighten_trade_policy(cur) -> None:
-    """Structural fire policy only — do NOT overwrite exit/score knobs Cursor AI owns.
+    """Structural fire policy only — do not overwrite exit/score ladder knobs.
 
-    User/chat sets seed defaults via INSERT IGNORE (_seed_engine_formulas) and
-    one-shot deploy. After that Cursor AI observes live trades and retunes
-    PROFIT_*/LOSS_*/THR_*/family min_* freely in MySQL.
+    Seeds come from INSERT IGNORE (_seed_engine_formulas). Live exit/OF floors
+    stay under code lock (timeframe_profiles / engine_config) + family_rules.
     """
     cur.execute(
         """UPDATE engine_formulas

@@ -256,11 +256,12 @@ INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_n
 ('THR_RV_PRICE_WEAK','of','number',0.70,'OF weak RV/price threshold'),
 ('SCORE_FLOOR_EPS','of','number',0.05,'OF score floor epsilon'),
 ('LOOKBACK','of','number',20,'OF lookback candles'),
-('MIN_CONFIRM_BODY_PCT','fire','number',0.03,'Min body % for color confirm'),
+('MIN_CONFIRM_BODY_PCT','fire','number',0.09,'Min body % for color confirm band'),
+('MOMENTUM_IMPULSE_MIN_PCT','fire','number',0.09,'Min directional candle trail % after detect'),
 ('SCALP_CONFIRM_MIN_CONSECUTIVE','fire','number',1,'Fire on 1st matching CLOSED candle'),
 ('ONE_M_CONFIRM_SKIP_TICKS','fire','number',1,'1m skip N matching ticks'),
 ('ONE_M_MIN_BARS_BETWEEN_FIRES','fire','number',3,'Min bars between scalp fires'),
-('ONE_M_CONFIRM_MAX_BARS','fire','number',2,'Try 1st then 2nd CLOSED confirm; else skip'),
+('ONE_M_CONFIRM_MAX_BARS','fire','number',2,'Try confirm on candle-1 then candle-2 after detect'),
 ('SKIP_FIRST_DETECT','fire','bool',1,'Skip first HTF detect after arm'),
 ('SKIP_FIRST_DETECT_SCALP','fire','bool',0,'Skip first scalp detect'),
 ('ENGINE_BOOT_MAX_SEC','engine','number',60,'Boot overlay max sec'),
@@ -274,8 +275,14 @@ INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_j
 
 -- Enable candle-family trading (safe re-run)
 UPDATE engine_formulas SET value_num = 1 WHERE formula_key = 'CANDLE_ONLY_FIRE' AND (value_num IS NULL OR value_num <> 1);
-UPDATE engine_formulas SET value_num = 2, note = 'Try 1st then 2nd CLOSED confirm; else skip'
+UPDATE engine_formulas SET value_num = 2, note = 'Confirm on candle-1 then candle-2 after detect; else skip'
   WHERE formula_key = 'ONE_M_CONFIRM_MAX_BARS';
+UPDATE engine_formulas SET value_num = 0.09, note = 'Min body % for color confirm band'
+  WHERE formula_key = 'MIN_CONFIRM_BODY_PCT';
+INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_num, note) VALUES
+('MOMENTUM_IMPULSE_MIN_PCT','fire','number',0.09,'Min directional candle trail % after detect');
+UPDATE engine_formulas SET value_num = 0.09, note = 'Min directional candle trail % after detect'
+  WHERE formula_key = 'MOMENTUM_IMPULSE_MIN_PCT';
 INSERT IGNORE INTO engine_formulas (formula_key, group_name, value_type, value_num, note) VALUES
 ('SCALP_CONFIRM_MIN_CONSECUTIVE','fire','number',1,'Fire on 1st matching CLOSED candle');
 UPDATE engine_formulas SET value_num = 1, note = 'Fire on 1st matching CLOSED candle (window=2 then skip)'

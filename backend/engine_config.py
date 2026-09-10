@@ -237,6 +237,7 @@ def apply_to_runtime() -> dict[str, Any]:
             "SKIP_FIRST_DETECT_SCALP",
             "MOMENTUM_LOCK_ENABLED",
             "MOMENTUM_IMPULSE_TRAIL_MULT",
+            "MOMENTUM_IMPULSE_MIN_PCT",
             "MOMENTUM_SKIP_IF_GE_PROFIT",
         ):
             key = name
@@ -244,18 +245,23 @@ def apply_to_runtime() -> dict[str, Any]:
                 key = "MAX_CONCURRENT_TRADES"
             _set(m, name, key)
 
-        # Confirm window stays locked. Exit % come from timeframe_profiles ladder
-        # (1m < 5m < 15m < 1h < 1D) — do not flatten every TF to 1m numbers.
+        # Confirm: 2 bars after detect, color body + impulse ≥ 0.09%. Exit % from TF ladder.
         manual = {
             "SCALP_CONFIRM_MIN_CONSECUTIVE": 1,
             "ONE_M_CONFIRM_START_BAR": 1,
-            "ONE_M_CONFIRM_MAX_BARS": 1,
+            "ONE_M_CONFIRM_MAX_BARS": 2,
+            "MIN_CONFIRM_BODY_PCT": 0.09,
+            "MOMENTUM_IMPULSE_MIN_PCT": 0.09,
         }
         for name, val in manual.items():
             if hasattr(m, name):
-                setattr(m, name, type(getattr(m, name))(val) if not isinstance(val, int) else int(val))
-                applied[f"main.{name}"] = val
-        print("[ENGINE-DB] confirm window locked; exit % from TF ladder (maker entry all TFs)")
+                cur = getattr(m, name)
+                setattr(m, name, type(cur)(val) if not isinstance(val, type(cur)) else val)
+                applied[f"main.{name}"] = getattr(m, name)
+        print(
+            "[ENGINE-DB] confirm locked: ≤2 bars after detect, "
+            "color+impulse ≥0.09%; exit % from TF ladder (maker entry all TFs)"
+        )
 
         if hasattr(m, "PROFIT_LOCK_PCT") and hasattr(m, "PROFIT_TRAIL_GIVEBACK_PCT"):
             m.PATH_TP_WIDE_PCT = float(m.PROFIT_LOCK_PCT) + float(m.PROFIT_TRAIL_GIVEBACK_PCT)

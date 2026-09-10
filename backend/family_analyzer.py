@@ -13,14 +13,6 @@ OF_FLOOR_MIN = float(__import__("os").environ.get("FAMILY_TRAIN_OF_FLOOR_MIN", "
 OF_FLOOR_MAX = float(__import__("os").environ.get("FAMILY_TRAIN_OF_FLOOR_MAX", "90"))
 RETRAIN_EVERY = int(__import__("os").environ.get("FAMILY_TRAIN_EVERY_N", "20"))
 
-# Unlimited Cursor mode: looser auto rule caps (agent also edits code freely).
-if (__import__("os").environ.get("CURSOR_AI_UNLIMITED") or "1").strip().lower() in (
-    "1", "true", "yes", "on",
-):
-    MIN_SAMPLES = int(__import__("os").environ.get("FAMILY_TRAIN_MIN_SAMPLES", "5"))
-    MAX_OF_DELTA = float(__import__("os").environ.get("FAMILY_TRAIN_MAX_OF_DELTA", "15"))
-    RETRAIN_EVERY = int(__import__("os").environ.get("FAMILY_TRAIN_EVERY_N", "5"))
-
 
 def _outcome_from_metrics(metrics: dict) -> str:
     try:

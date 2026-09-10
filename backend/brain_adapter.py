@@ -37,8 +37,8 @@ ENGINE_NAME = "ai_driven_brain_v2"
 ENTRY_PATTERN_NAME = "AI_BRAIN_V2"
 # Detect-fire only on a last-bar brain signal. Raw candle matches do not fire.
 DETECT_FIRE_MIN_SCORE = 5.0
-# 1m only: OF side score below this → fade (reverse) instead of skip.
-ONE_M_WEAK_SCORE_REVERSE_MAX = 30.0
+# 1m only: OF side score below this → 10th-man picks true trade (no skip / no Step2 reverse).
+ONE_M_WEAK_SCORE_TENTH_MAX = 30.0
 
 # ─── timeframe normalisation ──────────────────────────────────────────────────
 _TF_NORM: Dict[str, str] = {
@@ -336,16 +336,51 @@ def _trap_scan_summary(think: dict, of_trap: Optional[dict], action: str) -> dic
     }
 
 
+def _tenth_man_true_side(
+    think: dict,
+    of_trap: Optional[dict],
+    candidate: str,
+) -> str:
+    """Pick the 'true' side when 1m pattern OF score is weak (<30).
+
+    Priority: structure trap → stronger OF side → stance → fade candidate.
+    (Weak pattern stance is last among directional sources so we do not
+    rubber-stamp a low-confidence pattern.)
+    """
+    trap = (think or {}).get("trap")
+    trap_side = getattr(trap, "side", None) if trap is not None else None
+    if trap_side in ("BUY", "SELL"):
+        return trap_side
+    of_trap = of_trap or {}
+    long_sc = float(of_trap.get("long_score") or 0)
+    short_sc = float(of_trap.get("short_score") or 0)
+    if long_sc > short_sc + 1e-6:
+        return "BUY"
+    if short_sc > long_sc + 1e-6:
+        return "SELL"
+    stance = (think or {}).get("stance")
+    stance_action = getattr(stance, "action", None) if stance is not None else None
+    if stance_action in ("BUY", "SELL"):
+        return stance_action
+    return _flip_buy_sell(candidate)
+
+
 def tenth_man_policy(
     think: dict,
     action: str,
     of_trap: Optional[dict] = None,
+    *,
+    weak_of_score: float | None = None,
+    timeframe_key: str | None = None,
 ) -> dict:
-    """Step 4: 10th-man ALLOW/VETO.
+    """Step 4: 10th-man ALLOW/VETO/FLIP.
 
     When a structure trap fights the pattern, live path flips to the trap side
     (opposite trade) before confirm — this policy ALLOWs that trap-side trade.
     VETO only for HOLD / no side / stance mismatch when not on trap side.
+
+    1m weak OF (<30): never skip — pick true side (stance/trap/stronger OF) and
+    ALLOW or FLIP; VETO is disabled on that path.
     """
     stance = (think or {}).get("stance")
     trap = (think or {}).get("trap")
@@ -354,6 +389,13 @@ def tenth_man_policy(
     narrative = getattr(stance, "narrative", "") if stance is not None else ""
     source = getattr(stance, "source", None) if stance is not None else None
     stance_action = getattr(stance, "action", None) if stance is not None else None
+    tf = _norm_tf(timeframe_key) if timeframe_key else None
+    weak_path = bool(
+        tf == "1m"
+        and weak_of_score is not None
+        and float(weak_of_score) < ONE_M_WEAK_SCORE_TENTH_MAX
+        and action in ("BUY", "SELL")
+    )
 
     htf_aligned = None
     if htf in ("uptrend", "downtrend") and action in ("BUY", "SELL"):
@@ -387,10 +429,33 @@ def tenth_man_policy(
         "trap_type": trap_type,
         "of_signal": of_sig,
         "on_trap_side": on_trap_side,
+        "weak_of_score": weak_of_score,
+        "weak_score_tenth": weak_path,
     }
 
     if action not in ("BUY", "SELL"):
         return {**base, "verdict": "VETO", "reason": "no actionable side"}
+
+    # 1m weak pattern OF → 10th-man true trade (never VETO / never skip).
+    if weak_path:
+        true_side = _tenth_man_true_side(think, of_trap, action)
+        if true_side != action:
+            return {
+                **base,
+                "verdict": "FLIP",
+                "flip_to": true_side,
+                "reason": (
+                    f"1m weak-score 10th-man true trade: {action} OF="
+                    f"{float(weak_of_score):.1f}<{ONE_M_WEAK_SCORE_TENTH_MAX:.0f} → {true_side}"
+                ),
+            }
+        reason = (
+            f"1m weak-score 10th-man true trade ALLOW {action} "
+            f"(OF={float(weak_of_score):.1f}<{ONE_M_WEAK_SCORE_TENTH_MAX:.0f})"
+        )
+        if htf_aligned is False:
+            reason = f"{reason}; HTF {htf} advisory only"
+        return {**base, "verdict": "ALLOW", "reason": reason}
 
     # Taking the trap / fade side is the intended opposite trade — always ALLOW.
     if on_trap_side:
@@ -1197,7 +1262,7 @@ async def evaluate_live_entry_async(
 
     # Trap fights pattern → take opposite (trap) side, do not skip.
     flipped_from = None
-    weak_score_reverse = False
+    weak_score_tenth = False
     weak_of_score = None
     trap_obj = think.get("trap")
     trap_side = getattr(trap_obj, "side", None) if trap_obj is not None else None
@@ -1220,37 +1285,29 @@ async def evaluate_live_entry_async(
             f"({getattr(trap_obj, 'trap_type', 'trap')}) — opposite trade"
         )
 
-    # 1m only: pattern OF side score < 30 → reverse trade, never skip on weak score.
+    # 1m only: pattern OF side score < 30 → hand to 10th-man true trade (no Step2 reverse / no skip).
     if (
         tf == "1m"
         and setup_action in ("BUY", "SELL")
         and of_trap
     ):
         side_sc = _matching_side_score(of_trap, setup_action)
-        if side_sc < ONE_M_WEAK_SCORE_REVERSE_MAX:
+        if side_sc < ONE_M_WEAK_SCORE_TENTH_MAX:
             weak_of_score = side_sc
-            weak_from = setup_action
-            flipped_from = flipped_from or weak_from
-            setup_action = _flip_buy_sell(setup_action)
-            reason = (
-                f"1m weak-score reverse: {weak_from} OF={side_sc:.1f}"
-                f"<{ONE_M_WEAK_SCORE_REVERSE_MAX:.0f} → {setup_action}"
-            )
-            of_trap = _align_of_trap_to_action(of_trap, setup_action, reason=reason)
-            think = _think_aligned_to_action(think, setup_action)
-            weak_score_reverse = True
-            trap_scan = _trap_scan_summary(think, of_trap, setup_action)
+            weak_score_tenth = True
             pipeline["step2_trap"] = {
-                "status": "weak_score_reverse",
-                "flipped_from": weak_from,
-                "flipped_to": setup_action,
+                **(pipeline.get("step2_trap") if isinstance(pipeline.get("step2_trap"), dict) else {}),
+                "status": "weak_score_tenth",
                 "weak_of_score": side_sc,
-                **trap_scan,
+                "candidate": setup_action,
             }
-            print(f"[STEP2] {reason} — opposite trade (no skip)")
+            print(
+                f"[STEP2] 1m weak-score {pair} {setup_action} OF={side_sc:.1f}"
+                f"<{ONE_M_WEAK_SCORE_TENTH_MAX:.0f} — queue 10th-man true trade (no skip)"
+            )
 
-    if weak_score_reverse:
-        # Keep reversed side; do not let dual-gate / low OF floor convert to HOLD.
+    if weak_score_tenth:
+        # Keep candidate; do not let dual-gate / low OF floor convert to HOLD.
         pass
     else:
         setup_action = _gate_1m_of_score(
@@ -1293,7 +1350,7 @@ async def evaluate_live_entry_async(
 
         of_sig = (of_trap or {}).get("final_signal")
         of_pat = str((of_trap or {}).get("pattern") or "")
-        if not weak_score_reverse and (
+        if not weak_score_tenth and (
             of_sig == "NO_TRADE" or of_pat.upper().startswith("CANDLE_")
         ):
             pipeline["step2_trap"]["status"] = "fail"
@@ -1310,15 +1367,14 @@ async def evaluate_live_entry_async(
             }
             return _blocked("Backend brain signal missing — skip trade", step=1)
 
-        if weak_score_reverse:
-            # Already faded weak OF (<30); queue confirm without dual-floor skip.
+        if weak_score_tenth:
             b_sc = float(getattr(think.get("signal"), "score", 0) or 0) if think.get("signal") else 0.0
             o_sc = _matching_side_score(of_trap, setup_action)
             ai_confirmation = "SKIP"
             print(
-                f"[STEP1-2] weak-score reverse pass {setup_action} {pair} "
+                f"[STEP1-2] weak-score → 10th-man {setup_action} {pair} "
                 f"brain={b_sc:.1f} OF={o_sc:.1f} "
-                f"(from {flipped_from}, weak={weak_of_score:.1f}<{ONE_M_WEAK_SCORE_REVERSE_MAX:.0f}) "
+                f"(weak={weak_of_score:.1f}<{ONE_M_WEAK_SCORE_TENTH_MAX:.0f}) "
                 f"— queue confirm"
             )
         else:
@@ -1344,7 +1400,28 @@ async def evaluate_live_entry_async(
         think,
         setup_action if setup_action in ("BUY", "SELL") else "HOLD",
         of_trap=of_trap,
+        weak_of_score=weak_of_score if weak_score_tenth else None,
+        timeframe_key=timeframe_key,
     )
+    # Apply 10th-man true side now so confirm/fire arm the correct direction (no skip).
+    if (
+        weak_score_tenth
+        and tenth.get("verdict") == "FLIP"
+        and tenth.get("flip_to") in ("BUY", "SELL")
+    ):
+        true_side = tenth["flip_to"]
+        flipped_from = flipped_from or setup_action
+        reason = str(tenth.get("reason") or f"10th-man true {setup_action}→{true_side}")
+        of_trap = _align_of_trap_to_action(of_trap, true_side, reason=reason)
+        think = _think_aligned_to_action(think, true_side)
+        setup_action = true_side
+        tenth = {
+            **tenth,
+            "verdict": "ALLOW",
+            "applied_flip": True,
+            "reason": f"{reason} (applied)",
+        }
+        print(f"[STEP4] weak-score 10th-man applied {pair} → {setup_action} — {reason}")
     pipeline["step4_tenth_man"] = {
         "status": "preview",
         "verdict": tenth.get("verdict"),
@@ -1384,20 +1461,23 @@ async def evaluate_live_entry_async(
             f"{out.get('reason', '')} | pipeline S1-S2 dual-gate | "
             f"10th-man preview={tenth.get('verdict')}"
             + (
-                f" | weak-score reverse {flipped_from}→{setup_action} "
-                f"OF={weak_of_score:.1f}<{ONE_M_WEAK_SCORE_REVERSE_MAX:.0f}"
-                if weak_score_reverse and flipped_from
+                f" | weak-score 10th-man true {flipped_from or '?'}→{setup_action} "
+                f"OF={weak_of_score:.1f}<{ONE_M_WEAK_SCORE_TENTH_MAX:.0f}"
+                if weak_score_tenth
                 else (f" | trap-flip {flipped_from}→{setup_action}" if flipped_from else "")
             )
         ).strip(" |")
-        if flipped_from:
+        if weak_score_tenth:
+            out["weak_of_score"] = weak_of_score
+            out["strategy"] = "weak_score_tenth_man"
+            out["weak_score_tenth"] = True
+            if flipped_from and flipped_from != setup_action:
+                out["trap_flip_from"] = flipped_from
+                out["trap_flip_to"] = setup_action
+        elif flipped_from:
             out["trap_flip_from"] = flipped_from
             out["trap_flip_to"] = setup_action
-            if weak_score_reverse:
-                out["strategy"] = "weak_score_reverse"
-                out["weak_of_score"] = weak_of_score
-            elif think.get("trap") is not None:
-                # Prefer trap label when we flipped to fade the crowd.
+            if think.get("trap") is not None:
                 t = think["trap"]
                 out["pattern"] = (
                     str(getattr(t, "trap_type", None) or out.get("pattern") or "trap")

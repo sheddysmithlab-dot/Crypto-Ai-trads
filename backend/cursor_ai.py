@@ -1,8 +1,7 @@
-"""Cursor SDK AI — unlimited full-agent mode for confirm + profit self-improve.
+"""Cursor SDK AI — DISABLED for training / self-improve / issue bus.
 
-When CURSOR_AI_UNLIMITED=1 (default): local agent on the repo with tools enabled —
-can read/edit code, pull outside context, integrate changes aimed at higher profit /
-lower loss. Sync SDK is unreliable on Windows; always use the async bridge.
+`is_cursor_configured()` is always False. Family AI training is MySQL-only
+(family_analyzer + family_engine_rules). Confirm / improve stubs return None.
 """
 from __future__ import annotations
 
@@ -214,28 +213,8 @@ async def train_lesson(
     timeframe: str,
     stats_blurb: str,
 ) -> Optional[str]:
-    """Legacy short lesson — delegates to full self-improve when unlimited."""
-    if is_unlimited():
-        summary = await self_improve_for_profit(
-            family=family,
-            timeframe=timeframe,
-            stats_blurb=stats_blurb,
-            trigger="train_lesson",
-        )
-        return summary
-    prompt = (
-        "You are training an automated crypto futures pattern engine. "
-        f"Family={family} TF={timeframe}.\n"
-        f"Stats:\n{stats_blurb}\n\n"
-        "Write ONE short playbook lesson (max 400 chars) for when to FIRE vs SKIP. "
-        "No markdown, no bullets, plain text only."
-    )
-    return await run_agent(
-        prompt,
-        name=f"train-{family}-{timeframe}"[:80],
-        timeout=120.0,
-        unlimited=False,
-    )
+    """Removed — family training is MySQL-only (no Cursor agent)."""
+    return None
 
 
 async def self_improve_for_profit(
@@ -246,102 +225,8 @@ async def self_improve_for_profit(
     trade: dict | None = None,
     trigger: str = "manual",
 ) -> Optional[str]:
-    """Unlimited Cursor agent: change code/rules/integrations to raise profit / cut loss.
-
-    Can read outside sources (via tools), edit backend files, update family playbooks,
-    tune SL/TP/floors, and wire new data — goal is net expectancy improvement.
-    """
-    if not is_cursor_configured():
-        return None
-    if not is_unlimited():
-        return await train_lesson(
-            family=family or "unknown",
-            timeframe=timeframe or "1m",
-            stats_blurb=stats_blurb,
-        )
-
-    async with _improve_lock:
-        fam = family or (trade or {}).get("family") or "all"
-        tf = timeframe or (trade or {}).get("timeframe_key") or "1m"
-        trade_bits = ""
-        if trade:
-            trade_bits = (
-                f"\nLast trade: id={trade.get('id')} pair={trade.get('pair')} "
-                f"side={trade.get('side')} pattern={trade.get('pattern')} "
-                f"score={trade.get('score')} closed_reason={trade.get('closed_reason')} "
-                f"peak={trade.get('peak_gross_pct')} trough={trade.get('trough_gross_pct')}\n"
-            )
-        prompt = f"""
-You are the UNLIMITED self-improving trading engineer for the aitrads.in bot (this repo).
-
-GOAL: Maximize net profit and minimize losses for pattern family engines.
-Trigger: {trigger}
-Focus family: {fam}
-Focus timeframe: {tf}
-Stats / context:
-{stats_blurb}
-{trade_bits}
-
-AUTHORITY (critical):
-- Human chat sets INITIAL SEEDS only (defaults in engine_formulas / family_engine_rules).
-- YOU own ongoing retunes from live observation: scores / floors (THR_*, min_of_score,
-  min_brain_score), profit book (PROFIT_LOCK_PCT, PROFIT_TRAIL_*), stop/exit
-  (LOSS_PROTECT_PCT, LOSS_BAND_PCT, LOSS_RECOVERY_RETRACE_PCT, family sl_pct/tp_pct),
-  and family seed lessons / skip-fire rules.
-- Do not wait for another human message to change these after seed — observe trades,
-  training events, and closed_reason, then write durable MySQL + code changes yourself.
-- Boot/init will NOT force-overwrite your exit/score knobs (INSERT IGNORE seeds only).
-
-YOU HAVE FULL POWER:
-1. Read and edit project files under this workspace (especially backend/: trade_db.py,
-   family_rules.py, family_analyzer.py, engine_config.py, trap_orderflow_engine.py,
-   brain_adapter.py, main.py, .env.example — never commit secrets; use existing MYSQL_* / env).
-2. Prefer changing MySQL tables when possible:
-   - `engine_formulas` (global exit/OF/fire knobs — then call engine_config.reload conceptually)
-   - `family_engine_rules` / `family_train_events` (per-family floors, lessons, SL/TP %)
-3. Inspect family_engine_rules / family_train_events / engine_formulas and improve thresholds,
-   lessons, SL/TP %, skip/fire logic, candle-soft behavior.
-4. Research outside sources (web/docs/papers via tools) on candlestick families,
-   risk, order-flow, exits — then INTEGRATE useful ideas into this codebase / DB.
-5. Add or wire new data sources / helpers if they clearly improve expectancy.
-6. Keep the live bot bootable: valid Python, no broken imports, no deleting safety
-   that prevents catastrophic account wipe without replacement logic.
-
-CONSTRAINTS (only these):
-- Do not leak or print full API keys / passwords into new files committed as plaintext
-  beyond existing .env patterns.
-- Do not push to git remotes.
-- Confirm policy is CLOSED-candle only: need SCALP_CONFIRM_MIN_CONSECUTIVE matching closes
-  (default 1) within ONE_M_CONFIRM_MAX_BARS (default 2). Do not set consecutive below 1.
-  Do not switch confirm back to forming/start ticks.
-
-PROCESS:
-1. Diagnose where loss / delay / wrong fires happen for this family/TF.
-2. Implement concrete changes (code and/or document rule updates the bot already reads).
-3. Summarize what you changed and why (final answer = short summary for logs).
-
-Start now. Be decisive; optimize for profit expectancy.
-""".strip()
-        print(f"[CURSOR-AI] UNLIMITED self-improve start family={fam} tf={tf} trigger={trigger}")
-        summary = await run_agent(
-            prompt,
-            name=f"improve-{fam}-{tf}"[:80],
-            timeout=_IMPROVE_TIMEOUT,
-            unlimited=True,
-        )
-        if summary:
-            print(f"[CURSOR-AI] UNLIMITED self-improve done: {summary[:300]}")
-            try:
-                import family_rules
-                family_rules.invalidate_cache()
-            except Exception:
-                pass
-            try:
-                import engine_config
-                engine_config.reload_and_apply()
-            except Exception:
-                pass
-        return summary
+    """Removed — AI training no longer runs Cursor self-improve."""
+    return None
 
 
 # ─── Issue bus: delay / no-fire / skip / freeze / loss → unlimited agent ─────
@@ -403,111 +288,10 @@ async def report_bot_issue(
     extra: dict | None = None,
     force: bool = False,
 ) -> Optional[str]:
-    """Any bot problem (delay, no fire, skip, freeze, loss…) → unlimited Cursor fix.
-
-    Rate-limited per category+family (default 10 min) so the agent is not flooded.
-    """
-    if not is_cursor_configured() or not is_unlimited():
-        return None
-    cat = classify_issue(reason, category=category)
-    fam = family or (detect or {}).get("family") or (trade or {}).get("family") or "all"
-    tf = (
-        timeframe
-        or (detect or {}).get("timeframe_key")
-        or (trade or {}).get("timeframe_key")
-        or "1m"
-    )
-    key = f"{cat}|{fam}|{tf}"
-    if not force and not _issue_allowed(key):
-        print(f"[CURSOR-AI] issue cooldown skip {key}: {reason[:120]}")
-        return None
-
-    bits = {
-        "category": cat,
-        "reason": reason,
-        "pair": pair,
-        "timeframe": tf,
-        "family": fam,
-        "pattern": pattern or (detect or {}).get("pattern") or (trade or {}).get("pattern"),
-        "side": side or (detect or {}).get("direction") or (trade or {}).get("side"),
-        "score": (detect or {}).get("score") or (trade or {}).get("score"),
-        "ai_confirmation": (detect or {}).get("ai_confirmation"),
-        "brain_verdict": (detect or {}).get("brain_verdict"),
-        "extra": extra or {},
-    }
-    focus = {
-        "trade_delay": (
-            "PRIORITY: trades are DELAYED or confirm window expires before fire. "
-            "Fix scalp confirm timing, fire_grace, pending queue expiry, green/red confirm logic, "
-            "AI confirm latency, or anything that makes entries late / miss the candle."
-        ),
-        "no_fire": (
-            "PRIORITY: setups detected but NOT FIRING (NO_TRADE / AI NO / gates). "
-            "Loosen or retune floors, candle-soft, dual-score, AI confirm path so valid "
-            "profitable setups actually fire without spam."
-        ),
-        "skip": (
-            "PRIORITY: too many SKIPS (blocked / capacity / duplicate / policy). "
-            "Fix false skips that kill expectancy; keep only skips that prevent real loss."
-        ),
-        "freeze": (
-            "PRIORITY: engine FREEZE / stale feed / connectivity pausing entries. "
-            "Harden reconnect, unfreeze, and keep fires healthy when feed recovers."
-        ),
-        "loss": (
-            "PRIORITY: losing trades. Fix entry/SL/TP/family rules so this loss class stops."
-        ),
-        "fire_fail": (
-            "PRIORITY: fire attempted but open failed (size/Bybit/open_trade). Fix sizing/execution."
-        ),
-        "other": (
-            "PRIORITY: general bot fault. Diagnose and patch so trading stays profitable and reliable."
-        ),
-    }.get(cat, "Diagnose and fix.")
-
-    blurb = (
-        f"ISSUE CATEGORY: {cat}\n"
-        f"{focus}\n"
-        f"Details JSON:\n{bits}\n"
-        "Fix delay / no-fire / wrong-skip / loss — whatever blocks profit. "
-        "Edit code + family rules as needed; research outside if useful."
-    )
-    return await self_improve_for_profit(
-        family=str(fam),
-        timeframe=str(tf),
-        stats_blurb=blurb,
-        trade=trade,
-        trigger=f"issue:{cat}",
-    )
+    """Removed — Cursor issue/self-improve bus is disabled."""
+    return None
 
 
 def schedule_bot_issue(**kwargs: Any) -> None:
-    """Fire-and-forget from sync or async code (uses running loop if any)."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        print("[CURSOR-AI] schedule_bot_issue: no running loop — dropped")
-        return
-
-    async def _run():
-        try:
-            summary = await report_bot_issue(**kwargs)
-            if summary:
-                try:
-                    from system_log import system_log
-
-                    system_log.push(
-                        "ai",
-                        f"Cursor fixed issue ("
-                        f"{kwargs.get('category') or classify_issue(str(kwargs.get('reason') or ''))})",
-                        {
-                            "summary": summary[:400],
-                            "reason": str(kwargs.get("reason") or "")[:200],
-                        },
-                    )
-                except Exception:
-                    pass
-        except Exception as exc:
-            print(f"[CURSOR-AI] schedule_bot_issue error: {exc}")
-
-    loop.create_task(_run())
+    """Removed — Cursor issue/self-improve bus is disabled."""
+    return

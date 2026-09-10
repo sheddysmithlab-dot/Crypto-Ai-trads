@@ -8,7 +8,7 @@ const SECTIONS = [
       'HARD RULE: 7th-candle / watchlist refresh·replace·add·edit NEVER closes or hides related OPEN trades — they keep their own TP/SL until exit.',
       'Brain 5-step pipeline: (1) pattern detect → (2) trap scan → (3) candle-1 confirm/pullback → (4) 10th-man ALLOW/VETO → (5) fire or skip.',
       'Step2/4: if structure trap fights the pattern, take the opposite (trap) side — do not skip into the trap. Dual-gate must still pass on the flipped side.',
-      '1m only: if pattern OF side score < 30, reverse the trade (fade) — do not skip. Other TFs still skip weak scores.',
+      '1m only: if pattern OF side score < 30, 10th-man picks the true trade (stance/trap/stronger OF) — do not skip. Other TFs still skip weak scores.',
       'Every TF: Step3 = impulse ≥2×trail then trail% pullback post-only maker. Opposite color skips only before impulse lock (after lock, pullback fill allowed). Miss / move ≥ profit / 10th-man VETO = skip (no taker chase). Exit market/taker.',
       'Size ladder: 1m 1.5% · 5m 3% · 15m 7% · 1h 12% · 1D 20% · Bybit $5 minimum notional.',
       'Exit ladder: 1m +0.50 trail 0.10 soft −0.50 hard −0.70 · 5m +0.70/0.15/−0.70/−1.00 · 15m +1.00/0.20/−1.00/−1.40 · 1h +1.50/0.25/−1.50/−2.00 · 1D +2.50/0.40/−2.50/−3.00.',

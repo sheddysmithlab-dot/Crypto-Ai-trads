@@ -1018,72 +1018,6 @@ class BybitAPIWrapper:
 bybit_api = BybitAPIWrapper()
 
 
-async def _cursor_refresh_family_lesson(info: dict) -> None:
-    """After auto rule bump, run unlimited Cursor agent to improve profit logic."""
-    try:
-        import cursor_ai
-        if not cursor_ai.is_cursor_configured():
-            return
-        family = str(info.get("family") or "")
-        tf = str(info.get("timeframe_key") or "1m")
-        blurb = (
-            f"sample_count={info.get('sample_count')} win_rate={info.get('win_rate')} "
-            f"min_of_score {info.get('old_min_of_score')}→{info.get('new_min_of_score')} "
-            f"note={info.get('lesson_extra') or ''}"
-        )
-        summary = await cursor_ai.self_improve_for_profit(
-            family=family,
-            timeframe=tf,
-            stats_blurb=blurb,
-            trigger="family_rule_bump",
-        )
-        if summary:
-            # Keep a short lesson_text mirror for LLM playbook inject
-            trade_db.update_family_rule(family, tf, lesson_text=summary[:800])
-            try:
-                import family_rules
-                family_rules.invalidate_cache()
-            except Exception:
-                pass
-            print(f"[CURSOR-AI] unlimited improve finished for {family}/{tf}")
-            system_log.push(
-                "ai",
-                f"Cursor UNLIMITED improve {family}/{tf}",
-                {"summary": summary[:400], "unlimited": True},
-            )
-    except Exception as exc:
-        print(f"[CURSOR-AI] unlimited improve skipped: {exc}")
-
-
-async def _cursor_improve_after_close(trade: dict, metrics: dict, reason: str) -> None:
-    """On closed trade (esp. loss), let unlimited Cursor agent fix engine for profit."""
-    try:
-        import cursor_ai
-        if not cursor_ai.is_cursor_configured() or not cursor_ai.is_unlimited():
-            return
-        try:
-            gross = float(metrics.get("gross_pct") or 0)
-        except (TypeError, ValueError):
-            gross = 0.0
-        if gross >= -0.05:
-            return
-        t = dict(trade)
-        t["closed_reason"] = reason
-        await cursor_ai.report_bot_issue(
-            reason=f"LOSS trade closed gross={gross}% reason={reason}",
-            category="loss",
-            pair=trade.get("pair"),
-            timeframe=trade.get("timeframe_key") or "1m",
-            family=trade.get("family"),
-            pattern=trade.get("pattern"),
-            side=trade.get("side"),
-            trade=t,
-            extra={"gross_pct": gross, "net_usd": metrics.get("net_usd")},
-        )
-    except Exception as exc:
-        print(f"[CURSOR-AI] post-loss improve skipped: {exc}")
-
-
 # ==========================================
 # PILLAR 3: CORE AI AGENT LOGIC (State & Rules)
 # ==========================================
@@ -1162,6 +1096,8 @@ MOMENTUM_LOCK_ENABLED = os.environ.get("MOMENTUM_LOCK_ENABLED", "1").strip().low
     "0", "false", "no",
 )
 MOMENTUM_IMPULSE_TRAIL_MULT = float(os.environ.get("MOMENTUM_IMPULSE_TRAIL_MULT", "2.0") or 2.0)
+# Absolute floor: confirm candle must travel ≥ this % in trade direction (color + trail).
+MOMENTUM_IMPULSE_MIN_PCT = float(os.environ.get("MOMENTUM_IMPULSE_MIN_PCT", "0.09") or 0.09)
 MOMENTUM_SKIP_IF_GE_PROFIT = os.environ.get("MOMENTUM_SKIP_IF_GE_PROFIT", "1").strip().lower() not in (
     "0", "false", "no",
 )
@@ -1767,18 +1703,8 @@ class AITradingAgent:
                     ),
                     info,
                 )
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(_cursor_refresh_family_lesson(info))
-                except RuntimeError:
-                    pass
         except Exception as exc:
             print(f"[FAMILY-TRAIN] close analyze skipped: {exc}")
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_cursor_improve_after_close(dict(trade), dict(metrics), reason))
-        except RuntimeError:
-            pass
 
     def get_unrealized_net_usd(self):
         return sum(self._trade_metrics(t)["net_usd"] for t in self.trades)
@@ -3607,7 +3533,7 @@ class AITradingAgent:
             f"[AI ENGINE] Armed — trading READY now "
             f"(boot UI scan-driven, max {ENGINE_BOOT_MAX_SEC:g}s). "
             f"Momentum watchlist gate pending. "
-            f"5-step pipeline: pattern detect → trap scan → candle-1 confirm → "
+            f"5-step pipeline: pattern detect → trap scan → confirm ≤2 bars (≥0.09% color) → "
             f"10th-man → fire/skip (pullback maker, no taker chase). "
             f"First detect per pair may be skipped."
         )
@@ -4024,7 +3950,7 @@ TIMEFRAME_KEY_TO_BYBIT_KLINE = {
 # different candle granularities.
 LAST_CANDLE_TIMESTAMPS = {}
 
-# Detect on last closed candle → queue momentum_lock → candle-1 impulse → trail% pullback maker.
+# Detect on last closed candle → queue momentum_lock → confirm ≤2 bars (≥0.09% color) → trail% pullback maker.
 PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
 # 1m only: last auto fire candle open-time per pair (blocks fires after a gap).
 LAST_AUTO_FIRE_CANDLE_MS: dict[str, int] = {}
@@ -4034,8 +3960,8 @@ LAST_FIRED_PATTERN: dict[str, dict] = {}
 SIDE_EXIT_COOLDOWN: dict[str, dict] = {}
 SIDE_EXIT_COOLDOWN_BARS = 5
 ONE_M_MIN_BARS_BETWEEN_FIRES = 3  # fire on N → next fire earliest N+3 (was 5)
-# After detect: first closed candle is the confirm. Matching green/red → fire. Else skip+rescan.
-ONE_M_CONFIRM_MAX_BARS = int(os.environ.get("ONE_M_CONFIRM_MAX_BARS", "1"))
+# After detect: try confirm on candle-1 then candle-2 (color + ≥ impulse min %). Else skip+rescan.
+ONE_M_CONFIRM_MAX_BARS = int(os.environ.get("ONE_M_CONFIRM_MAX_BARS", "2"))
 ONE_M_CONFIRM_START_BAR = int(os.environ.get("ONE_M_CONFIRM_START_BAR", "1"))
 # 1m only: skip this many matching color ticks before fire (1 = pehla skip, dusra pe fire).
 ONE_M_CONFIRM_SKIP_TICKS = int(os.environ.get("ONE_M_CONFIRM_SKIP_TICKS", "1"))
@@ -5028,7 +4954,7 @@ async def fetch_forming_candle(
     return parse_bybit_kline(rows[0])
 
 
-MIN_CONFIRM_BODY_PCT = float(os.environ.get("MIN_CONFIRM_BODY_PCT", "0.03"))
+MIN_CONFIRM_BODY_PCT = float(os.environ.get("MIN_CONFIRM_BODY_PCT", "0.09"))
 # After detect: need this many matching CLOSED candles to fire (default 1).
 # Window = ONE_M_CONFIRM_MAX_BARS (default 2): try 1st close, else 2nd, else skip.
 # Closed-only policy makes consecutive=1 safe (no mid-bar / start-tick direct fire).
@@ -5044,7 +4970,7 @@ SCALP_CONFIRM_ONE_MATCH_PER_BAR = os.environ.get(
 def _candle_body_confirms_side(side: str, open_px: float, close_px: float) -> bool:
     """LONG needs green tick (price > open); SHORT needs red (price < open).
 
-    Requires minimum body size (default 0.03% gross) — blocks one-tick fake bounces.
+    Requires minimum body size (default 0.09% gross) — color confirm band before fire.
     """
     try:
         o = float(open_px)
@@ -5752,19 +5678,30 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return await _execute_queued_fire(pending)
 
     async def _poll_momentum_lock(pending: dict) -> bool:
-        """Wait for candle-1 impulse, then arm trail% pullback maker (or skip)."""
+        """Wait for color+impulse on confirm bars 1..N after detect, then trail% pullback maker.
+
+        Default: 2 bars after detect; each bar needs matching color body ≥ MIN_CONFIRM_BODY_PCT
+        and directional extreme ≥ MOMENTUM_IMPULSE_MIN_PCT (0.09%) before arming pullback.
+        """
         detect = pending.get("detect") or {}
         side = pending.get("side") or "LONG"
         detect_ms = int(pending.get("signal_candle_time") or 0)
+        confirm_max = max(1, int(ONE_M_CONFIRM_MAX_BARS or 2))
+        first_ms = detect_ms + interval_ms if detect_ms > 0 else 0
+        last_ms = detect_ms + (confirm_max * interval_ms) if detect_ms > 0 else 0
         lock_ms = int(pending.get("lock_candle_time") or 0)
-        if lock_ms <= 0 and detect_ms > 0:
-            lock_ms = detect_ms + interval_ms
+        if lock_ms <= 0 and first_ms > 0:
+            lock_ms = first_ms
             pending["lock_candle_time"] = lock_ms
 
         ladder = get_exit_ladder(timeframe_key)
         trail = float(ladder["trail"])
         profit = float(ladder["profit"])
-        need = max(0.0, trail * float(MOMENTUM_IMPULSE_TRAIL_MULT or 2.0))
+        # Color body + directional trail floor (default 0.09%). Pullback maker still uses ladder trail%.
+        need = max(
+            float(MOMENTUM_IMPULSE_MIN_PCT or 0.09),
+            float(MIN_CONFIRM_BODY_PCT or 0.09),
+        )
 
         forming = await fetch_forming_candle(client, bybit_symbol, timeframe_key)
         if not forming:
@@ -5778,7 +5715,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             return False
 
         # Still on detect bar (or earlier) — wait for candle-1 open.
-        if bar_ms < lock_ms:
+        if first_ms > 0 and bar_ms < first_ms:
             _push_pattern_neon(
                 pair=pair,
                 candle_time_ms=detect_ms,
@@ -5786,28 +5723,60 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 side=side,
                 action=detect.get("action"),
                 pattern=detect.get("pattern"),
-                reason="Momentum lock · wait candle-1 open",
+                reason=f"Momentum lock · wait confirm (≤{confirm_max} bars, ≥{need:.2f}%)",
             )
             PENDING_ENTRY_SIGNALS[pair] = pending
             return False
 
-        # Missed candle-1 entirely (newer bar already forming).
-        if bar_ms > lock_ms:
+        # Past last confirm bar without lock.
+        if last_ms > 0 and bar_ms > last_ms and not pending.get("impulse_locked"):
             return await _skip_pending(
                 pending,
-                "missed candle-1 window — no pullback lock",
-                fire_candle_ms=lock_ms,
+                f"confirm window expired — no ≥{need:g}% color impulse in {confirm_max} bars",
+                fire_candle_ms=int(pending.get("lock_candle_time") or last_ms),
             )
 
-        # Opposite-color invalidates only before impulse lock.
-        # After lock, red/green pullback is allowed so the maker limit can fill.
+        bar_idx = 1
+        if detect_ms > 0 and interval_ms > 0 and bar_ms >= first_ms:
+            bar_idx = max(1, int((bar_ms - detect_ms) // interval_ms))
+
+        # New confirm bar without a lock — reset extremes (fresh color+trail on this candle).
+        active = int(pending.get("active_confirm_bar_ms") or 0)
+        if (
+            not pending.get("impulse_locked")
+            and bar_ms > 0
+            and active != bar_ms
+        ):
+            pending["active_confirm_bar_ms"] = bar_ms
+            pending["lock_extreme"] = None
+            pending["impulse_pct"] = 0.0
+            pending["lock_candle_time"] = bar_ms
+            pending["fire_candle_time"] = bar_ms
+            lock_ms = bar_ms
+            PENDING_ENTRY_SIGNALS[pair] = pending
+
+        lock_ms = int(pending.get("lock_candle_time") or bar_ms)
+
+        # Opposite-color on this confirm bar: try next bar if window remains; else skip.
         if (
             not pending.get("impulse_locked")
             and _candle_body_opposes_side(side, open_px, close_px)
         ):
+            if last_ms > 0 and bar_ms < last_ms:
+                _push_pattern_neon(
+                    pair=pair,
+                    candle_time_ms=bar_ms,
+                    stage="confirming",
+                    side=side,
+                    action=detect.get("action"),
+                    pattern=detect.get("pattern"),
+                    reason=f"candle-{bar_idx} opposite color — wait next confirm bar",
+                )
+                PENDING_ENTRY_SIGNALS[pair] = pending
+                return False
             return await _skip_pending(
                 pending,
-                f"candle-1 opposite color — {side} invalidated",
+                f"candle-{bar_idx} opposite color — {side} invalidated",
                 fire_candle_ms=lock_ms,
             )
 
@@ -5829,12 +5798,19 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         ):
             return await _skip_pending(
                 pending,
-                f"candle-1 move already ≥ profit {profit:g}% — skip",
+                f"candle-{bar_idx} move already ≥ profit {profit:g}% — skip",
                 fire_candle_ms=lock_ms,
             )
 
         if not pending.get("impulse_locked"):
-            if impulse_pct < need:
+            # Color confirm band: matching green/red with min body before trail lock.
+            color_ok = _candle_body_confirms_side(side, open_px, close_px)
+            if not color_ok or impulse_pct < need:
+                why = (
+                    f"Step3 candle-{bar_idx}/{confirm_max} "
+                    f"color={'ok' if color_ok else 'wait'} "
+                    f"impulse {impulse_pct:.2f}% · need ≥{need:.2f}%"
+                )
                 _push_pattern_neon(
                     pair=pair,
                     candle_time_ms=lock_ms,
@@ -5842,8 +5818,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                     side=side,
                     action=detect.get("action"),
                     pattern=detect.get("pattern"),
-                    reason=f"Step3 impulse {impulse_pct:.2f}% · need {need:.2f}%",
+                    reason=why[:120],
                 )
+                PENDING_ENTRY_SIGNALS[pair] = pending
                 return False
 
             limit_raw = _momentum_pullback_limit_px(side, extreme, trail)
@@ -5857,7 +5834,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             pending["confirm_close"] = float(limit_raw)
             pending["confirm_open"] = open_px
             pending["fire_candle_time"] = lock_ms
+            pending["lock_candle_time"] = lock_ms
             pending["confirm_matched"] = True
+            pending["confirm_bar_idx"] = bar_idx
             pending["no_taker_fallback"] = True
             pending["entry_policy"] = "momentum_lock"
             pending["pipeline_step"] = 3
@@ -5866,6 +5845,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             pipe["step3_confirm"] = {
                 "status": "pass",
                 "impulse_pct": round(impulse_pct, 4),
+                "need_pct": round(need, 4),
+                "confirm_bar": bar_idx,
+                "confirm_max": confirm_max,
                 "limit_px": float(limit_raw),
                 "trail": trail,
             }
@@ -5873,7 +5855,8 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             pending["detect"] = detect_mut
             PENDING_ENTRY_SIGNALS[pair] = pending
             print(
-                f"[STEP3] confirm {side} {pair} impulse={impulse_pct:.2f}% "
+                f"[STEP3] confirm {side} {pair} bar={bar_idx}/{confirm_max} "
+                f"impulse={impulse_pct:.2f}% (≥{need:g}%) "
                 f"extreme={extreme} pullback={limit_raw} trail={trail:g}%"
             )
             _push_pattern_neon(
@@ -5883,7 +5866,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 side=side,
                 action=detect.get("action"),
                 pattern=detect.get("pattern"),
-                reason=f"Step3 locked {impulse_pct:.2f}% → pullback {limit_raw}",
+                reason=f"Step3 bar{bar_idx} locked {impulse_pct:.2f}% → pullback {limit_raw}",
             )
 
             # ── Step 4: 10th-man policy (after confirm, before fire) ──
@@ -5919,26 +5902,81 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 },
             )
             if tm.get("verdict") == "VETO":
-                pipe["step5_fire"] = "skip"
-                detect_mut["pipeline"] = pipe
-                pending["detect"] = detect_mut
-                return await _skip_pending(
-                    pending,
-                    f"Step4 10th-man VETO: {tm.get('reason') or tm.get('narrative') or 'stand aside'}",
-                    fire_candle_ms=lock_ms,
-                )
+                # 1m weak-score path never skips — force ALLOW and continue.
+                if bool(detect_mut.get("weak_score_tenth")) or bool(
+                    (tm or {}).get("weak_score_tenth")
+                ):
+                    print(
+                        f"[STEP4] weak-score 10th-man VETO ignored {side} {pair} "
+                        f"— force ALLOW true trade"
+                    )
+                    tm = {
+                        **tm,
+                        "verdict": "ALLOW",
+                        "reason": f"weak-score force ALLOW (was VETO: {tm.get('reason')})",
+                    }
+                    pipe["step4_tenth_man"] = {
+                        "status": "done",
+                        "verdict": tm.get("verdict"),
+                        "reason": tm.get("reason"),
+                        "narrative": tm.get("narrative"),
+                    }
+                    detect_mut["tenth_man"] = tm
+                    detect_mut["pipeline"] = pipe
+                    pending["detect"] = detect_mut
+                else:
+                    pipe["step5_fire"] = "skip"
+                    detect_mut["pipeline"] = pipe
+                    pending["detect"] = detect_mut
+                    return await _skip_pending(
+                        pending,
+                        f"Step4 10th-man VETO: {tm.get('reason') or tm.get('narrative') or 'stand aside'}",
+                        fire_candle_ms=lock_ms,
+                    )
             if tm.get("verdict") == "FLIP":
-                # Confirm already armed for the wrong side — drop and let next scan
-                # open the trap-side trade cleanly (flip happens at Step2 normally).
-                pipe["step5_fire"] = "skip"
-                detect_mut["pipeline"] = pipe
-                pending["detect"] = detect_mut
-                return await _skip_pending(
-                    pending,
-                    f"Step4 trap flip {tm.get('flip_to')} — rescan for opposite trade",
-                    fire_candle_ms=lock_ms,
-                    rescan=True,
-                )
+                flip_to = tm.get("flip_to")
+                # Weak-score: apply true side in-place — do not skip/rescan.
+                if (
+                    (bool(detect_mut.get("weak_score_tenth")) or bool(tm.get("weak_score_tenth")))
+                    and flip_to in ("BUY", "SELL")
+                ):
+                    new_side = "LONG" if flip_to == "BUY" else "SHORT"
+                    print(
+                        f"[STEP4] weak-score 10th-man FLIP applied {side}→{new_side} {pair} "
+                        f"— {tm.get('reason') or ''}"
+                    )
+                    pending["side"] = new_side
+                    detect_mut["action"] = flip_to
+                    detect_mut["direction"] = new_side
+                    detect_mut["tenth_man"] = {
+                        **tm,
+                        "verdict": "ALLOW",
+                        "applied_flip": True,
+                        "reason": f"{tm.get('reason')} (applied at Step4)",
+                    }
+                    side = new_side
+                    tm = detect_mut["tenth_man"]
+                    pipe["step4_tenth_man"] = {
+                        "status": "done",
+                        "verdict": "ALLOW",
+                        "reason": tm.get("reason"),
+                        "narrative": tm.get("narrative"),
+                    }
+                    detect_mut["pipeline"] = pipe
+                    pending["detect"] = detect_mut
+                    PENDING_ENTRY_SIGNALS[pair] = pending
+                else:
+                    # Confirm already armed for the wrong side — drop and let next scan
+                    # open the trap-side trade cleanly (flip happens at Step2 normally).
+                    pipe["step5_fire"] = "skip"
+                    detect_mut["pipeline"] = pipe
+                    pending["detect"] = detect_mut
+                    return await _skip_pending(
+                        pending,
+                        f"Step4 trap flip {tm.get('flip_to')} — rescan for opposite trade",
+                        fire_candle_ms=lock_ms,
+                        rescan=True,
+                    )
 
             if not agent.trading_ready():
                 _push_pattern_neon(
@@ -6442,18 +6480,38 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     # Momentum lock off: still run Step4 before legacy fire
     tm = tenth_prev if tenth_prev.get("verdict") else {"verdict": "ALLOW", "reason": "legacy path"}
     if tm.get("verdict") == "VETO":
-        _push_pattern_neon(
-            pair=pair,
-            candle_time_ms=close_time,
-            stage="skipped",
-            side=side,
-            action=detect.get("action"),
-            pattern=detect.get("pattern"),
-            reason=f"Step4 VETO: {tm.get('reason')}",
-        )
-        PENDING_ENTRY_SIGNALS.pop(pair, None)
-        print(f"[STEP4] VETO {side} {pair}: {tm.get('reason')}")
-        return False
+        if bool(detect.get("weak_score_tenth")) or bool(tm.get("weak_score_tenth")):
+            print(f"[STEP4] weak-score VETO ignored {side} {pair} — force ALLOW")
+            tm = {**tm, "verdict": "ALLOW", "reason": f"weak-score force ALLOW (was VETO: {tm.get('reason')})"}
+        else:
+            _push_pattern_neon(
+                pair=pair,
+                candle_time_ms=close_time,
+                stage="skipped",
+                side=side,
+                action=detect.get("action"),
+                pattern=detect.get("pattern"),
+                reason=f"Step4 VETO: {tm.get('reason')}",
+            )
+            PENDING_ENTRY_SIGNALS.pop(pair, None)
+            print(f"[STEP4] VETO {side} {pair}: {tm.get('reason')}")
+            return False
+    if tm.get("verdict") == "FLIP" and tm.get("flip_to") in ("BUY", "SELL"):
+        if bool(detect.get("weak_score_tenth")) or bool(tm.get("weak_score_tenth")):
+            flip_to = tm["flip_to"]
+            side = "LONG" if flip_to == "BUY" else "SHORT"
+            detect = dict(detect)
+            detect["action"] = flip_to
+            detect["direction"] = side
+            detect["tenth_man"] = {**tm, "verdict": "ALLOW", "applied_flip": True}
+            PENDING_ENTRY_SIGNALS[pair]["side"] = side
+            PENDING_ENTRY_SIGNALS[pair]["detect"] = detect
+            print(f"[STEP4] weak-score FLIP applied → {side} {pair}")
+            tm = detect["tenth_man"]
+        else:
+            PENDING_ENTRY_SIGNALS.pop(pair, None)
+            print(f"[STEP4] FLIP rescan {pair} → {tm.get('flip_to')}")
+            return False
     _push_pattern_neon(
         pair=pair,
         candle_time_ms=close_time,
@@ -7787,11 +7845,7 @@ async def family_rules_status(family: str | None = Query(None)):
             rows = trade_db.fetch_family_rules()
         return {
             "ok": True,
-            "ai_provider": settings_store.ai_provider,
-            "cursor_unlimited": bool(
-                (__import__("os").environ.get("CURSOR_AI_UNLIMITED") or "1").strip().lower()
-                in ("1", "true", "yes", "on")
-            ),
+            "training_engine": "family_rules",
             "pilot_families": sorted(_fr.PILOT_FAMILIES),
             "rules": rows,
         }
@@ -7805,10 +7859,9 @@ async def ai_training_feed(
     decision: str | None = Query(None, description="FIRE | SKIP | DELAY"),
     limit: int = Query(80, ge=1, le=300),
 ):
-    """AI observations (family playbook) + training log from MySQL."""
+    """Family-rule observations + training log from MySQL (no Cursor AI)."""
     try:
         import family_rules as _fr
-        import os as _os
 
         st = trade_db.status_dict()
         events = await asyncio.to_thread(
@@ -7851,12 +7904,7 @@ async def ai_training_feed(
             "ok": bool(st.get("ok")),
             "message": st.get("message") or ("MySQL connected" if st.get("ok") else "MySQL offline"),
             "mysql": st,
-            "ai_provider": settings_store.ai_provider,
-            "ai_configured": bool(settings_store.is_ai_configured()),
-            "cursor_unlimited": bool(
-                (_os.environ.get("CURSOR_AI_UNLIMITED") or "1").strip().lower()
-                in ("1", "true", "yes", "on")
-            ),
+            "training_engine": "family_rules",
             "pilot_families": sorted(_fr.PILOT_FAMILIES),
             "summary": {
                 "events": len(events),
