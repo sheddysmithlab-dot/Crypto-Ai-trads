@@ -338,7 +338,7 @@ _ENGINE_FORMULA_SEEDS: list[tuple[str, str, str, float | None, str | None, str]]
     ("exit", "HARD_STOP_3M", "number", 0.80, None, "Hard stop 3m %"),
     ("exit", "HARD_STOP_5M", "number", 0.80, None, "Hard stop 5m %"),
     ("exit", "HARD_STOP_10M", "number", 0.80, None, "Hard stop 10m %"),
-    ("exit", "HARD_STOP_15M", "number", 0.80, None, "Hard stop 15m %"),
+    ("exit", "HARD_STOP_15M", "number", 1.40, None, "Hard stop 15m %"),
     ("exit", "HARD_STOP_30M", "number", 0.80, None, "Hard stop 30m %"),
     ("exit", "HARD_STOP_1H", "number", 0.80, None, "Hard stop 1h %"),
     ("exit", "HARD_STOP_1D", "number", 0.80, None, "Hard stop 1D %"),

@@ -1,7 +1,8 @@
 """Per-chart-timeframe trading profile: win/lose display + capital + exit ladder.
 
-Momentum-lock maker entry / taker exit on every TF. Size and stop/profit
-widen strictly: 1m < 5m < 15m < 1h < 1D.
+Momentum-lock maker entry / taker exit on every TF.
+15m keeps its own size/exit ladder; fire/entry uses the scalp pack (same as 1m).
+Exit size widens: 1m < 5m < 15m < 1h < 1D.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ TIMEFRAME_PROFILES: dict[str, dict] = {
         "profit": 0.70, "trail": 0.15, "soft": 0.70, "hard": 1.00,
     },
     "15m": {
+        # Exit/size ladder stays wider; SCALP_TFS only shares fire/entry policy.
         "win_rate": 60, "lose_rate": 40, "capital_pct": 7.0,
         "profit": 1.00, "trail": 0.20, "soft": 1.00, "hard": 1.40,
     },
@@ -60,7 +62,8 @@ _ALIASES = {
 # Maker limit entry + taker market exit on every chart TF.
 MAKER_ENTRY_TFS = frozenset({"1m", "5m", "15m", "1h", "1D", "30s", "3m", "10m", "30m"})
 
-SCALP_TFS = frozenset({"1m", "5m", "30s"})
+# Scalp pack: same entry/confirm/OF/fee policy (includes 15m per product request).
+SCALP_TFS = frozenset({"1m", "5m", "30s", "15m"})
 
 
 def _canon_tf(timeframe_key: str | None) -> str:

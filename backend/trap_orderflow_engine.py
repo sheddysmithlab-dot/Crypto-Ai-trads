@@ -810,7 +810,7 @@ def evaluate_trap_orderflow(
         exec_tf, setup_name, brain_strategy=brain_strategy, family=_fam
     )
     thr_base = thr_score_for_tf(exec_tf)
-    strict_scalp = (exec_tf or "").strip().lower() in ("1m", "5m", "30s")
+    strict_scalp = is_scalp_tf(exec_tf)
     bal_pressure = abs(m1["buyer_ratio"] - 0.50) < THR_BALANCED
     bal_volume = abs(m1["buy_ratio"] - 0.50) < THR_BALANCED
     max_score = max(long_score, short_score)
@@ -1071,7 +1071,7 @@ def merge_with_structure_trap(
         return _apply_imbalance_block(of_result)
     struct_signal = "LONG" if structure_trap_side == "BUY" else "SHORT"
     tf = (of_result.timeframe or "").strip().lower()
-    strict_scalp = tf in ("1m", "5m", "30s")
+    strict_scalp = is_scalp_tf(tf)
 
     base_details = {
         **of_result.details,

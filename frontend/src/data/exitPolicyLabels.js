@@ -27,18 +27,19 @@ export function exitOverlayFor(tf) {
 }
 
 export const EXIT_POLICY_SHORT =
-  'momentum-lock maker entry / taker exit · 1m +0.50/0.10/−0.70 · 5m +0.70/0.15/−1.00 · 15m +1.00/0.20/−1.40 · 1h +1.50/0.25/−2.00 · 1D +2.50/0.40/−3.00';
+  'momentum-lock maker entry / taker exit · 1m +0.50/0.10/−0.70 size 1.5% · 5m +0.70/0.15/−1.00 · 15m +1.00/0.20/−1.40 size 7% · 1h +1.50/0.25/−2.00 · 1D +2.50/0.40/−3.00';
 
 export const EXIT_POLICY_CHART_OVERLAY = exitOverlayFor('1M');
 
 export const EXIT_POLICY_SYSTEM_LOG =
   'All TF momentum-lock maker entry (candle-1 impulse → trail% pullback); exit market/taker. ' +
   'Ladder: 1m profit +0.50 trail 0.10 soft −0.50 hard −0.70 size 1.5% · ' +
-  '5m +0.70/0.15/−0.70/−1.00 size 3% · 15m +1.00/0.20/−1.00/−1.40 size 7% · ' +
+  '5m +0.70/0.15/−0.70/−1.00 size 3% · ' +
+  '15m +1.00/0.20/−1.00/−1.40 size 7% · ' +
   '1h +1.50/0.25/−1.50/−2.00 size 12% · 1D +2.50/0.40/−2.50/−3.00 size 20%.';
 
 export const EXIT_POLICY_MODAL =
-  'Momentum-lock maker entry + taker exit on every TF. Size and stops widen 1m < 5m < 15m < 1h < 1D. ' +
+  'Momentum-lock maker entry + taker exit. 15m fire policy matches 1m scalp; exit ladder stays wider. ' +
   '1m +0.50 trail 0.10 soft −0.50 hard −0.70 size 1.5%. ' +
   '5m +0.70 / 0.15 / −0.70 / −1.00 / 3%. ' +
   '15m +1.00 / 0.20 / −1.00 / −1.40 / 7%. ' +

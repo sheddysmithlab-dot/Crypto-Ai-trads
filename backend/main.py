@@ -316,7 +316,7 @@ class SettingsStore:
             print(f"[SETTINGS] Z.ai AI loaded (model={self.ai_model}, provider={self.ai_provider}).")
         else:
             print("[SETTINGS] Set CURSOR_API_KEY (preferred) or ZAI_API_KEY to enable AI confirm.")
-        print("[SETTINGS] Entry engines: 1m/5m SCALP + 15m/1h/1D BIBLE.")
+        print("[SETTINGS] Entry engines: 1m/5m/15m SCALP + 1h/1D BIBLE.")
 
     def _load_from_disk(self):
         """Restore UI-saved keys (survive restart). Disk wins over empty; env can seed first."""

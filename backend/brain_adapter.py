@@ -37,6 +37,8 @@ ENGINE_NAME = "ai_driven_brain_v2"
 ENTRY_PATTERN_NAME = "AI_BRAIN_V2"
 # Detect-fire only on a last-bar brain signal. Raw candle matches do not fire.
 DETECT_FIRE_MIN_SCORE = 5.0
+# 1m only: OF side score below this → fade (reverse) instead of skip.
+ONE_M_WEAK_SCORE_REVERSE_MAX = 30.0
 
 # ─── timeframe normalisation ──────────────────────────────────────────────────
 _TF_NORM: Dict[str, str] = {
@@ -119,6 +121,36 @@ def _matching_side_score(of_trap: Optional[dict], action: str) -> float:
     if action == "SELL":
         return float(of_trap.get("short_score") or 0)
     return max(float(of_trap.get("long_score") or 0), float(of_trap.get("short_score") or 0))
+
+
+def _flip_buy_sell(action: str) -> str:
+    if action == "BUY":
+        return "SELL"
+    if action == "SELL":
+        return "BUY"
+    return action
+
+
+def _align_of_trap_to_action(of_trap: dict, action: str, *, reason: str) -> dict:
+    """Copy OF dict so final_signal matches the (possibly reversed) trade side."""
+    of = dict(of_trap)
+    of["final_signal"] = "LONG" if action == "BUY" else "SHORT"
+    of["primary_reason"] = reason
+    return of
+
+
+def _think_aligned_to_action(think: dict, action: str) -> dict:
+    """Shallow-copy think so brain signal side matches action for dual-gate / flatten."""
+    import copy
+
+    t = dict(think)
+    sig = think.get("signal")
+    if sig is not None and getattr(sig, "side", None) != action:
+        s2 = copy.copy(sig)
+        s2.side = action
+        t["signal"] = s2
+    # Keep structure trap as-is — 10th-man still needs the real trap side.
+    return t
 
 
 def _family_from_think(think: dict, of_trap: Optional[dict] = None) -> Optional[str]:
@@ -1165,6 +1197,8 @@ async def evaluate_live_entry_async(
 
     # Trap fights pattern → take opposite (trap) side, do not skip.
     flipped_from = None
+    weak_score_reverse = False
+    weak_of_score = None
     trap_obj = think.get("trap")
     trap_side = getattr(trap_obj, "side", None) if trap_obj is not None else None
     if (
@@ -1186,7 +1220,42 @@ async def evaluate_live_entry_async(
             f"({getattr(trap_obj, 'trap_type', 'trap')}) — opposite trade"
         )
 
-    setup_action = _gate_1m_of_score(setup_action or "HOLD", of_trap, timeframe_key, think=think)
+    # 1m only: pattern OF side score < 30 → reverse trade, never skip on weak score.
+    if (
+        tf == "1m"
+        and setup_action in ("BUY", "SELL")
+        and of_trap
+    ):
+        side_sc = _matching_side_score(of_trap, setup_action)
+        if side_sc < ONE_M_WEAK_SCORE_REVERSE_MAX:
+            weak_of_score = side_sc
+            weak_from = setup_action
+            flipped_from = flipped_from or weak_from
+            setup_action = _flip_buy_sell(setup_action)
+            reason = (
+                f"1m weak-score reverse: {weak_from} OF={side_sc:.1f}"
+                f"<{ONE_M_WEAK_SCORE_REVERSE_MAX:.0f} → {setup_action}"
+            )
+            of_trap = _align_of_trap_to_action(of_trap, setup_action, reason=reason)
+            think = _think_aligned_to_action(think, setup_action)
+            weak_score_reverse = True
+            trap_scan = _trap_scan_summary(think, of_trap, setup_action)
+            pipeline["step2_trap"] = {
+                "status": "weak_score_reverse",
+                "flipped_from": weak_from,
+                "flipped_to": setup_action,
+                "weak_of_score": side_sc,
+                **trap_scan,
+            }
+            print(f"[STEP2] {reason} — opposite trade (no skip)")
+
+    if weak_score_reverse:
+        # Keep reversed side; do not let dual-gate / low OF floor convert to HOLD.
+        pass
+    else:
+        setup_action = _gate_1m_of_score(
+            setup_action or "HOLD", of_trap, timeframe_key, think=think
+        )
 
     def _blocked(reason: str, *, step: int, ai_confirmation: str = "MISSING") -> Dict[str, Any]:
         side = "LONG" if setup_action == "BUY" else "SHORT" if setup_action == "SELL" else None
@@ -1224,7 +1293,9 @@ async def evaluate_live_entry_async(
 
         of_sig = (of_trap or {}).get("final_signal")
         of_pat = str((of_trap or {}).get("pattern") or "")
-        if of_sig == "NO_TRADE" or of_pat.upper().startswith("CANDLE_"):
+        if not weak_score_reverse and (
+            of_sig == "NO_TRADE" or of_pat.upper().startswith("CANDLE_")
+        ):
             pipeline["step2_trap"]["status"] = "fail"
             return _blocked(
                 f"Order-flow NO_TRADE — skip | {(of_trap or {}).get('primary_reason') or of_sig or ''}",
@@ -1239,22 +1310,34 @@ async def evaluate_live_entry_async(
             }
             return _blocked("Backend brain signal missing — skip trade", step=1)
 
-        ok_dual, dual_msg, b_sc, o_sc = _dual_score_passes(
-            setup_action, of_trap, think, timeframe_key
-        )
-        if not ok_dual:
-            pipeline["step2_trap"]["status"] = "fail"
-            return _blocked(
-                f"Dual score failed — {dual_msg} (brain={b_sc:.1f} OF={o_sc:.1f})",
-                step=2,
+        if weak_score_reverse:
+            # Already faded weak OF (<30); queue confirm without dual-floor skip.
+            b_sc = float(getattr(think.get("signal"), "score", 0) or 0) if think.get("signal") else 0.0
+            o_sc = _matching_side_score(of_trap, setup_action)
+            ai_confirmation = "SKIP"
+            print(
+                f"[STEP1-2] weak-score reverse pass {setup_action} {pair} "
+                f"brain={b_sc:.1f} OF={o_sc:.1f} "
+                f"(from {flipped_from}, weak={weak_of_score:.1f}<{ONE_M_WEAK_SCORE_REVERSE_MAX:.0f}) "
+                f"— queue confirm"
             )
+        else:
+            ok_dual, dual_msg, b_sc, o_sc = _dual_score_passes(
+                setup_action, of_trap, think, timeframe_key
+            )
+            if not ok_dual:
+                pipeline["step2_trap"]["status"] = "fail"
+                return _blocked(
+                    f"Dual score failed — {dual_msg} (brain={b_sc:.1f} OF={o_sc:.1f})",
+                    step=2,
+                )
 
-        ai_confirmation = "SKIP"
-        flip_note = f" (flipped {flipped_from}→{setup_action})" if flipped_from else ""
-        print(
-            f"[STEP1-2] dual-gate pass {setup_action} {pair} "
-            f"brain={b_sc:.1f} OF={o_sc:.1f}{flip_note} — queue confirm"
-        )
+            ai_confirmation = "SKIP"
+            flip_note = f" (flipped {flipped_from}→{setup_action})" if flipped_from else ""
+            print(
+                f"[STEP1-2] dual-gate pass {setup_action} {pair} "
+                f"brain={b_sc:.1f} OF={o_sc:.1f}{flip_note} — queue confirm"
+            )
 
     # Step 4 preview (enforced in main after Step 3 confirm)
     tenth = tenth_man_policy(
@@ -1300,13 +1383,21 @@ async def evaluate_live_entry_async(
         out["reason"] = (
             f"{out.get('reason', '')} | pipeline S1-S2 dual-gate | "
             f"10th-man preview={tenth.get('verdict')}"
-            + (f" | trap-flip {flipped_from}→{setup_action}" if flipped_from else "")
+            + (
+                f" | weak-score reverse {flipped_from}→{setup_action} "
+                f"OF={weak_of_score:.1f}<{ONE_M_WEAK_SCORE_REVERSE_MAX:.0f}"
+                if weak_score_reverse and flipped_from
+                else (f" | trap-flip {flipped_from}→{setup_action}" if flipped_from else "")
+            )
         ).strip(" |")
         if flipped_from:
             out["trap_flip_from"] = flipped_from
             out["trap_flip_to"] = setup_action
-            # Prefer trap label when we flipped to fade the crowd.
-            if think.get("trap") is not None:
+            if weak_score_reverse:
+                out["strategy"] = "weak_score_reverse"
+                out["weak_of_score"] = weak_of_score
+            elif think.get("trap") is not None:
+                # Prefer trap label when we flipped to fade the crowd.
                 t = think["trap"]
                 out["pattern"] = (
                     str(getattr(t, "trap_type", None) or out.get("pattern") or "trap")
@@ -1482,12 +1573,12 @@ def strategy_system_blurb() -> str:
 
 
 def is_scalp_timeframe(timeframe_key: str | None) -> bool:
-    """1m and 5m share the same scalp entry/exit/confirm policy."""
+    """Scalp pack shares entry/exit/confirm policy (1m/5m/30s/15m)."""
     try:
         from timeframe_profiles import is_scalp_tf
         return is_scalp_tf(timeframe_key)
     except Exception:
-        return str(timeframe_key or "").strip().lower() in ("1m", "5m", "30s")
+        return str(timeframe_key or "").strip().lower() in ("1m", "5m", "30s", "15m")
 
 
 async def run_in_thread(candles, timeframe_key, **kw):
