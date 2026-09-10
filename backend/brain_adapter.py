@@ -304,16 +304,20 @@ def _trap_scan_summary(think: dict, of_trap: Optional[dict], action: str) -> dic
     }
 
 
-def tenth_man_policy(think: dict, action: str) -> dict:
-    """Step 4: Soft 10th-man ALLOW/VETO from SmartTradePolicy stance.
+def tenth_man_policy(
+    think: dict,
+    action: str,
+    of_trap: Optional[dict] = None,
+) -> dict:
+    """Step 4: 10th-man ALLOW/VETO.
 
-    Soft rules (existing brain policy):
-      - stance HOLD → VETO
-      - stance side != candidate → VETO
-      - trap opposite still ALLOW (soft demotes fade, keeps pattern) with conflict flag
+    When a structure trap fights the pattern, live path flips to the trap side
+    (opposite trade) before confirm — this policy ALLOWs that trap-side trade.
+    VETO only for HOLD / no side / stance mismatch when not on trap side.
     """
     stance = (think or {}).get("stance")
     trap = (think or {}).get("trap")
+    of_trap = of_trap or {}
     htf = (think or {}).get("higher_tf_trend")
     narrative = getattr(stance, "narrative", "") if stance is not None else ""
     source = getattr(stance, "source", None) if stance is not None else None
@@ -326,9 +330,19 @@ def tenth_man_policy(think: dict, action: str) -> dict:
         )
 
     trap_side = getattr(trap, "side", None) if trap is not None else None
+    trap_type = getattr(trap, "trap_type", None) if trap is not None else None
+    on_trap_side = bool(
+        trap_side in ("BUY", "SELL") and action in ("BUY", "SELL") and trap_side == action
+    )
     trap_conflict = bool(
         trap_side in ("BUY", "SELL") and action in ("BUY", "SELL") and trap_side != action
     )
+
+    of_sig = of_trap.get("final_signal")
+    of_conflict = False
+    if of_sig in ("LONG", "SHORT") and action in ("BUY", "SELL"):
+        of_as = "BUY" if of_sig == "LONG" else "SELL"
+        of_conflict = of_as != action
 
     base = {
         "narrative": narrative or "",
@@ -337,11 +351,24 @@ def tenth_man_policy(think: dict, action: str) -> dict:
         "htf_trend": htf,
         "htf_aligned": htf_aligned,
         "trap_conflict": trap_conflict,
-        "trap_type": getattr(trap, "trap_type", None) if trap is not None else None,
+        "of_conflict": of_conflict,
+        "trap_type": trap_type,
+        "of_signal": of_sig,
+        "on_trap_side": on_trap_side,
     }
 
     if action not in ("BUY", "SELL"):
         return {**base, "verdict": "VETO", "reason": "no actionable side"}
+
+    # Taking the trap / fade side is the intended opposite trade — always ALLOW.
+    if on_trap_side:
+        reason = f"take trap side {action}"
+        if trap_type:
+            reason = f"take trap side {action} ({trap_type})"
+        if htf_aligned is False:
+            reason = f"{reason}; HTF {htf} advisory only"
+        return {**base, "verdict": "ALLOW", "reason": reason}
+
     if stance is None:
         return {**base, "verdict": "ALLOW", "reason": "no stance — pass through"}
     if stance_action == "HOLD":
@@ -352,11 +379,22 @@ def tenth_man_policy(think: dict, action: str) -> dict:
             "verdict": "VETO",
             "reason": f"10th-man {stance_action} != candidate {action}",
         }
+    # Residual trap conflict (flip missed) — still prefer opposite, not skip.
+    if trap_conflict and trap_side in ("BUY", "SELL"):
+        return {
+            **base,
+            "verdict": "FLIP",
+            "flip_to": trap_side,
+            "reason": (
+                f"trap conflict — flip {action} → {trap_side} "
+                f"({trap_type or 'trap'})"
+            ),
+        }
     reason = "ok"
-    if trap_conflict:
-        reason = "ok (soft: pattern preferred over conflicting trap)"
     if htf_aligned is False:
-        reason = f"{reason}; HTF {htf} advisory only".strip("; ")
+        reason = f"ok; HTF {htf} advisory only"
+    if of_conflict:
+        reason = f"{reason}; OF {of_sig} advisory"
     return {**base, "verdict": "ALLOW", "reason": reason}
 
 
@@ -1125,6 +1163,29 @@ async def evaluate_live_entry_async(
         f"of={trap_scan.get('of_signal')} conflict={trap_scan.get('conflict')}"
     )
 
+    # Trap fights pattern → take opposite (trap) side, do not skip.
+    flipped_from = None
+    trap_obj = think.get("trap")
+    trap_side = getattr(trap_obj, "side", None) if trap_obj is not None else None
+    if (
+        setup_action in ("BUY", "SELL")
+        and trap_side in ("BUY", "SELL")
+        and trap_side != setup_action
+    ):
+        flipped_from = setup_action
+        setup_action = trap_side
+        trap_scan = _trap_scan_summary(think, of_trap, setup_action)
+        pipeline["step2_trap"] = {
+            "status": "flipped",
+            "flipped_from": flipped_from,
+            "flipped_to": setup_action,
+            **trap_scan,
+        }
+        print(
+            f"[STEP2] trap flip {pair} {flipped_from} → {setup_action} "
+            f"({getattr(trap_obj, 'trap_type', 'trap')}) — opposite trade"
+        )
+
     setup_action = _gate_1m_of_score(setup_action or "HOLD", of_trap, timeframe_key, think=think)
 
     def _blocked(reason: str, *, step: int, ai_confirmation: str = "MISSING") -> Dict[str, Any]:
@@ -1189,13 +1250,18 @@ async def evaluate_live_entry_async(
             )
 
         ai_confirmation = "SKIP"
+        flip_note = f" (flipped {flipped_from}→{setup_action})" if flipped_from else ""
         print(
             f"[STEP1-2] dual-gate pass {setup_action} {pair} "
-            f"brain={b_sc:.1f} OF={o_sc:.1f} — queue confirm"
+            f"brain={b_sc:.1f} OF={o_sc:.1f}{flip_note} — queue confirm"
         )
 
     # Step 4 preview (enforced in main after Step 3 confirm)
-    tenth = tenth_man_policy(think, setup_action if setup_action in ("BUY", "SELL") else "HOLD")
+    tenth = tenth_man_policy(
+        think,
+        setup_action if setup_action in ("BUY", "SELL") else "HOLD",
+        of_trap=of_trap,
+    )
     pipeline["step4_tenth_man"] = {
         "status": "preview",
         "verdict": tenth.get("verdict"),
@@ -1234,7 +1300,19 @@ async def evaluate_live_entry_async(
         out["reason"] = (
             f"{out.get('reason', '')} | pipeline S1-S2 dual-gate | "
             f"10th-man preview={tenth.get('verdict')}"
+            + (f" | trap-flip {flipped_from}→{setup_action}" if flipped_from else "")
         ).strip(" |")
+        if flipped_from:
+            out["trap_flip_from"] = flipped_from
+            out["trap_flip_to"] = setup_action
+            # Prefer trap label when we flipped to fade the crowd.
+            if think.get("trap") is not None:
+                t = think["trap"]
+                out["pattern"] = (
+                    str(getattr(t, "trap_type", None) or out.get("pattern") or "trap")
+                    .replace("_", " ")
+                )
+                out["strategy"] = "trap_reverse"
         pipeline["step3_confirm"] = "pending"
         pipeline["step5_fire"] = "pending"
     else:

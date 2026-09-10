@@ -5910,7 +5910,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             system_log.push_agent_chat(
                 f"STEP4 10th-man {tm.get('verdict')} {side} {pair}: "
                 f"{tm.get('reason') or tm.get('narrative') or 'ok'}",
-                status="match" if tm.get("verdict") == "ALLOW" else "no_match",
+                status="match" if tm.get("verdict") in ("ALLOW", "FLIP") else "no_match",
                 details={
                     "pair": pair,
                     "side": side,
@@ -5926,6 +5926,18 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                     pending,
                     f"Step4 10th-man VETO: {tm.get('reason') or tm.get('narrative') or 'stand aside'}",
                     fire_candle_ms=lock_ms,
+                )
+            if tm.get("verdict") == "FLIP":
+                # Confirm already armed for the wrong side — drop and let next scan
+                # open the trap-side trade cleanly (flip happens at Step2 normally).
+                pipe["step5_fire"] = "skip"
+                detect_mut["pipeline"] = pipe
+                pending["detect"] = detect_mut
+                return await _skip_pending(
+                    pending,
+                    f"Step4 trap flip {tm.get('flip_to')} — rescan for opposite trade",
+                    fire_candle_ms=lock_ms,
+                    rescan=True,
                 )
 
             if not agent.trading_ready():
