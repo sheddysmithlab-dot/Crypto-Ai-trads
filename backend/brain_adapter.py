@@ -99,7 +99,7 @@ _CONFIRM_SYSTEM = (
     "UNLIMITED mode: you may use tools, read this project, and outside research to "
     "maximize expected profit / minimize loss / avoid late entries before deciding. "
     "Only reply YES if judged confidence meets the TF floor in the brief "
-    "(overall ≥75%; 5m named traps ≥80%; other named traps ≥90%). Otherwise reply NO. "
+    "(overall ≥75%; 1m/5m named traps ≥70%; other named traps ≥75%). Otherwise reply NO. "
     "Final answer line must be exactly one word: YES or NO."
 )
 
@@ -1199,7 +1199,7 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
             "no AI confirm — dual gate is the fire decision; next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
-            f"Order-flow conf floor: overall ≥75% / 5m traps ≥80% / other traps ≥90%. "
+            f"Order-flow conf floor: overall ≥75% / 1m/5m traps ≥70% / other traps ≥75%. "
             f"{tf_cfg.note}"
         ),
         "timeframes": list(_b.TIMEFRAMES.keys()),
@@ -1231,7 +1231,7 @@ def strategy_system_blurb() -> str:
         "   fake breakout, reversal trap (effort vs result; volume & buyer/seller pressure).\n"
         "3) Dual gate (brain + order-flow) → BUY / SELL / HOLD. No AI confirm.\n"
         "4) Next-candle fire + path SL/TP 0.5%/0.7% + opposite-side flip-exit.\n"
-        "5) Floors: overall≥75 / 5m trap≥80 / else trap≥90.\n"
+        "5) Floors: overall≥75 / 1m/5m trap≥70 / else trap≥75. Dual gate only — no AI.\n"
     )
 
 
