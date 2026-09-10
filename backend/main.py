@@ -5799,8 +5799,12 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 fire_candle_ms=lock_ms,
             )
 
-        # Opposite-color body invalidates before / while locking.
-        if _candle_body_opposes_side(side, open_px, close_px):
+        # Opposite-color invalidates only before impulse lock.
+        # After lock, red/green pullback is allowed so the maker limit can fill.
+        if (
+            not pending.get("impulse_locked")
+            and _candle_body_opposes_side(side, open_px, close_px)
+        ):
             return await _skip_pending(
                 pending,
                 f"candle-1 opposite color — {side} invalidated",

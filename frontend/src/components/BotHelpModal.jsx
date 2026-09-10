@@ -7,7 +7,7 @@ const SECTIONS = [
       'Momentum gate: only coins with MARKET avg% above TF floor (1M>0.055, 5M>0.085, 15M>0.25, 1H>0.55, 1D>7) auto-enter watchlist; re-scan hourly.',
       'HARD RULE: 7th-candle / watchlist refresh·replace·add·edit NEVER closes or hides related OPEN trades — they keep their own TP/SL until exit.',
       'Brain 5-step pipeline: (1) pattern detect → (2) trap scan → (3) candle-1 confirm/pullback → (4) 10th-man ALLOW/VETO → (5) fire or skip.',
-      'Every TF: Step3 = impulse ≥2×trail then trail% pullback post-only maker. Miss / opposite color / move ≥ profit / 10th-man VETO = skip (no taker chase). Exit market/taker.',
+      'Every TF: Step3 = impulse ≥2×trail then trail% pullback post-only maker. Opposite color skips only before impulse lock (after lock, pullback fill allowed). Miss / move ≥ profit / 10th-man VETO = skip (no taker chase). Exit market/taker.',
       'Size ladder: 1m 1.5% · 5m 3% · 15m 7% · 1h 12% · 1D 20% · Bybit $5 minimum notional.',
       'Exit ladder: 1m +0.50 trail 0.10 soft −0.50 hard −0.70 · 5m +0.70/0.15/−0.70/−1.00 · 15m +1.00/0.20/−1.00/−1.40 · 1h +1.50/0.25/−1.50/−2.00 · 1D +2.50/0.40/−2.50/−3.00.',
       '1m/5m: AI Engine soft-restarts every 1 hour (fresh momentum scan + 5-step pipeline; open trades kept).',
