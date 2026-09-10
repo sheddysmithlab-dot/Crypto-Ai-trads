@@ -235,6 +235,9 @@ def apply_to_runtime() -> dict[str, Any]:
             "RECONCILE_GRACE_SECONDS",
             "SKIP_FIRST_DETECT",
             "SKIP_FIRST_DETECT_SCALP",
+            "MOMENTUM_LOCK_ENABLED",
+            "MOMENTUM_IMPULSE_TRAIL_MULT",
+            "MOMENTUM_SKIP_IF_GE_PROFIT",
         ):
             key = name
             if name == "MAX_CONCURRENT_TRADES_DEFAULT":

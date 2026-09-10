@@ -41,6 +41,7 @@ export default function EngineBootOverlay({
   const videoRef = useRef(null);
   const bootGenRef = useRef(0);
   const wasActiveRef = useRef(false);
+  const userStartSeenRef = useRef(false);
 
   const remainingWs = Math.max(0, Number(warmupRemainingSec) || 0);
   const intro = Math.max(1, Number(introSec) || INTRO_SEC);
@@ -56,23 +57,24 @@ export default function EngineBootOverlay({
       scanTotal > 0 ||
       scanDone > 0);
 
-  // Arm boot overlay on fresh START / restart / pending gate.
+  // Arm only on this session's START click — never on reload while the VPS engine is already on.
   useEffect(() => {
-    const rising = active && !wasActiveRef.current;
-    wasActiveRef.current = Boolean(active);
+    if (starting) userStartSeenRef.current = true;
 
     if (!active && !starting) {
+      wasActiveRef.current = false;
+      userStartSeenRef.current = false;
       setBootActive(false);
       setIntroElapsed(0);
       setForceHide(false);
       return undefined;
     }
 
-    const shouldArm =
-      starting ||
-      rising ||
-      remainingWs > 0.05 ||
-      (active && !momentumGateReady);
+    const rising = Boolean(active) && !wasActiveRef.current;
+    wasActiveRef.current = Boolean(active);
+
+    // Reload hydrates active=true with no START click. Ignore that, and ignore leftover warmup/scan flags.
+    const shouldArm = userStartSeenRef.current && (starting || rising);
 
     if (shouldArm && !bootActive) {
       bootGenRef.current += 1;
@@ -81,7 +83,7 @@ export default function EngineBootOverlay({
       setForceHide(false);
     }
     return undefined;
-  }, [active, starting, remainingWs, momentumGateReady, bootActive]);
+  }, [active, starting, bootActive]);
 
   // Local intro clock (only matters before scan UI takes over).
   useEffect(() => {

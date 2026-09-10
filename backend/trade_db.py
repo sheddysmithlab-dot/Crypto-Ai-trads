@@ -379,6 +379,9 @@ _ENGINE_FORMULA_SEEDS: list[tuple[str, str, str, float | None, str | None, str]]
     ("fire", "ONE_M_CONFIRM_MAX_BARS", "number", 2.0, None, "Try 1st then 2nd CLOSED confirm; else skip"),
     ("fire", "SKIP_FIRST_DETECT", "bool", 1.0, None, "Skip first HTF detect after arm"),
     ("fire", "SKIP_FIRST_DETECT_SCALP", "bool", 0.0, None, "Skip first scalp detect"),
+    ("fire", "MOMENTUM_LOCK_ENABLED", "bool", 1.0, None, "Detect→candle-1 impulse→trail% pullback maker"),
+    ("fire", "MOMENTUM_IMPULSE_TRAIL_MULT", "number", 2.0, None, "Min impulse = mult × TF trail%"),
+    ("fire", "MOMENTUM_SKIP_IF_GE_PROFIT", "bool", 1.0, None, "Skip if candle-1 impulse already ≥ TF profit"),
     ("engine", "ENGINE_BOOT_MAX_SEC", "number", 60.0, None, "Boot overlay max sec"),
     ("engine", "RECONCILE_GRACE_SECONDS", "number", 30.0, None, "Live open reconcile grace"),
     (

@@ -38,8 +38,8 @@ export default function SessionStopConfirmModal({
             Hold &amp; exit
           </button>
           <p className="text-[10px] text-gray-500 -mt-1 px-1">
-            Stop session schedule and new fires. Held trades keep path exit rules (profit +0.85% trail,
-            loss lock −0.75%…−1.00%) until they close.
+            Stop session schedule and new fires. Held trades keep path exit rules (profit +0.50/−0.10 then
+            +0.65/−0.20, no +1% hard exit, SL lock −0.50 hard −0.70 unlock −0.25) until they close.
           </p>
 
           <button

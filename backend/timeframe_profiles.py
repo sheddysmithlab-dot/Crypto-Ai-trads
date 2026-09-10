@@ -1,6 +1,6 @@
 """Per-chart-timeframe trading profile: win/lose display + capital + exit ladder.
 
-Same maker-entry / taker-exit policy on every TF. Size and stop/profit
+Momentum-lock maker entry / taker exit on every TF. Size and stop/profit
 widen strictly: 1m < 5m < 15m < 1h < 1D.
 """
 from __future__ import annotations

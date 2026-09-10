@@ -1157,6 +1157,14 @@ SKIP_FIRST_DETECT = os.environ.get("SKIP_FIRST_DETECT", "1").strip().lower() not
 SKIP_FIRST_DETECT_SCALP = os.environ.get("SKIP_FIRST_DETECT_SCALP", "0").strip().lower() in (
     "1", "true", "yes",
 )
+# Detect → next-candle impulse lock → trail% pullback maker (no taker chase).
+MOMENTUM_LOCK_ENABLED = os.environ.get("MOMENTUM_LOCK_ENABLED", "1").strip().lower() not in (
+    "0", "false", "no",
+)
+MOMENTUM_IMPULSE_TRAIL_MULT = float(os.environ.get("MOMENTUM_IMPULSE_TRAIL_MULT", "2.0") or 2.0)
+MOMENTUM_SKIP_IF_GE_PROFIT = os.environ.get("MOMENTUM_SKIP_IF_GE_PROFIT", "1").strip().lower() not in (
+    "0", "false", "no",
+)
 # Small-coin loss multipliers (disabled).
 # Kept for optional env re-enable without code change.
 SMALL_COIN_MID_USD = float(os.environ.get("SMALL_COIN_MID_USD", "1.0"))
@@ -3599,9 +3607,9 @@ class AITradingAgent:
             f"[AI ENGINE] Armed — trading READY now "
             f"(boot UI scan-driven, max {ENGINE_BOOT_MAX_SEC:g}s). "
             f"Momentum watchlist gate pending. "
-            f"Detect on closed candle → fire immediately, no confirm candle; "
-            f"other TFs: next candle open + matching color. "
-            f"First detect per pair is skipped."
+            f"Detect on closed candle → candle-1 impulse lock (≥2×trail) → "
+            f"trail% pullback maker; miss/oppose/exhausted = skip (no taker chase). "
+            f"First detect per pair may be skipped."
         )
 
     def trading_ready(self) -> bool:
@@ -4016,8 +4024,7 @@ TIMEFRAME_KEY_TO_BYBIT_KLINE = {
 # different candle granularities.
 LAST_CANDLE_TIMESTAMPS = {}
 
-# Detect on last closed candle → queue → fire
-# (scalp: consecutive green/red ticks; wrong-color bar invalidated; else next open + color).
+# Detect on last closed candle → queue momentum_lock → candle-1 impulse → trail% pullback maker.
 PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
 # 1m only: last auto fire candle open-time per pair (blocks fires after a gap).
 LAST_AUTO_FIRE_CANDLE_MS: dict[str, int] = {}
@@ -5146,15 +5153,29 @@ def _maker_rest_deadline_ms(now_ms: int, interval_ms: int) -> int:
     return int(min(now_ms + MAKER_REST_TIMEOUT_SEC * 1000, next_open))
 
 
-async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
-    """Scan last CLOSED candle for pattern; queue entry then fire on confirm/open.
+def _momentum_pullback_limit_px(side: str, extreme: float, trail_pct: float) -> float | None:
+    """LONG: high × (1 − trail%). SHORT: low × (1 + trail%)."""
+    try:
+        ex = float(extreme)
+        tr = float(trail_pct)
+    except (TypeError, ValueError):
+        return None
+    if ex <= 0 or tr < 0:
+        return None
+    if side == "LONG":
+        return ex * (1.0 - tr / 100.0)
+    if side == "SHORT":
+        return ex * (1.0 + tr / 100.0)
+    return None
 
-    1m/5m scalp flow:
-      detect + AI → lock → on the NEXT forming candle, require consecutive
-      matching-color ticks (LONG=green, SHORT=red). Wrong-color body on a bar
-      invalidates that bar (no wick-recovery fire). Color re-checked at fire.
-    Other TFs:
-      detect → queue → fire at next candle open only if color also confirms.
+
+async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timeframe_key: str) -> bool:
+    """Scan last CLOSED candle for pattern; queue momentum-lock then pullback maker.
+
+    Flow (when MOMENTUM_LOCK_ENABLED):
+      detect + AI YES → queue momentum_lock → next forming candle impulse
+      (≥2× TF trail, same side) → trail% pullback post-only maker → fill or skip.
+      Opposite color, exhausted move (≥ TF profit), or miss → skip (no taker chase).
     """
     bybit_symbol = get_bybit_symbol(pair)
     if not bybit_symbol:
@@ -5345,7 +5366,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         detect_close = float(pending.get("detect_close") or 0)
         live_mark = float(agent.mark_price_for(pair) or 0)
         if confirm_close > 0 and pending.get("mode") in (
-            "confirm_1m", "confirm_scalp", "detect_fire",
+            "confirm_1m", "confirm_scalp", "detect_fire", "maker_resting", "momentum_lock",
         ):
             mark_px = confirm_close
         else:
@@ -5464,7 +5485,9 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             why="fired",
         )
         fire_label = (
-            "1m maker limit fill"
+            "momentum-lock pullback"
+            if pending.get("entry_policy") == "momentum_lock" or pending.get("no_taker_fallback")
+            else "1m maker limit fill"
             if pending.get("maker_filled")
             else "scalp green/red start"
             if pending.get("mode") in ("confirm_1m", "confirm_scalp")
@@ -5554,9 +5577,21 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         pending["maker_qty"] = plan["qty"]
         pending["maker_symbol"] = bybit_symbol
         pending["maker_placed_at"] = time.time()
-        pending["maker_deadline_ms"] = _maker_rest_deadline_ms(now_ms, interval_ms)
+        deadline = _maker_rest_deadline_ms(now_ms, interval_ms)
+        lock_end = int(pending.get("lock_candle_time") or 0) + interval_ms
+        if (
+            (pending.get("no_taker_fallback") or pending.get("entry_policy") == "momentum_lock")
+            and lock_end > 0
+        ):
+            deadline = min(deadline, lock_end)
+        pending["maker_deadline_ms"] = int(deadline)
         pending["maker_retries"] = int(pending.get("maker_retries") or 0) + (1 if retry else 0)
         pending["entry_liquidity"] = "maker"
+        rest_reason = (
+            f"PULLBACK LIMIT @ {limit_px} — wait fill (not a trade yet)"
+            if pending.get("entry_policy") == "momentum_lock" or pending.get("no_taker_fallback")
+            else f"MAKER REST @ {limit_px} — wait fill (not a trade yet)"
+        )
         if bybit_api.mode == "LIVE_TRADING":
             executor = get_bybit_executor_agent()
             if executor is None:
@@ -5573,7 +5608,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                     pending["maker_retries"] = 1
                     print(f"[MAKER] PostOnly reject {pair} — one retry at fresh bid/ask")
                     return await _arm_maker_rest(pending, retry=True)
-                return await _fallback_taker_fire(
+                return await _maker_miss(
                     pending, f"maker not filled ({err or 'post-only reject'})"
                 )
             pending["maker_order_id"] = order_id
@@ -5589,7 +5624,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             side=side,
             action=detect.get("action"),
             pattern=detect.get("pattern"),
-            reason=f"MAKER REST @ {limit_px} — wait fill (not a trade yet)",
+            reason=rest_reason,
         )
         return False
 
@@ -5603,6 +5638,18 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         PENDING_ENTRY_SIGNALS[pair] = pending
         return await _execute_queued_fire(pending)
 
+    async def _maker_miss(pending: dict, why: str) -> bool:
+        """Momentum-lock: miss = skip. Other paths: taker fallback."""
+        fire_ms = int(pending.get("fire_candle_time") or pending.get("lock_candle_time") or 0)
+        if pending.get("no_taker_fallback") or pending.get("entry_policy") == "momentum_lock":
+            await _cancel_resting_order(pending)
+            return await _skip_pending(
+                pending,
+                f"pullback not filled ({why})",
+                fire_candle_ms=fire_ms,
+            )
+        return await _fallback_taker_fire(pending, why)
+
     async def _poll_maker_rest(pending: dict) -> bool:
         side = pending.get("side") or "LONG"
         fire_ms = int(pending.get("fire_candle_time") or 0)
@@ -5610,19 +5657,20 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         now_ms = int(time.time() * 1000)
         deadline = int(pending.get("maker_deadline_ms") or 0)
         detect = pending.get("detect") or {}
-
-        async def _timeout_skip(why: str) -> bool:
-            await _cancel_resting_order(pending)
-            return await _skip_pending(pending, why, fire_candle_ms=fire_ms)
+        rest_reason = (
+            f"PULLBACK LIMIT @ {limit_px} — wait fill (not a trade yet)"
+            if pending.get("entry_policy") == "momentum_lock" or pending.get("no_taker_fallback")
+            else f"MAKER REST @ {limit_px} — wait fill (not a trade yet)"
+        )
 
         if deadline and now_ms >= deadline:
-            return await _fallback_taker_fire(pending, "maker not filled")
+            return await _maker_miss(pending, "maker not filled")
 
         if bybit_api.mode == "LIVE_TRADING":
             order_id = pending.get("maker_order_id")
             executor = get_bybit_executor_agent()
             if executor is None or not order_id:
-                return await _fallback_taker_fire(pending, "maker not filled")
+                return await _maker_miss(pending, "maker not filled")
             status, row = executor.get_order(bybit_symbol, str(order_id))
             if status != "ok" or not row:
                 _push_pattern_neon(
@@ -5632,7 +5680,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                     side=side,
                     action=detect.get("action"),
                     pattern=detect.get("pattern"),
-                    reason=f"MAKER REST @ {limit_px} — wait fill (not a trade yet)",
+                    reason=rest_reason,
                 )
                 return False
             order_status = str(row.get("orderStatus") or "")
@@ -5653,7 +5701,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 if int(pending.get("maker_retries") or 0) < 1:
                     pending["maker_retries"] = 1
                     return await _arm_maker_rest(pending, retry=True)
-                return await _fallback_taker_fire(pending, "maker not filled")
+                return await _maker_miss(pending, "maker not filled")
             _push_pattern_neon(
                 pair=pair,
                 candle_time_ms=fire_ms,
@@ -5661,7 +5709,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
                 side=side,
                 action=detect.get("action"),
                 pattern=detect.get("pattern"),
-                reason=f"MAKER REST @ {limit_px} — wait fill (not a trade yet)",
+                reason=rest_reason,
             )
             return False
 
@@ -5675,12 +5723,12 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
             side=side,
             action=detect.get("action"),
             pattern=detect.get("pattern"),
-            reason=f"MAKER REST @ {limit_px} — wait fill (not a trade yet)",
+            reason=rest_reason,
         )
         return False
 
     async def _fallback_taker_fire(pending: dict, why: str) -> bool:
-        """Detect fire must open. Maker miss/reject becomes an immediate taker entry."""
+        """Non-momentum maker miss/reject becomes an immediate taker entry."""
         await _cancel_resting_order(pending)
         pending["maker_filled"] = False
         pending["maker_fill_price"] = None
@@ -5705,16 +5753,147 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         pending["entry_liquidity"] = pending.get("entry_liquidity") or "taker"
         return await _execute_queued_fire(pending)
 
-    resting = PENDING_ENTRY_SIGNALS.get(pair)
-    if (
-        resting
-        and resting.get("timeframe_key") == timeframe_key
-        and resting.get("mode") == "maker_resting"
-    ):
-        return await _poll_maker_rest(resting)
+    async def _poll_momentum_lock(pending: dict) -> bool:
+        """Wait for candle-1 impulse, then arm trail% pullback maker (or skip)."""
+        detect = pending.get("detect") or {}
+        side = pending.get("side") or "LONG"
+        detect_ms = int(pending.get("signal_candle_time") or 0)
+        lock_ms = int(pending.get("lock_candle_time") or 0)
+        if lock_ms <= 0 and detect_ms > 0:
+            lock_ms = detect_ms + interval_ms
+            pending["lock_candle_time"] = lock_ms
+
+        ladder = get_exit_ladder(timeframe_key)
+        trail = float(ladder["trail"])
+        profit = float(ladder["profit"])
+        need = max(0.0, trail * float(MOMENTUM_IMPULSE_TRAIL_MULT or 2.0))
+
+        forming = await fetch_forming_candle(client, bybit_symbol, timeframe_key)
+        if not forming:
+            return False
+        bar_ms = int(forming.get("close_time") or 0)
+        open_px = float(forming.get("open") or 0)
+        high_px = float(forming.get("high") or 0)
+        low_px = float(forming.get("low") or 0)
+        close_px = float(forming.get("close") or 0)
+        if bar_ms <= 0 or open_px <= 0:
+            return False
+
+        # Still on detect bar (or earlier) — wait for candle-1 open.
+        if bar_ms < lock_ms:
+            _push_pattern_neon(
+                pair=pair,
+                candle_time_ms=detect_ms,
+                stage="detected",
+                side=side,
+                action=detect.get("action"),
+                pattern=detect.get("pattern"),
+                reason="Momentum lock · wait candle-1 open",
+            )
+            PENDING_ENTRY_SIGNALS[pair] = pending
+            return False
+
+        # Missed candle-1 entirely (newer bar already forming).
+        if bar_ms > lock_ms:
+            return await _skip_pending(
+                pending,
+                "missed candle-1 window — no pullback lock",
+                fire_candle_ms=lock_ms,
+            )
+
+        # Opposite-color body invalidates before / while locking.
+        if _candle_body_opposes_side(side, open_px, close_px):
+            return await _skip_pending(
+                pending,
+                f"candle-1 opposite color — {side} invalidated",
+                fire_candle_ms=lock_ms,
+            )
+
+        if side == "LONG":
+            extreme = max(float(pending.get("lock_extreme") or 0), high_px)
+            impulse_pct = (extreme - open_px) / open_px * 100.0 if open_px > 0 else 0.0
+        else:
+            prior = float(pending.get("lock_extreme") or 0)
+            extreme = low_px if prior <= 0 else min(prior, low_px)
+            impulse_pct = (open_px - extreme) / open_px * 100.0 if open_px > 0 else 0.0
+        pending["lock_extreme"] = extreme
+        pending["impulse_pct"] = impulse_pct
+        PENDING_ENTRY_SIGNALS[pair] = pending
+
+        if (
+            bool(MOMENTUM_SKIP_IF_GE_PROFIT)
+            and not pending.get("impulse_locked")
+            and impulse_pct >= profit
+        ):
+            return await _skip_pending(
+                pending,
+                f"candle-1 move already ≥ profit {profit:g}% — skip",
+                fire_candle_ms=lock_ms,
+            )
+
+        if not pending.get("impulse_locked"):
+            if impulse_pct < need:
+                _push_pattern_neon(
+                    pair=pair,
+                    candle_time_ms=lock_ms,
+                    stage="confirming",
+                    side=side,
+                    action=detect.get("action"),
+                    pattern=detect.get("pattern"),
+                    reason=f"impulse {impulse_pct:.2f}% · need {need:.2f}%",
+                )
+                return False
+
+            limit_raw = _momentum_pullback_limit_px(side, extreme, trail)
+            if not limit_raw or limit_raw <= 0:
+                return await _skip_pending(
+                    pending,
+                    "pullback limit price invalid",
+                    fire_candle_ms=lock_ms,
+                )
+            pending["impulse_locked"] = True
+            pending["confirm_close"] = float(limit_raw)
+            pending["confirm_open"] = open_px
+            pending["fire_candle_time"] = lock_ms
+            pending["confirm_matched"] = True
+            pending["no_taker_fallback"] = True
+            pending["entry_policy"] = "momentum_lock"
+            PENDING_ENTRY_SIGNALS[pair] = pending
+            print(
+                f"[BRAIN] MOMENTUM LOCK {side} {pair} impulse={impulse_pct:.2f}% "
+                f"extreme={extreme} pullback={limit_raw} trail={trail:g}%"
+            )
+            _push_pattern_neon(
+                pair=pair,
+                candle_time_ms=lock_ms,
+                stage="confirming",
+                side=side,
+                action=detect.get("action"),
+                pattern=detect.get("pattern"),
+                reason=f"locked {impulse_pct:.2f}% → pullback {limit_raw}",
+            )
+            if not agent.trading_ready():
+                _push_pattern_neon(
+                    pair=pair,
+                    candle_time_ms=lock_ms,
+                    stage="confirming",
+                    side=side,
+                    action=detect.get("action"),
+                    pattern=detect.get("pattern"),
+                    reason=f"Pullback held · warmup {agent.warmup_remaining_sec():.0f}s",
+                )
+                return False
+            return await _arm_maker_rest(pending)
+
+        # Already locked but maker not armed yet (e.g. warmup) — arm now.
+        if pending.get("mode") == "momentum_lock" and not pending.get("maker_limit"):
+            if not agent.trading_ready():
+                return False
+            return await _arm_maker_rest(pending)
+        return False
 
     async def _fire_on_detect(pending: dict) -> bool:
-        """Pattern detect is the fire. No confirm-candle scan."""
+        """Legacy path when MOMENTUM_LOCK_ENABLED is off."""
         detect = pending.get("detect") or {}
         side = pending.get("side") or "LONG"
         detect_ms = int(pending.get("signal_candle_time") or 0)
@@ -5744,23 +5923,38 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         )
         return await _dispatch_confirmed_fire(pending)
 
-    # --- 1a) Leftover confirm locks: fire on the detect candle, no scan ---
-    pending = PENDING_ENTRY_SIGNALS.get(pair)
+    resting = PENDING_ENTRY_SIGNALS.get(pair)
     if (
-        pending
-        and pending.get("timeframe_key") == timeframe_key
-        and pending.get("mode") in ("confirm_1m", "confirm_scalp", "detect_fire")
+        resting
+        and resting.get("timeframe_key") == timeframe_key
+        and resting.get("mode") == "maker_resting"
     ):
-        return await _fire_on_detect(pending)
+        return await _poll_maker_rest(resting)
 
-    # --- 1b) Any leftover queued signal: fire on detect, no color scan ---
     pending = PENDING_ENTRY_SIGNALS.get(pair)
     if pending and pending.get("timeframe_key") == timeframe_key:
-        return await _fire_on_detect(pending)
+        mode = pending.get("mode")
+        if mode == "momentum_lock":
+            return await _poll_momentum_lock(pending)
+        # Migrate leftover detect/confirm locks once into momentum-lock (or fire if disabled).
+        if mode in ("confirm_1m", "confirm_scalp", "detect_fire"):
+            if bool(MOMENTUM_LOCK_ENABLED):
+                detect_ms = int(pending.get("signal_candle_time") or 0)
+                pending["mode"] = "momentum_lock"
+                pending["entry_policy"] = "momentum_lock"
+                pending["no_taker_fallback"] = True
+                pending["confirm_matched"] = False
+                pending["impulse_locked"] = False
+                pending["lock_candle_time"] = detect_ms + interval_ms
+                pending["fire_candle_time"] = detect_ms + interval_ms
+                PENDING_ENTRY_SIGNALS[pair] = pending
+                return await _poll_momentum_lock(pending)
+            return await _fire_on_detect(pending)
+        return False
     if pending and pending.get("timeframe_key") != timeframe_key:
         PENDING_ENTRY_SIGNALS.pop(pair, None)
 
-    # --- 2) Scan only the latest CLOSED candle (forming bar already dropped) ---
+    # --- Scan only the latest CLOSED candle (forming bar already dropped) ---
     lookback = max(MIN_CANDLES, 100)
     history = await fetch_closed_candle_history(client, bybit_symbol, timeframe_key, limit=lookback)
     if len(history) < MIN_CANDLES:
@@ -6084,6 +6278,51 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return False
 
     detect = dict(detect)
+    lock_candle_ms = close_time + interval_ms
+    if bool(MOMENTUM_LOCK_ENABLED):
+        PENDING_ENTRY_SIGNALS[pair] = {
+            "detect": detect,
+            "side": side,
+            "signal_candle_time": close_time,
+            "fire_candle_time": lock_candle_ms,
+            "lock_candle_time": lock_candle_ms,
+            "timeframe_key": timeframe_key,
+            "detect_close": candle_close,
+            "queued_at": time.time(),
+            "mode": "momentum_lock",
+            "entry_policy": "momentum_lock",
+            "no_taker_fallback": True,
+            "confirm_matched": False,
+            "impulse_locked": False,
+            "lock_extreme": None,
+        }
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=close_time,
+            stage="detected",
+            side=side,
+            action=detect.get("action"),
+            pattern=detect.get("pattern"),
+            reason=detect.get("reason"),
+        )
+        system_log.push_agent_chat(
+            f"MOMENTUM LOCK {side} on {pair}: {detect.get('pattern')} — wait candle-1 pullback "
+            f"| AI={detect.get('ai_confirmation', 'SKIP')}",
+            status="match",
+            details={
+                "pair": pair,
+                "side": side,
+                "detect_candle": close_time,
+                "lock_candle": lock_candle_ms,
+                "policy": "momentum_lock_pullback",
+            },
+        )
+        print(
+            f"[BRAIN] MOMENTUM LOCK queued {side} {pair} pattern={detect.get('pattern')} "
+            f"detect@{close_time} lock@{lock_candle_ms}"
+        )
+        return False
+
     PENDING_ENTRY_SIGNALS[pair] = {
         "detect": detect,
         "side": side,

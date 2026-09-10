@@ -23,6 +23,16 @@ const NEON = {
     glyph: '◐',
     label: 'CONFIRMING',
   },
+  maker_resting: {
+    border: '#c4f542',
+    glow: 'rgba(168, 85, 247, 0.8)',
+    bg: 'rgba(168, 85, 247, 0.14)',
+    badge: '#d8b4fe',
+    className: 'trade-fire-neon--maker',
+    tipClass: 'trade-fire-tooltip--maker',
+    glyph: '◎',
+    label: 'MAKER REST',
+  },
   fired_LONG: {
     border: '#3b9eff',
     glow: 'rgba(59, 158, 255, 0.8)',
@@ -68,15 +78,17 @@ const NEON = {
 const STAGE_RANK = {
   detected: 1,
   confirming: 2,
-  skipped: 3,
-  fired: 4,
-  exited: 5,
+  maker_resting: 3,
+  skipped: 4,
+  fired: 5,
+  exited: 6,
 };
 
 function neonForEntry(entry) {
   const stage = entry.stage || 'fired';
   if (stage === 'detected') return NEON.detected;
   if (stage === 'confirming') return NEON.confirming;
+  if (stage === 'maker_resting') return NEON.maker_resting;
   if (stage === 'skipped') return NEON.skipped;
   if (stage === 'exited' || stage === 'exit') return NEON.exited;
   const isShort = entry.side === 'SHORT' || entry.side === 'SELL';
@@ -111,14 +123,14 @@ export function filterEntryCandlesForPair(entryCandles, pairLabel) {
 }
 
 function upsertLookupEntry(map, entry) {
-  // Allow fire + exit on the same bar (key by time+stage).
+  // One neon per bar — highest pipeline stage wins (kills confirming+fired double).
   const stage = entry.stage || 'fired';
-  const key = `${entry.time}|${stage}`;
+  const key = entry.time;
   const existing = map.get(key);
   const nextRank = STAGE_RANK[stage] || 0;
   const prevRank = existing ? STAGE_RANK[existing.stage] || 0 : 0;
   if (!existing || nextRank >= prevRank) {
-    map.set(key, entry);
+    map.set(key, { ...entry, stage });
   }
 }
 
@@ -171,12 +183,9 @@ export function buildTradeFireLookup(
     const resolved = resolveBarTime(rawTime, candleData, intervalSeconds);
     if (!resolved) continue;
     const stage = item.stage || 'fired';
-    const key = `${resolved.time}|${stage}`;
-    // Don't overwrite live pipeline stages for the same bar+stage.
-    if (map.has(key)) continue;
-
     const side = item.side || (item.action === 'SELL' ? 'SHORT' : 'LONG');
-    map.set(key, {
+    // History fills gaps only — never downgrade a live higher stage on this bar.
+    upsertLookupEntry(map, {
       time: resolved.time,
       bar: resolved.bar,
       side,
@@ -235,7 +244,7 @@ function appendTooltip(overlayEl, left, top, entry, neon) {
   timeEl.className = 'trade-fire-tooltip__time';
   timeEl.textContent = formatTradeFireTime(entry.opened_at || entry.signal_candle_time);
   tip.appendChild(timeEl);
-  if (entry.reason && (entry.stage === 'skipped' || entry.stage === 'exited')) {
+  if (entry.reason && (entry.stage === 'skipped' || entry.stage === 'exited' || entry.stage === 'maker_resting')) {
     const reasonEl = document.createElement('div');
     reasonEl.className = 'trade-fire-tooltip__time';
     reasonEl.textContent = String(entry.reason).slice(0, 48);
@@ -259,12 +268,13 @@ export function renderTradeFireOverlay({
   clearTradeFireOverlay(overlayEl);
   if (!chart || !series || !overlayEl || !lookup?.size) return;
 
-  for (const [time, entry] of lookup) {
+  for (const entry of lookup.values()) {
     const { bar } = entry;
-    if (!bar) continue;
+    const barTime = entry.time;
+    if (!bar || barTime == null) continue;
 
-    const xCenter = chart.timeScale().timeToCoordinate(time);
-    const nextX = chart.timeScale().timeToCoordinate(time + intervalSecs);
+    const xCenter = chart.timeScale().timeToCoordinate(barTime);
+    const nextX = chart.timeScale().timeToCoordinate(barTime + intervalSecs);
     const yHigh = series.priceToCoordinate(bar.high);
     const yLow = series.priceToCoordinate(bar.low);
     if (xCenter == null || yHigh == null || yLow == null) continue;
@@ -276,7 +286,7 @@ export function renderTradeFireOverlay({
     const height = Math.max(Math.abs(yLow - yHigh), 6);
 
     const neon = neonForEntry(entry);
-    const isHovered = hoveredTime === time;
+    const isHovered = hoveredTime === barTime;
 
     const wrap = document.createElement('div');
     wrap.className = [
@@ -292,7 +302,7 @@ export function renderTradeFireOverlay({
       `height:${height}px`,
       'pointer-events:none',
     ].join(';');
-    wrap.dataset.time = String(time);
+    wrap.dataset.time = String(barTime);
     wrap.dataset.stage = entry.stage || 'fired';
 
     const glow = document.createElement('div');

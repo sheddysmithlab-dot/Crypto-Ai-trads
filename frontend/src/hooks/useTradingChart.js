@@ -12,6 +12,7 @@ import {
 } from '../config/bybitPublic';
 import { debugLog } from '../config/debug';
 import { fmtNum, getBybitSymbol } from '../data/pairs';
+import { exitLadderFor } from '../data/exitPolicyLabels';
 import { formatChartAxisTime, formatLiveClock } from '../utils/time';
 import {
   decorateCandlestickSeries,
@@ -64,7 +65,7 @@ const VOLUME_MA_PERIOD = 20;
 // Default zoom: only the most recent candles are visible, on both the main
 // chart and the volume panel (they're time-synced), instead of the whole
 // fetched history all at once.
-const DEFAULT_VISIBLE_CANDLES = 40;
+const DEFAULT_VISIBLE_CANDLES = 80;
 
 function generateMockData(basePrice, intervalSeconds) {
   const data = [];
@@ -385,17 +386,39 @@ const darkThemeConfig = {
   timeScale: { borderColor: '#1E2329', timeVisible: true, secondsVisible: true },
 };
 
+function standardBarSpacing(intervalSeconds) {
+  // Fixed pixel width so a wide pane cannot squash candles into a thin ribbon.
+  if (intervalSeconds <= 60) return 11;
+  if (intervalSeconds <= 300) return 12;
+  return 13;
+}
+
 function buildTimeScaleOptions(intervalSeconds) {
-  // Keep 1m bars readable — auto spacing with gappy data stretches candles into blocks.
-  const barSpacing = intervalSeconds <= 60 ? 7 : intervalSeconds <= 300 ? 8 : 10;
+  const barSpacing = standardBarSpacing(intervalSeconds);
   return {
     borderColor: '#1E2329',
     timeVisible: true,
     secondsVisible: false,
     barSpacing,
-    minBarSpacing: 3,
-    rightOffset: 4,
+    minBarSpacing: barSpacing,
+    rightOffset: 8,
+    lockVisibleTimeRangeOnResize: false,
     tickMarkFormatter: (time) => formatChartAxisTime(time, intervalSeconds),
+  };
+}
+
+const CANDLE_PRICE_SCALE = {
+  autoScale: true,
+  scaleMargins: { top: 0.08, bottom: 0.1 },
+};
+
+function overlayLineOptions(extra) {
+  return {
+    priceLineVisible: false,
+    lastValueVisible: false,
+    // Candles own the vertical zoom — MAs/BB/VWAP must not flatten the bodies.
+    autoscaleInfoProvider: () => null,
+    ...extra,
   };
 }
 
@@ -432,6 +455,8 @@ export function useTradingChart({
   const macdSignalRef = useRef(null);
   const macdHistRef = useRef(null);
   const trailingLockLineRef = useRef(null);
+  const slSoftLineRef = useRef(null);
+  const slHardLineRef = useRef(null);
   const blueBoxOverlayElRef = useRef(null);
   const tradeFireOverlayElRef = useRef(null);
   const tradeFireLookupRef = useRef(new Map());
@@ -501,9 +526,9 @@ export function useTradingChart({
       if (bar) {
         const pinStage = pin.stage || 'fired';
         const existing = lookup.get(pin.time);
-        const pinRank = { detected: 1, confirming: 2, skipped: 3, fired: 4, exited: 5 }[pinStage] || 4;
+        const pinRank = { detected: 1, confirming: 2, maker_resting: 3, skipped: 4, fired: 5, exited: 6 }[pinStage] || 5;
         const prevRank = existing
-          ? ({ detected: 1, confirming: 2, skipped: 3, fired: 4, exited: 5 }[existing.stage] || 0)
+          ? ({ detected: 1, confirming: 2, maker_resting: 3, skipped: 4, fired: 5, exited: 6 }[existing.stage] || 0)
           : 0;
         // Pin fills missing fire neon; never downgrade a live higher stage on this bar.
         if (!existing || pinRank >= prevRank) {
@@ -711,11 +736,20 @@ export function useTradingChart({
     const applyZoom = () => {
       // Pair/timeframe switches clear data first — a delayed zoom from the
       // previous load must not run against an empty chart (throws on null.from).
-      if (!chartRef.current || mockDataRef.current.length === 0) return;
+      const chart = chartRef.current;
+      const data = mockDataRef.current;
+      if (!chart || !data.length) return;
+      const spacing = standardBarSpacing(currentIntervalRef.current);
+      const visible = Math.min(DEFAULT_VISIBLE_CANDLES, data.length);
       try {
-        chartRef.current.timeScale().setVisibleLogicalRange({
-          from: Math.max(0, dataLength - DEFAULT_VISIBLE_CANDLES),
-          to: dataLength,
+        chart.applyOptions({ timeScale: { barSpacing: spacing, minBarSpacing: spacing, rightOffset: 8 } });
+        volumeChartRef.current?.applyOptions({ timeScale: { barSpacing: spacing, minBarSpacing: spacing, rightOffset: 8 } });
+        rsiChartRef.current?.applyOptions({ timeScale: { barSpacing: spacing, minBarSpacing: spacing, rightOffset: 8 } });
+        macdChartRef.current?.applyOptions({ timeScale: { barSpacing: spacing, minBarSpacing: spacing, rightOffset: 8 } });
+        chart.priceScale('right').applyOptions(CANDLE_PRICE_SCALE);
+        chart.timeScale().setVisibleLogicalRange({
+          from: Math.max(0, data.length - visible),
+          to: data.length + 2,
         });
       } catch (err) {
         console.warn('[CHART] Could not apply zoom range:', err);
@@ -728,26 +762,54 @@ export function useTradingChart({
 
   const refreshTrailingLockLine = useCallback((basePrice) => {
     const series = candleSeriesRef.current;
-    if (!series || !basePrice || basePrice <= 0) return;
-    if (trailingLockLineRef.current) {
+    if (!series) return;
+
+    const drop = (ref) => {
+      if (!ref.current) return;
       try {
-        series.removePriceLine(trailingLockLineRef.current);
+        series.removePriceLine(ref.current);
       } catch {
         /* line may already be detached */
       }
-    }
+      ref.current = null;
+    };
+    drop(trailingLockLineRef);
+    drop(slSoftLineRef);
+    drop(slHardLineRef);
+
+    if (!basePrice || basePrice <= 0) return;
+    const tf = timeframeRef.current || '1M';
+    const row = exitLadderFor(tf);
+    const label = String(tf).toLowerCase();
+
     trailingLockLineRef.current = series.createPriceLine({
-      price: basePrice * 1.002,
-      color: '#3b82f6',
+      price: basePrice * (1 + row.profit / 100),
+      color: '#22c55e',
       lineWidth: 2,
       lineStyle: LineStyle.Dashed,
       axisLabelVisible: true,
-      title: 'Lock +0.20%',
+      title: `${label} Profit +${row.profit.toFixed(2)}%`,
+    });
+    slSoftLineRef.current = series.createPriceLine({
+      price: basePrice * (1 - row.soft / 100),
+      color: '#f59e0b',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: `${label} SL −${row.soft.toFixed(2)}%`,
+    });
+    slHardLineRef.current = series.createPriceLine({
+      price: basePrice * (1 - row.hard / 100),
+      color: '#ef4444',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: `${label} SL −${row.hard.toFixed(2)}%`,
     });
   }, []);
 
   const resetPriceScale = useCallback(() => {
-    chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+    chartRef.current?.priceScale('right').applyOptions(CANDLE_PRICE_SCALE);
   }, []);
 
   const updateReadouts = useCallback((bar, data) => {
@@ -1090,6 +1152,7 @@ export function useTradingChart({
     (tf, { persistBackend = true } = {}) => {
       if (!tf || !TIMEFRAME_SECONDS[tf]) return;
       setTimeframe(tf);
+      timeframeRef.current = tf;
       currentIntervalRef.current = TIMEFRAME_SECONDS[tf] || 3600;
       const timeScaleOpts = buildTimeScaleOptions(currentIntervalRef.current);
       chartRef.current?.applyOptions({ timeScale: { ...darkThemeConfig.timeScale, ...timeScaleOpts } });
@@ -1116,8 +1179,9 @@ export function useTradingChart({
       } catch {
         /* storage blocked */
       }
+      refreshTrailingLockLine(entryPriceRef.current);
     },
-    [applyDataset, loadRealHistoryInBackground, connectFreeSource]
+    [applyDataset, loadRealHistoryInBackground, connectFreeSource, refreshTrailingLockLine]
   );
 
   // Init chart once on mount
@@ -1136,6 +1200,7 @@ export function useTradingChart({
       width: chartContainer.clientWidth,
       height: chartContainer.clientHeight,
       ...darkThemeConfig,
+      rightPriceScale: { ...darkThemeConfig.rightPriceScale, ...CANDLE_PRICE_SCALE },
       timeScale: {
         ...darkThemeConfig.timeScale,
         ...buildTimeScaleOptions(currentIntervalRef.current),
@@ -1153,6 +1218,7 @@ export function useTradingChart({
       borderVisible: false,
       wickUpColor: '#22c55e',
       wickDownColor: '#ef4444',
+      priceScaleId: 'right',
     });
     candleSeriesRef.current = candleSeries;
 
@@ -1173,43 +1239,33 @@ export function useTradingChart({
     // MA(5,10,20,30) overlay lines
     maSeriesRef.current = {};
     MA_PERIODS.forEach((period) => {
-      maSeriesRef.current[period] = chart.addLineSeries({
+      maSeriesRef.current[period] = chart.addLineSeries(overlayLineOptions({
         color: MA_COLORS[period],
         lineWidth: 1.5,
-        priceLineVisible: false,
-        lastValueVisible: false,
-      });
+      }));
     });
 
     // Bollinger Bands (20, 2)
-    bollUpperRef.current = chart.addLineSeries({
+    bollUpperRef.current = chart.addLineSeries(overlayLineOptions({
       color: 'rgba(148,163,184,0.7)',
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
-    bollMidRef.current = chart.addLineSeries({
+    }));
+    bollMidRef.current = chart.addLineSeries(overlayLineOptions({
       color: 'rgba(148,163,184,0.45)',
       lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
-    bollLowerRef.current = chart.addLineSeries({
+    }));
+    bollLowerRef.current = chart.addLineSeries(overlayLineOptions({
       color: 'rgba(148,163,184,0.7)',
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
+    }));
 
     // VWAP (daily reset)
-    vwapSeriesRef.current = chart.addLineSeries({
+    vwapSeriesRef.current = chart.addLineSeries(overlayLineOptions({
       color: '#f97316',
       lineWidth: 2,
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
+    }));
 
     const subPaneOpts = {
       ...darkThemeConfig,

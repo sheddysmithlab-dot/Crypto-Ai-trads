@@ -17,7 +17,6 @@ import { usePaperTrading } from './hooks/usePaperTrading';
 import { useSessionEngine } from './hooks/useSessionEngine';
 
 import Header from './components/Header';
-import AiTrainingModal from './components/AiTrainingModal';
 import ChartPanel from './components/ChartPanel';
 import LiveTradesPanel from './components/LiveTradesPanel';
 import ControlBar from './components/ControlBar';
@@ -94,7 +93,6 @@ export default function App() {
   const [pendingConfig, setPendingConfig] = useState(null);
   const [logModalOpen, setLogModalOpen] = useState(false);
   const [statementOpen, setStatementOpen] = useState(false);
-  const [aiTrainingOpen, setAiTrainingOpen] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState(null);
   const [systemLogs, setSystemLogs] = useState(null);
   const [actionLogs, setActionLogs] = useState([]);
@@ -857,7 +855,6 @@ export default function App() {
         }}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenLog={() => setLogModalOpen(true)}
-        onOpenAiTraining={() => setAiTrainingOpen(true)}
         onOpenStatement={() => setStatementOpen(true)}
         onLogout={logout}
         username={username}
@@ -1009,8 +1006,6 @@ export default function App() {
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onLiveTradingConnected={() => {}} />
 
       <TradingStatementModal open={statementOpen} onClose={() => setStatementOpen(false)} />
-
-      <AiTrainingModal open={aiTrainingOpen} onClose={() => setAiTrainingOpen(false)} />
 
       <AgentInstructionsModal
         open={agentModalOpen}

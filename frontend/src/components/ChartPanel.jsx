@@ -3,7 +3,7 @@ import PairSelectorDropdown from './PairSelectorDropdown';
 import TradeLauncherPopup from './TradeLauncherPopup';
 import { fmtNum } from '../data/pairs';
 import { TIMEFRAME_PROFILES, getTimeframeProfile } from '../data/timeframeProfiles';
-import { EXIT_POLICY_CHART_OVERLAY, EXIT_POLICY_SHORT } from '../data/exitPolicyLabels';
+import { EXIT_POLICY_SHORT, exitOverlayFor } from '../data/exitPolicyLabels';
 import { formatTfMoveLabel } from '../hooks/useTfMoveStats';
 
 const TIMEFRAMES = ['1M', '5M', '15M', '1H', '1D'];
@@ -47,7 +47,7 @@ export default function ChartPanel({
               className="flex items-center gap-1.5 px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-[10px] font-bold uppercase tracking-wide text-cyan-300"
               title={
                 timeframe === '1M' || timeframe === '5M' || timeframe === '15M' || timeframe === '1H' || timeframe === '1D'
-                  ? `Unified 1m rulebook on all TFs — brain + order-flow + ${EXIT_POLICY_SHORT}`
+                  ? `Maker entry + TF ladder — brain + order-flow + ${EXIT_POLICY_SHORT}`
                   : 'Unified candle brain engine'
               }
             >
@@ -125,10 +125,10 @@ export default function ChartPanel({
           Lose <span className="font-black">{displayProfile.loseRate}%</span>
         </span>
         <span className="text-amber-500">
-          Engine risk{' '}
-          <span className="font-black">{engineRiskPct ?? displayProfile.capitalPct}%</span>
+          Trade{' '}
+          <span className="font-black">{displayProfile.capitalPct}%</span>
           <span className="text-gray-500 dark:text-gray-400 font-normal normal-case tracking-normal ml-1">
-            at START · $5 Bybit min
+            of capital · $5 Bybit min
           </span>
         </span>
         <span
@@ -151,24 +151,22 @@ export default function ChartPanel({
           </span>
         </span>
         <span className="text-gray-500 dark:text-gray-400 font-normal normal-case tracking-normal ml-auto">
-          Active {timeframe}: risk {engineRiskPct ?? activeProfile.capitalPct}% · W{activeProfile.winRate}/L{activeProfile.loseRate}
+          Active {timeframe}: trade {activeProfile.capitalPct}% · W{activeProfile.winRate}/L{activeProfile.loseRate}
         </span>
       </div>
 
-      {/* Candlestick Chart - default zoom shows the last 40 candles */}
-      <div ref={chartContainerRef} className="w-full h-80 lg:h-[28rem] relative">
-        {botIsActive ? (
-          <div className="absolute top-2 right-2 z-20 pointer-events-none flex flex-col items-end gap-1">
-            <div className="px-2 py-1 rounded-md bg-emerald-950/85 border border-emerald-500/40 text-[9px] font-black uppercase tracking-widest text-emerald-200 shadow-lg">
-              AI Engine live
-            </div>
-            <div className="text-[8px] text-emerald-200/80 font-mono text-right leading-tight max-w-[11rem]">
-              {EXIT_POLICY_CHART_OVERLAY}
-              <br />
-              brain + OF entry
+      {/* Candlestick Chart — standard zoom: ~80 candles, fixed bar width */}
+      <div ref={chartContainerRef} className="w-full h-96 lg:h-[32rem] relative">
+        <div className="absolute top-2 right-2 z-20 pointer-events-none flex flex-col items-end gap-1">
+            {botIsActive ? (
+              <div className="px-2 py-1 rounded-md bg-emerald-950/85 border border-emerald-500/40 text-[9px] font-black uppercase tracking-widest text-emerald-200 shadow-lg">
+                AI Engine live
+              </div>
+            ) : null}
+            <div className="text-[8px] text-emerald-200/90 font-mono text-right leading-tight max-w-[16rem] px-2 py-1 rounded-md bg-black/55 border border-emerald-500/30">
+              {exitOverlayFor(timeframe)}
             </div>
           </div>
-        ) : null}
         <div className="absolute left-2 bottom-1.5 flex items-center gap-1 pointer-events-none opacity-30 select-none z-10">
           <div className="w-3.5 h-3.5 rounded bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center font-black text-white text-[7px]">
             Ai

@@ -474,7 +474,7 @@ export default function SystemLogModal({
           {/* Last signal scan */}
           <section className="bg-[#161A1E] border border-gray-800 rounded-xl p-3">
             <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-2">
-              <i className={`fas ${scanEngine === 'Candle Brain' ? 'fa-brain' : 'fa-wave-square'} text-cyan-400 mr-1.5`} />
+              <i className="fas fa-wave-square text-cyan-400 mr-1.5" />
               Last {scanEngine} Scan
               {scan?.timestamp ? (
                 <span className="text-gray-500 font-normal normal-case ml-2" title="IST">
