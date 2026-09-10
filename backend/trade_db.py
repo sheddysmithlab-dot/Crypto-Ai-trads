@@ -250,17 +250,17 @@ CREATE TABLE IF NOT EXISTS engine_formulas (
 
 _SEED_TFS = ("30s", "1m", "5m", "15m", "1h", "1d")
 # family, min_of_score, candle_soft, lesson — all brain candle families (tradable)
-_DEFAULT_OF = float(_env("THR_SCORE_CLASSIC_PATTERN", "60"))
+_DEFAULT_OF = float(_env("THR_SCORE_CLASSIC_PATTERN", "75"))
 _SEED_FAMILIES = (
     ("doji", _DEFAULT_OF, True,
      "Doji = indecision. FIRE near S/R with HTF align; candle-soft OK on scalp."),
-    ("engulfing", float(_env("THR_SCORE_ENGULFING", "60")), True,
+    ("engulfing", float(_env("THR_SCORE_ENGULFING", "75")), True,
      "Engulfing: body dominance + structure; candle-soft bypasses weak OF."),
     ("engulfing combo", _DEFAULT_OF, True,
      "Three outside up/down: engulf + confirm candle; candle-soft on scalp."),
     ("pin bar", _DEFAULT_OF, True,
      "Pin bar / hammer / shooting star / hanging man: rejection wick + HTF."),
-    ("inside bar", float(_env("THR_SCORE_INSIDE_BAR", "60")), True,
+    ("inside bar", float(_env("THR_SCORE_INSIDE_BAR", "75")), True,
      "Inside bar / harami: mother-bar break or false-breakout + OF/candle-soft."),
     ("harami combo", _DEFAULT_OF, True,
      "Three inside up/down: harami + confirm; candle-soft on scalp."),
@@ -304,7 +304,7 @@ def _seed_family_rules(cur) -> None:
                    (family, timeframe_key, min_of_score, min_brain_score, min_rr,
                     candle_soft, lesson_text, sample_count, version, locked)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, 0, 1, 0)""",
-                (family, tf, min_of, 4.0, 2.0, 1 if soft else 0, lesson),
+                (family, tf, min_of, 6.0, 2.0, 1 if soft else 0, lesson),
             )
 
 
@@ -345,16 +345,16 @@ _ENGINE_FORMULA_SEEDS: list[tuple[str, str, str, float | None, str | None, str]]
     ("risk", "MAX_CONCURRENT_TRADES", "number", 10.0, None, "Global max open trades"),
     ("risk", "MAX_SAME_SIDE_AUTO_PER_PAIR", "number", 3.0, None, "Same-side auto per pair"),
     ("risk", "ONE_M_MAX_CONCURRENT", "number", 3.0, None, "Per-pair scalp max concurrent"),
-    ("of", "THR_SCORE", "number", 60.0, None, "Base OF floor"),
-    ("of", "THR_SCORE_5M", "number", 60.0, None, "5m OF floor"),
-    ("of", "THR_SCORE_1M", "number", 60.0, None, "1m OF floor"),
-    ("of", "THR_SCORE_CLASSIC_PATTERN", "number", 60.0, None, "Doji/classic OF floor"),
-    ("of", "THR_SCORE_ENGULFING", "number", 60.0, None, "Engulfing OF floor"),
-    ("of", "THR_SCORE_INSIDE_BAR", "number", 60.0, None, "Inside-bar OF floor"),
-    ("of", "THR_SCORE_IMBALANCE_1M", "number", 60.0, None, "Imbalance scalp floor"),
-    ("of", "THR_SCORE_TRAP", "number", 60.0, None, "Trap floor HTF"),
-    ("of", "THR_SCORE_TRAP_5M", "number", 60.0, None, "Trap floor 5m"),
-    ("of", "THR_SCORE_TRAP_1M", "number", 60.0, None, "Trap floor 1m"),
+    ("of", "THR_SCORE", "number", 75.0, None, "Base OF floor"),
+    ("of", "THR_SCORE_5M", "number", 75.0, None, "5m OF floor"),
+    ("of", "THR_SCORE_1M", "number", 75.0, None, "1m OF floor"),
+    ("of", "THR_SCORE_CLASSIC_PATTERN", "number", 75.0, None, "Doji/classic OF floor"),
+    ("of", "THR_SCORE_ENGULFING", "number", 75.0, None, "Engulfing OF floor"),
+    ("of", "THR_SCORE_INSIDE_BAR", "number", 75.0, None, "Inside-bar OF floor"),
+    ("of", "THR_SCORE_IMBALANCE_1M", "number", 75.0, None, "Imbalance scalp floor"),
+    ("of", "THR_SCORE_TRAP", "number", 90.0, None, "Trap floor HTF"),
+    ("of", "THR_SCORE_TRAP_5M", "number", 80.0, None, "Trap floor 5m"),
+    ("of", "THR_SCORE_TRAP_1M", "number", 80.0, None, "Trap floor 1m"),
     ("of", "CANDLE_ONLY_FIRE", "bool", 1.0, None, "Allow candle-only fire"),
     ("of", "THR_PRESSURE", "number", 0.60, None, "OF pressure threshold"),
     ("of", "THR_RV_VOL", "number", 1.20, None, "Relative volume threshold"),

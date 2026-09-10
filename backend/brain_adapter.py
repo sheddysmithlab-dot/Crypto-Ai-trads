@@ -99,7 +99,7 @@ _CONFIRM_SYSTEM = (
     "UNLIMITED mode: you may use tools, read this project, and outside research to "
     "maximize expected profit / minimize loss / avoid late entries before deciding. "
     "Only reply YES if judged confidence meets the TF floor in the brief "
-    "(overall ≥60%; named traps ≥60%). Otherwise reply NO. "
+    "(overall ≥75%; 5m named traps ≥80%; other named traps ≥90%). Otherwise reply NO. "
     "Final answer line must be exactly one word: YES or NO."
 )
 
@@ -156,11 +156,11 @@ def _brain_side_ok(
     ov_sc, ov_rr = family_rules.effective_brain_floors(
         timeframe_key, family=fam, brain_strategy=_brain_strategy_from_think(think)
     )
-    # Family DB may only loosen the code floor, never raise it (live rows were 12–16).
+    # Family DB may raise the floor (stricter). Code floor is the minimum.
     if ov_sc is not None:
-        min_sc = min(min_sc, float(ov_sc))
+        min_sc = max(min_sc, float(ov_sc))
     if ov_rr is not None:
-        min_rr = min(min_rr, float(ov_rr))
+        min_rr = max(min_rr, float(ov_rr))
 
     sig = think.get("signal")
     if sig is not None:
@@ -1199,7 +1199,7 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
             "no AI confirm — dual gate is the fire decision; next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
-            f"Order-flow conf floor: ≥60% on every family and trap. "
+            f"Order-flow conf floor: overall ≥75% / 5m traps ≥80% / other traps ≥90%. "
             f"{tf_cfg.note}"
         ),
         "timeframes": list(_b.TIMEFRAMES.keys()),
@@ -1231,7 +1231,7 @@ def strategy_system_blurb() -> str:
         "   fake breakout, reversal trap (effort vs result; volume & buyer/seller pressure).\n"
         "3) Dual gate (brain + order-flow) → BUY / SELL / HOLD. No AI confirm.\n"
         "4) Next-candle fire + path SL/TP 0.5%/0.7% + opposite-side flip-exit.\n"
-        "5) Floors: ≥60 on every family and trap.\n"
+        "5) Floors: overall≥75 / 5m trap≥80 / else trap≥90.\n"
     )
 
 

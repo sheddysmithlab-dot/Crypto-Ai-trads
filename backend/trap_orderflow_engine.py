@@ -40,21 +40,21 @@ THR_Z_TVOL = 1.0
 THR_FAKE_WICK = 0.30
 THR_BREAK_ATR = 0.10
 THR_BALANCED = 0.05
-THR_SCORE = 60.0  # overall trade confidence floor (non-trap setups, all TFs)
-THR_SCORE_5M = 60.0  # 5m non-trap / scalp floor
-THR_SCORE_1M = 60.0
-THR_SCORE_IMBALANCE_1M = float(os.environ.get("THR_SCORE_IMBALANCE_1M", "60"))
-THR_SCORE_INSIDE_BAR = float(os.environ.get("THR_SCORE_INSIDE_BAR", "60"))
-# Classic/doji + engulfing use the same OF floor as other non-trap setups (≥60).
-THR_SCORE_CLASSIC_PATTERN = float(os.environ.get("THR_SCORE_CLASSIC_PATTERN", "60"))
-THR_SCORE_ENGULFING = float(os.environ.get("THR_SCORE_ENGULFING", "60"))
+THR_SCORE = 75.0  # overall trade confidence floor (non-trap setups, all TFs)
+THR_SCORE_5M = 75.0  # 5m non-trap / scalp floor
+THR_SCORE_1M = 75.0
+THR_SCORE_IMBALANCE_1M = float(os.environ.get("THR_SCORE_IMBALANCE_1M", "75"))
+THR_SCORE_INSIDE_BAR = float(os.environ.get("THR_SCORE_INSIDE_BAR", "75"))
+# Classic/doji + engulfing use the same OF floor as other non-trap setups (≥75).
+THR_SCORE_CLASSIC_PATTERN = float(os.environ.get("THR_SCORE_CLASSIC_PATTERN", "75"))
+THR_SCORE_ENGULFING = float(os.environ.get("THR_SCORE_ENGULFING", "75"))
 # Candle-only bypass off by default — require real OF match + score floor.
 CANDLE_ONLY_FIRE_ENABLED = os.environ.get("CANDLE_ONLY_FIRE", "0").strip().lower() in (
     "1", "true", "yes",
 )
-THR_SCORE_TRAP = 60.0  # named trap fires (15m+)
-THR_SCORE_TRAP_5M = 60.0  # named trap fires on 5m
-THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "60"))
+THR_SCORE_TRAP = 90.0  # named trap fires (15m+)
+THR_SCORE_TRAP_5M = 80.0  # named trap fires on 5m
+THR_SCORE_TRAP_1M = float(os.environ.get("THR_SCORE_TRAP_1M", "80"))
 STRUCTURE_OPPOSITE_PENALTY = 12.0  # OF vs structure trap conflict — subtract from firing side
 THR_RV_PRICE_WEAK = 0.70
 LOOKBACK = 20
@@ -112,7 +112,7 @@ def is_candle_soft_strategy(
 
 
 def thr_score_for_tf(exec_tf: str | None) -> float:
-    """Base OF confidence floor (0–100) for non-trap / scalp setups — ≥65 all TFs."""
+    """Base OF confidence floor (0–100) for non-trap / scalp setups — ≥75 all TFs."""
     tf = (exec_tf or "").strip().lower()
     if tf == "5m":
         return THR_SCORE_5M
@@ -138,7 +138,7 @@ def thr_score_for_setup(
     brain_strategy: str | None = None,
     family: str | None = None,
 ) -> float:
-    """Floor: classic/doji ≥65; engulfing ≥65; inside_bar ≥65; traps ≥70/80; else ≥65.
+    """Floor: classic/doji ≥75; engulfing ≥75; inside_bar ≥75; traps ≥80/90; else ≥75.
 
     Family DB cannot lower this floor. Candle-only labels do not zero it.
     """
@@ -181,8 +181,50 @@ def _apply_imbalance_block(
     brain_side: str | None = None,
     brain_strategy: str | None = None,
 ) -> TrapOFResult:
-    """Imbalance entries are allowed. Do not force them to NO_TRADE."""
-    return result
+    """Hard skip imbalance-only fires — unless engulfing/doji candle-only remaps them."""
+    if result.final_signal not in ("LONG", "SHORT"):
+        return result
+    if not is_imbalance_fire_pattern(result.pattern):
+        return result
+    side_norm = (brain_side or "").strip().upper()
+    want = "LONG" if side_norm == "BUY" else "SHORT" if side_norm == "SELL" else None
+    if candle_soft and want and result.final_signal == want:
+        strat = _norm_strategy(brain_strategy) or "classic_pattern"
+        max_sc = max(float(result.long_score), float(result.short_score))
+        return TrapOFResult(
+            timeframe=result.timeframe,
+            pattern=f"CANDLE_{strat.upper()}",
+            bias_5m=result.bias_5m,
+            buy_pressure=result.buy_pressure,
+            sell_pressure=result.sell_pressure,
+            buy_volume_ratio=result.buy_volume_ratio,
+            sell_volume_ratio=result.sell_volume_ratio,
+            long_score=result.long_score,
+            short_score=result.short_score,
+            final_signal=want,
+            confidence=max(max_sc, 40.0) / 100.0,
+            primary_reason=(
+                f"candle-only {strat} fire — imbalance remapped "
+                f"(was {result.pattern})"
+            ),
+            details=result.details,
+        )
+    max_sc = max(float(result.long_score), float(result.short_score))
+    return TrapOFResult(
+        timeframe=result.timeframe,
+        pattern=result.pattern,
+        bias_5m=result.bias_5m,
+        buy_pressure=result.buy_pressure,
+        sell_pressure=result.sell_pressure,
+        buy_volume_ratio=result.buy_volume_ratio,
+        sell_volume_ratio=result.sell_volume_ratio,
+        long_score=result.long_score,
+        short_score=result.short_score,
+        final_signal="NO_TRADE",
+        confidence=max_sc / 100.0,
+        primary_reason=f"IMBALANCE entries disabled (was {result.pattern})",
+        details=result.details,
+    )
 
 
 @dataclass
@@ -787,7 +829,7 @@ def evaluate_trap_orderflow(
         else:
             short_score += 8
 
-    # NO TRADE gates — classic/doji ≥65; engulfing ≥65; traps ≥70/80; else ≥65
+    # NO TRADE gates — classic/doji ≥75; engulfing ≥75; traps ≥80/90; else ≥75
     setup_name = (setup_1 or setup_5 or {}).get("name") if (setup_1 or setup_5) else None
     strat_norm = _norm_strategy(brain_strategy)
     side_norm = (brain_side or "").strip().upper()

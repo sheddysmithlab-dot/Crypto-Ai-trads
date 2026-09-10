@@ -459,13 +459,13 @@ async def consult_ai_provider(context):
     if trap_score is None:
         trap_score = context.get("confidence")
     score_txt = "—" if trap_score is None else str(trap_score)
-    thr = 60
+    thr = 75
 
     prompt = (
         f"PATTERN DETECTED → confirm {side} {pattern} / trap score {score_txt}. "
         f"Pair {pair} {timeframe}. "
         f"Analyze LONG/SHORT, trap/inverse/fake-breakout per policy. "
-        f"Reply YES only if confidence ≥ {thr}% (floor ≥60); else NO. "
+        f"Reply YES only if confidence ≥ {thr}% (overall ≥75; 5m traps ≥80; other traps ≥90); else NO. "
         f"One word only: YES or NO."
     )
     system = (
@@ -806,23 +806,43 @@ class BybitAPIWrapper:
         rows = (data.get("result") or {}).get("list") or []
         if not rows:
             return
-        raw = rows[0].get("takerFeeRate")
-        if raw is None or str(raw) == "":
-            return
-        # Bybit returns fraction e.g. "0.00055" → store as 0.055 (% points) BASE only
-        pct = float(raw) * 100.0
-        if pct <= 0 or pct > 1.0:
-            return
-        prev_base = float(self.taker_fee_base_pct)
-        self.taker_fee_base_pct = round(pct, 6)
-        self.taker_fee_pct = self.get_taker_fee_pct()
+        row = rows[0]
+        # Bybit returns fraction e.g. "0.00055" → store as 0.055 (% points) BASE only.
+        # Maker may be 0 (or a rebate). Keep the cheaper live rate; never raise a synced maker.
+        changed = False
+        raw_taker = row.get("takerFeeRate")
+        if raw_taker is not None and str(raw_taker) != "":
+            taker_pct = float(raw_taker) * 100.0
+            if 0 < taker_pct <= 1.0:
+                prev_taker = float(self.taker_fee_base_pct)
+                self.taker_fee_base_pct = round(taker_pct, 6)
+                self.taker_fee_pct = self.get_taker_fee_pct()
+                if abs(prev_taker - self.taker_fee_base_pct) > 1e-6:
+                    changed = True
+                    print(
+                        f"[BYBIT] Live taker fee synced: base {self.taker_fee_base_pct:g}% "
+                        f"+ GST×{BYBIT_FEE_GST_MULT:g} → all-in {self.taker_fee_pct:g}% "
+                        f"(was base {prev_taker:g}%) via {symbol}"
+                    )
+        raw_maker = row.get("makerFeeRate")
+        if raw_maker is not None and str(raw_maker) != "":
+            maker_pct = float(raw_maker) * 100.0
+            # Rebate (negative) stored as 0 — fee math treats cost as >= 0.
+            if -0.05 <= maker_pct <= 1.0:
+                live_maker = round(max(0.0, maker_pct), 6)
+                prev_maker = float(self.get_maker_fee_base_pct())
+                # Never charge more than the account's live maker rate.
+                self.maker_fee_base_pct = live_maker
+                if abs(prev_maker - live_maker) > 1e-6:
+                    changed = True
+                    print(
+                        f"[BYBIT] Live maker fee synced: base {live_maker:g}% "
+                        f"+ GST×{BYBIT_FEE_GST_MULT:g} → all-in {self.get_maker_fee_pct():g}% "
+                        f"(was base {prev_maker:g}%) via {symbol}"
+                    )
         self._last_fee_sync_ts = now
-        if abs(prev_base - self.taker_fee_base_pct) > 1e-6:
-            print(
-                f"[BYBIT] Live taker fee synced: base {self.taker_fee_base_pct:g}% "
-                f"+ GST×{BYBIT_FEE_GST_MULT:g} → all-in {self.taker_fee_pct:g}% "
-                f"(was base {prev_base:g}%) via {symbol}"
-            )
+        if not changed and raw_taker is None and raw_maker is None:
+            return
 
     def _note_failure(self):
         if not self._was_failing:
@@ -842,17 +862,24 @@ class BybitAPIWrapper:
         return all_in
 
     def get_maker_fee_base_pct(self) -> float:
-        """Bybit maker fee % before GST (e.g. 0.02)."""
-        return float(getattr(self, "maker_fee_base_pct", None) or BYBIT_MAKER_FEE_PCT_DEFAULT)
+        """Bybit maker fee % before GST (e.g. 0.02). 0 is valid — do not fall back."""
+        v = getattr(self, "maker_fee_base_pct", None)
+        if v is None:
+            return float(BYBIT_MAKER_FEE_PCT_DEFAULT)
+        return float(v)
 
     def get_maker_fee_pct(self) -> float:
         """All-in maker fee %: base × GST (default 0.02 × 1.18 ≈ 0.0236)."""
         return round(self.get_maker_fee_base_pct() * float(BYBIT_FEE_GST_MULT), 6)
 
     def role_fee_pct(self, liquidity: str | None) -> tuple[float, float]:
-        """Return (base_pct, all_in_pct) for maker or taker. Never mixes roles."""
+        """Return (base_pct, all_in_pct). Maker fills always use the cheaper schedule."""
         if str(liquidity or "taker").lower() == "maker":
-            return self.get_maker_fee_base_pct(), self.get_maker_fee_pct()
+            m_base, m_all = self.get_maker_fee_base_pct(), self.get_maker_fee_pct()
+            t_base, t_all = self.get_taker_fee_base_pct(), self.get_taker_fee_pct()
+            if m_all <= t_all:
+                return m_base, m_all
+            return t_base, t_all
         return self.get_taker_fee_base_pct(), self.get_taker_fee_pct()
 
     def all_in_fee_usd(self, notional: float, liquidity: str | None = "taker") -> float:
@@ -1282,7 +1309,7 @@ class AITradingAgent:
         self.timeframe_seconds = 60
 
     # Cap = every mapped Bybit pair (frontend TRADING_PAIRS / BYBIT_SYMBOL_MAP).
-    MAX_WATCHLIST = 64
+    MAX_WATCHLIST = 32
 
     def get_scan_pairs(self) -> list[str]:
         """Pairs the AI scans for patterns + fires on.
@@ -2326,7 +2353,7 @@ class AITradingAgent:
             liq = "taker"
         if source == "manual":
             liq = "taker"
-        entry_fee_pct = bybit_api.get_maker_fee_pct() if liq == "maker" else bybit_api.get_taker_fee_pct()
+        _role_base, entry_fee_pct = bybit_api.role_fee_pct(liq)
         entry_fee_usd = round(position_size * (entry_fee_pct / 100), 4)
 
         tf_key = timeframe_key or SECONDS_TO_TIMEFRAME_KEY.get(self.timeframe_seconds, "1m")
@@ -4029,6 +4056,9 @@ FIRST_DETECT_SKIPPED: set[str] = set()
 SKIP_TRADE_PATTERNS = frozenset(
     {
         "MA_COMPRESSION_CONSOLIDATION_ZONE",
+        "IMBALANCE",
+        "QUALIFIED_IMBALANCE",
+        "RAW_IMBALANCE",
     }
 )
 
@@ -4361,8 +4391,7 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
         # max_concurrent still limits how many positions can be OPEN at once.
         max_pairs=int(getattr(agent, "MAX_WATCHLIST", 32) or 32),
         progress_cb=_progress,
-        # Do not drop coins for min-lot before scoring — those were staying disabled.
-        lot_ok=None,
+        lot_ok=_lot_ok if avail > 0 else None,
     )
     thr = float(built["threshold"])
     new_fire = list(built["qualified"])
@@ -5656,6 +5685,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         pending["maker_filled"] = False
         pending["maker_fill_price"] = None
         pending["skip_exchange_open"] = False
+        pending["maker_fallback"] = True
         pending["entry_liquidity"] = "taker"
         pending["mode"] = "detect_fire"
         PENDING_ENTRY_SIGNALS[pair] = pending
@@ -5663,12 +5693,16 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         return await _execute_queued_fire(pending)
 
     async def _dispatch_confirmed_fire(pending: dict) -> bool:
-        # Pattern detect fires immediately. Do not rest a maker that can skip the trade.
-        if pending.get("mode") == "detect_fire" or pending.get("maker_filled"):
-            pending["entry_liquidity"] = pending.get("entry_liquidity") or "taker"
+        # Cheapest fill first: post-only maker (0.02%). Taker only after a maker miss.
+        if pending.get("maker_filled"):
+            pending["entry_liquidity"] = "maker"
+            return await _execute_queued_fire(pending)
+        if pending.get("maker_fallback"):
+            pending["entry_liquidity"] = "taker"
             return await _execute_queued_fire(pending)
         if _is_1m_maker_tf(timeframe_key) and not pending.get("maker_filled"):
             return await _arm_maker_rest(pending)
+        pending["entry_liquidity"] = pending.get("entry_liquidity") or "taker"
         return await _execute_queued_fire(pending)
 
     resting = PENDING_ENTRY_SIGNALS.get(pair)
