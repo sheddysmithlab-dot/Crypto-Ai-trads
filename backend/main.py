@@ -465,7 +465,7 @@ async def consult_ai_provider(context):
         f"PATTERN DETECTED → confirm {side} {pattern} / trap score {score_txt}. "
         f"Pair {pair} {timeframe}. "
         f"Analyze LONG/SHORT, trap/inverse/fake-breakout per policy. "
-        f"Reply YES only if confidence ≥ {thr}% (overall ≥75; 1m/5m traps ≥70; other traps ≥75); else NO. "
+        f"Reply YES only if confidence ≥ {thr}% (overall ≥75; named traps ≥75; 30s traps ≥70); else NO. "
         f"One word only: YES or NO."
     )
     system = (
@@ -4552,10 +4552,6 @@ async def momentum_universe_timer_loop():
                 continue
             if not getattr(agent, "momentum_gate_ready", False):
                 continue
-            # 1m/5m: hourly engine soft-restart already re-arms + rescans — skip duplicate.
-            tf = str(agent._chart_tf_key() or "").strip().lower()
-            if tf in ("1m", "5m"):
-                continue
             open_n = len(agent.trades or [])
             print(
                 f"[MOMENTUM] {interval // 60}-min soft restart — re-scoring universe "
@@ -4584,6 +4580,9 @@ async def engine_hourly_restart_loop():
             if not agent.is_active or agent.emergency_triggered:
                 continue
             tf = str(agent._chart_tf_key() or "").strip().lower()
+            # 1m/5m follow 15m: universe timer only — no exclusive engine re-arm.
+            if tf in ("1m", "5m"):
+                continue
             if tf not in ("1m", "5m"):
                 continue
             armed = float(getattr(agent, "engine_armed_at", 0) or 0)

@@ -37,7 +37,8 @@ ENGINE_NAME = "ai_driven_brain_v2"
 ENTRY_PATTERN_NAME = "AI_BRAIN_V2"
 # Detect-fire only on a last-bar brain signal. Raw candle matches do not fire.
 DETECT_FIRE_MIN_SCORE = 5.0
-# 1m/5m: OF side score below this → 10th-man picks true trade (no skip / no Step2 reverse).
+# 30s: OF side score below this → 10th-man picks true trade (no skip / no Step2 reverse).
+# 1m/5m match 15m — no weak-score path.
 SCALP_WEAK_SCORE_TENTH_MAX = 30.0
 ONE_M_WEAK_SCORE_TENTH_MAX = SCALP_WEAK_SCORE_TENTH_MAX  # back-compat alias
 
@@ -99,7 +100,7 @@ _CONFIRM_SYSTEM = (
     "UNLIMITED mode: you may use tools, read this project, and outside research to "
     "maximize expected profit / minimize loss / avoid late entries before deciding. "
     "Only reply YES if judged confidence meets the TF floor in the brief "
-    "(overall ≥75%; 1m/5m named traps ≥70%; other named traps ≥75%). Otherwise reply NO. "
+    "(overall ≥75%; named traps ≥75%; 30s named traps ≥70%). Otherwise reply NO. "
     "Final answer line must be exactly one word: YES or NO."
 )
 
@@ -125,7 +126,10 @@ def _matching_side_score(of_trap: Optional[dict], action: str) -> float:
 
 
 def _is_weak_score_tenth_tf(timeframe_key: str | None) -> bool:
-    """1m and 5m share the same weak-score → 10th-man true-trade fire policy."""
+    """30s only: OF <30 → 10th-man true-trade. 1m/5m match 15m (no weak-score path)."""
+    raw = str(timeframe_key or "").strip().lower()
+    if raw in ("1m", "5m"):
+        return False
     return _norm_tf(timeframe_key) in ("1m", "5m")
 
 
@@ -1290,7 +1294,8 @@ async def evaluate_live_entry_async(
             f"({getattr(trap_obj, 'trap_type', 'trap')}) — opposite trade"
         )
 
-    # 1m/5m: pattern OF side score < 30 → hand to 10th-man true trade (no Step2 reverse / no skip).
+    # 30s: pattern OF side score < 30 → hand to 10th-man true trade (no Step2 reverse / no skip).
+    # 1m/5m match 15m — dual-gate / OF floor apply (no weak-score bypass).
     if (
         _is_weak_score_tenth_tf(tf)
         and setup_action in ("BUY", "SELL")
@@ -1621,7 +1626,7 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
             "no AI confirm — dual gate is the fire decision; next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
-            f"Order-flow conf floor: overall ≥75% / 1m/5m traps ≥70% / other traps ≥75%. "
+            f"Order-flow conf floor: overall ≥75% / named traps ≥75% / 30s traps ≥70%. "
             f"{tf_cfg.note}"
         ),
         "timeframes": list(_b.TIMEFRAMES.keys()),
@@ -1653,7 +1658,7 @@ def strategy_system_blurb() -> str:
         "   fake breakout, reversal trap (effort vs result; volume & buyer/seller pressure).\n"
         "3) Dual gate (brain + order-flow) → BUY / SELL / HOLD. No AI confirm.\n"
         "4) Next-candle fire + path SL/TP 0.5%/0.7% + opposite-side flip-exit.\n"
-        "5) Floors: overall≥75 / 1m/5m trap≥70 / else trap≥75. Dual gate only — no AI.\n"
+        "5) Floors: overall≥75 / named trap≥75 / 30s trap≥70. Dual gate only — no AI.\n"
     )
 
 
