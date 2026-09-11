@@ -120,9 +120,9 @@ def thr_score_for_tf(exec_tf: str | None) -> float:
 
 
 def thr_trap_for_tf(exec_tf: str | None) -> float:
-    """Named trap floor: 30s uses scalp trap floor; 1m/5m match 15m HTF floor."""
+    """Named trap floor: 1m/5m/30s share scalp trap floor; 15m+ uses HTF floor."""
     tf = (exec_tf or "").strip().lower()
-    if tf in ("30s",):
+    if tf in ("1m", "5m", "30s"):
         return float(THR_SCORE_TRAP_1M)
     return float(THR_SCORE_TRAP)
 

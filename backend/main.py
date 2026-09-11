@@ -465,7 +465,7 @@ async def consult_ai_provider(context):
         f"PATTERN DETECTED → confirm {side} {pattern} / trap score {score_txt}. "
         f"Pair {pair} {timeframe}. "
         f"Analyze LONG/SHORT, trap/inverse/fake-breakout per policy. "
-        f"Reply YES only if confidence ≥ {thr}% (overall ≥75; named traps ≥75; 30s traps ≥70); else NO. "
+        f"Reply YES only if confidence ≥ {thr}% (overall ≥75; 1m/5m traps ≥70; other traps ≥75); else NO. "
         f"One word only: YES or NO."
     )
     system = (

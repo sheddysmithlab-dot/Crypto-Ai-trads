@@ -37,8 +37,7 @@ ENGINE_NAME = "ai_driven_brain_v2"
 ENTRY_PATTERN_NAME = "AI_BRAIN_V2"
 # Detect-fire only on a last-bar brain signal. Raw candle matches do not fire.
 DETECT_FIRE_MIN_SCORE = 5.0
-# 30s: OF side score below this → 10th-man picks true trade (no skip / no Step2 reverse).
-# 1m/5m match 15m — no weak-score path.
+# 1m/5m/30s: OF side score below this → 10th-man picks true trade (no skip / no Step2 reverse).
 SCALP_WEAK_SCORE_TENTH_MAX = 30.0
 ONE_M_WEAK_SCORE_TENTH_MAX = SCALP_WEAK_SCORE_TENTH_MAX  # back-compat alias
 
@@ -100,7 +99,7 @@ _CONFIRM_SYSTEM = (
     "UNLIMITED mode: you may use tools, read this project, and outside research to "
     "maximize expected profit / minimize loss / avoid late entries before deciding. "
     "Only reply YES if judged confidence meets the TF floor in the brief "
-    "(overall ≥75%; named traps ≥75%; 30s named traps ≥70%). Otherwise reply NO. "
+    "(overall ≥75%; 1m/5m named traps ≥70%; other named traps ≥75%). Otherwise reply NO. "
     "Final answer line must be exactly one word: YES or NO."
 )
 
@@ -126,10 +125,7 @@ def _matching_side_score(of_trap: Optional[dict], action: str) -> float:
 
 
 def _is_weak_score_tenth_tf(timeframe_key: str | None) -> bool:
-    """30s only: OF <30 → 10th-man true-trade. 1m/5m match 15m (no weak-score path)."""
-    raw = str(timeframe_key or "").strip().lower()
-    if raw in ("1m", "5m"):
-        return False
+    """1m and 5m share the same weak-score → 10th-man true-trade fire policy."""
     return _norm_tf(timeframe_key) in ("1m", "5m")
 
 
@@ -183,8 +179,12 @@ def _brain_side_ok(
     think: dict,
     action: str,
     timeframe_key: str,
+    of_trap: Optional[dict] = None,
 ) -> tuple[bool, float, str]:
-    """Brain/pattern layer: matching signal or trap must clear confluence + R:R floors."""
+    """Brain/pattern layer: matching signal or trap must clear confluence + R:R floors.
+
+    Opposite pin does not veto when trap or OF already selected this side.
+    """
     if action not in ("BUY", "SELL"):
         return False, 0.0, "not actionable"
     tf = _norm_tf(timeframe_key)
@@ -201,11 +201,20 @@ def _brain_side_ok(
     if ov_rr is not None:
         min_rr = max(min_rr, float(ov_rr))
 
+    def _trap_ok() -> tuple[bool, float, str] | None:
+        trap = think.get("trap")
+        if trap is None or getattr(trap, "side", None) != action:
+            return None
+        sc = float(getattr(trap, "score", 0) or 0)
+        rr = float(getattr(trap, "rr", 0) or 0)
+        if sc < min_sc:
+            return False, sc, f"trap score {sc:.1f} < {min_sc:.0f}"
+        if rr < min_rr - 1e-6:
+            return False, sc, f"trap R:R {rr:.2f} < {min_rr:.0f}"
+        return True, sc, "trap"
+
     sig = think.get("signal")
-    if sig is not None:
-        if sig.side != action:
-            sc = float(getattr(sig, "score", 0) or 0)
-            return False, sc, f"brain signal {sig.side} != {action}"
+    if sig is not None and getattr(sig, "side", None) == action:
         sc = float(getattr(sig, "score", 0) or 0)
         rr = float(getattr(sig, "rr", 0) or 0)
         if sc < min_sc:
@@ -214,15 +223,30 @@ def _brain_side_ok(
             return False, sc, f"brain R:R {rr:.2f} < {min_rr:.0f}"
         return True, sc, "ok"
 
-    trap = think.get("trap")
-    if trap is not None and getattr(trap, "side", None) == action:
-        sc = float(getattr(trap, "score", 0) or 0)
-        rr = float(getattr(trap, "rr", 0) or 0)
-        if sc < min_sc:
-            return False, sc, f"trap score {sc:.1f} < {min_sc:.0f}"
-        if rr < min_rr - 1e-6:
-            return False, sc, f"trap R:R {rr:.2f} < {min_rr:.0f}"
-        return True, sc, "trap"
+    # Opposite pin does not veto: trap/OF already chose this side.
+    trap_res = _trap_ok()
+    if trap_res is not None and trap_res[0]:
+        return trap_res
+
+    if of_trap:
+        want_sig = "LONG" if action == "BUY" else "SHORT"
+        if of_trap.get("final_signal") == want_sig:
+            o_sc = _matching_side_score(of_trap, action)
+            thr = thr_score_for_setup(
+                tf,
+                of_trap.get("pattern") or "",
+                brain_strategy=_brain_strategy_from_think(think),
+                family=_family_from_think(think, of_trap),
+            )
+            if not score_below_floor(o_sc, thr):
+                return True, o_sc, "of_lead"
+
+    if trap_res is not None:
+        return trap_res
+
+    if sig is not None:
+        sc = float(getattr(sig, "score", 0) or 0)
+        return False, sc, f"brain signal {sig.side} != {action}"
 
     return False, 0.0, "no qualifying brain signal/trap"
 
@@ -266,7 +290,7 @@ def _dual_score_passes(
     timeframe_key: str,
 ) -> tuple[bool, str, float, float]:
     """Brain confluence and OF confidence both required. No candle-only bypass."""
-    b_ok, b_sc, b_msg = _brain_side_ok(think, action, timeframe_key)
+    b_ok, b_sc, b_msg = _brain_side_ok(think, action, timeframe_key, of_trap)
     if not b_ok:
         return False, f"Brain gate: {b_msg}", b_sc, 0.0
     o_ok, o_sc, o_msg = _of_side_ok(of_trap, action, timeframe_key, think)
@@ -1294,8 +1318,30 @@ async def evaluate_live_entry_async(
             f"({getattr(trap_obj, 'trap_type', 'trap')}) — opposite trade"
         )
 
-    # 30s: pattern OF side score < 30 → hand to 10th-man true trade (no Step2 reverse / no skip).
-    # 1m/5m match 15m — dual-gate / OF floor apply (no weak-score bypass).
+    # OF fights pin → take OF side (same as trap flip; dual gate still requires OF ≥ floor).
+    of_sig = (of_trap or {}).get("final_signal")
+    of_as = "BUY" if of_sig == "LONG" else "SELL" if of_sig == "SHORT" else None
+    if (
+        setup_action in ("BUY", "SELL")
+        and of_as in ("BUY", "SELL")
+        and of_as != setup_action
+    ):
+        flipped_from = flipped_from or setup_action
+        setup_action = of_as
+        trap_scan = _trap_scan_summary(think, of_trap, setup_action)
+        pipeline["step2_trap"] = {
+            "status": "flipped",
+            "flipped_from": flipped_from,
+            "flipped_to": setup_action,
+            "flip_source": "orderflow",
+            **trap_scan,
+        }
+        print(
+            f"[STEP2] OF flip {pair} {flipped_from} → {setup_action} "
+            f"({(of_trap or {}).get('pattern') or of_sig}) — opposite trade"
+        )
+
+    # 1m/5m: pattern OF side score < 30 → hand to 10th-man true trade (no Step2 reverse / no skip).
     if (
         _is_weak_score_tenth_tf(tf)
         and setup_action in ("BUY", "SELL")
@@ -1626,7 +1672,7 @@ def entry_pattern_profile(timeframe_key: str | None = None) -> Dict[str, Any]:
             "no AI confirm — dual gate is the fire decision; next-candle fire; path SL/TP 0.5/0.7; "
             "flip-exit on opposite signal. "
             f"Active label: {tf_cfg.label}. Min confluence: {tf_cfg.min_score}, min R:R: {tf_cfg.min_rr}. "
-            f"Order-flow conf floor: overall ≥75% / named traps ≥75% / 30s traps ≥70%. "
+            f"Order-flow conf floor: overall ≥75% / 1m/5m traps ≥70% / other traps ≥75%. "
             f"{tf_cfg.note}"
         ),
         "timeframes": list(_b.TIMEFRAMES.keys()),
@@ -1658,7 +1704,7 @@ def strategy_system_blurb() -> str:
         "   fake breakout, reversal trap (effort vs result; volume & buyer/seller pressure).\n"
         "3) Dual gate (brain + order-flow) → BUY / SELL / HOLD. No AI confirm.\n"
         "4) Next-candle fire + path SL/TP 0.5%/0.7% + opposite-side flip-exit.\n"
-        "5) Floors: overall≥75 / named trap≥75 / 30s trap≥70. Dual gate only — no AI.\n"
+        "5) Floors: overall≥75 / 1m/5m trap≥70 / else trap≥75. Dual gate only — no AI.\n"
     )
 
 
