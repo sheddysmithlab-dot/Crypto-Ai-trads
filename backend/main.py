@@ -96,6 +96,7 @@ from timeframe_profiles import (
     get_exit_ladder,
     get_timeframe_profile,
     is_scalp_tf,
+    skips_pattern_confirm,
     uses_maker_entry,
 )
 
@@ -1092,9 +1093,17 @@ SKIP_FIRST_DETECT_SCALP = os.environ.get("SKIP_FIRST_DETECT_SCALP", "0").strip()
     "1", "true", "yes",
 )
 # Detect → next-candle impulse lock → trail% pullback maker (no taker chase).
+# 15m / 1h / 1D skip the extra confirm bars even when this flag is on.
 MOMENTUM_LOCK_ENABLED = os.environ.get("MOMENTUM_LOCK_ENABLED", "1").strip().lower() not in (
     "0", "false", "no",
 )
+
+
+def _bar_confirm_enabled(timeframe_key: str | None) -> bool:
+    """1m/5m wait extra color bars. 15m/1h/1D fire on the closed pattern bar."""
+    return bool(MOMENTUM_LOCK_ENABLED) and not skips_pattern_confirm(timeframe_key)
+
+
 MOMENTUM_IMPULSE_TRAIL_MULT = float(os.environ.get("MOMENTUM_IMPULSE_TRAIL_MULT", "2.0") or 2.0)
 # Absolute floor: confirm candle must travel ≥ this % in trade direction (color + trail).
 MOMENTUM_IMPULSE_MIN_PCT = float(os.environ.get("MOMENTUM_IMPULSE_MIN_PCT", "0.09") or 0.09)
@@ -3533,7 +3542,8 @@ class AITradingAgent:
             f"[AI ENGINE] Armed — trading READY now "
             f"(boot UI scan-driven, max {ENGINE_BOOT_MAX_SEC:g}s). "
             f"Momentum watchlist gate pending. "
-            f"5-step pipeline: pattern detect → trap scan → confirm ≤2 bars (≥0.09% color) → "
+            f"5-step pipeline: pattern detect → trap scan → confirm ≤2 bars on 1m/5m "
+            f"(15m/1h/1D fire on pattern close) → "
             f"10th-man → fire/skip (pullback maker, no taker chase). "
             f"First detect per pair may be skipped."
         )
@@ -3950,7 +3960,8 @@ TIMEFRAME_KEY_TO_BYBIT_KLINE = {
 # different candle granularities.
 LAST_CANDLE_TIMESTAMPS = {}
 
-# Detect on last closed candle → queue momentum_lock → confirm ≤2 bars (≥0.09% color) → trail% pullback maker.
+# Detect on last closed candle → 1m/5m: confirm ≤2 bars → trail% pullback maker.
+# 15m/1h/1D: pattern close is confirm (no extra same-TF bars).
 PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
 # 1m only: last auto fire candle open-time per pair (blocks fires after a gap).
 LAST_AUTO_FIRE_CANDLE_MS: dict[str, int] = {}
@@ -6033,6 +6044,87 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         )
         return await _dispatch_confirmed_fire(pending)
 
+    async def _apply_step4_then_fire(pending: dict) -> bool:
+        """10th-man then fire on detect close — no extra confirm bars."""
+        detect = dict(pending.get("detect") or {})
+        side = pending.get("side") or "LONG"
+        close_time = int(pending.get("signal_candle_time") or 0)
+        pipe = dict(detect.get("pipeline") or {})
+        if skips_pattern_confirm(timeframe_key):
+            pipe["step3_confirm"] = {
+                "status": "skip",
+                "reason": "pattern close is confirm",
+            }
+            detect["pipeline"] = pipe
+            pending["detect"] = detect
+        tenth_prev = detect.get("tenth_man") if isinstance(detect.get("tenth_man"), dict) else {}
+        tm = tenth_prev if tenth_prev.get("verdict") else {"verdict": "ALLOW", "reason": "legacy path"}
+        pending["mode"] = "detect_fire"
+        pending["confirm_matched"] = True
+        pending["fire_candle_time"] = close_time
+        pending["pipeline_step"] = 5
+        PENDING_ENTRY_SIGNALS[pair] = pending
+        if tm.get("verdict") == "VETO":
+            if bool(detect.get("weak_score_tenth")) or bool(tm.get("weak_score_tenth")):
+                print(f"[STEP4] weak-score VETO ignored {side} {pair} — force ALLOW")
+                tm = {**tm, "verdict": "ALLOW", "reason": f"weak-score force ALLOW (was VETO: {tm.get('reason')})"}
+            else:
+                _push_pattern_neon(
+                    pair=pair,
+                    candle_time_ms=close_time,
+                    stage="skipped",
+                    side=side,
+                    action=detect.get("action"),
+                    pattern=detect.get("pattern"),
+                    reason=f"Step4 VETO: {tm.get('reason')}",
+                )
+                PENDING_ENTRY_SIGNALS.pop(pair, None)
+                print(f"[STEP4] VETO {side} {pair}: {tm.get('reason')}")
+                return False
+        if tm.get("verdict") == "FLIP" and tm.get("flip_to") in ("BUY", "SELL"):
+            if bool(detect.get("weak_score_tenth")) or bool(tm.get("weak_score_tenth")):
+                flip_to = tm["flip_to"]
+                side = "LONG" if flip_to == "BUY" else "SHORT"
+                detect = dict(detect)
+                detect["action"] = flip_to
+                detect["direction"] = side
+                detect["tenth_man"] = {**tm, "verdict": "ALLOW", "applied_flip": True}
+                PENDING_ENTRY_SIGNALS[pair]["side"] = side
+                PENDING_ENTRY_SIGNALS[pair]["detect"] = detect
+                print(f"[STEP4] weak-score FLIP applied → {side} {pair}")
+                tm = detect["tenth_man"]
+            else:
+                PENDING_ENTRY_SIGNALS.pop(pair, None)
+                print(f"[STEP4] FLIP rescan {pair} → {tm.get('flip_to')}")
+                return False
+        _push_pattern_neon(
+            pair=pair,
+            candle_time_ms=close_time,
+            stage="detected",
+            side=side,
+            action=detect.get("action"),
+            pattern=detect.get("pattern"),
+            reason=(
+                "HTF skip confirm → fire on pattern close"
+                if skips_pattern_confirm(timeframe_key)
+                else detect.get("reason")
+            ),
+        )
+        system_log.push_agent_chat(
+            f"STEP5 fire {side} on {pair}: {detect.get('pattern')} "
+            f"| confirm={'skip' if skips_pattern_confirm(timeframe_key) else 'off'}",
+            status="match",
+            details={
+                "pair": pair,
+                "side": side,
+                "detect_candle": close_time,
+                "policy": "fire_on_detect",
+                "pipeline_step": 5,
+                "step3_confirm": "skip" if skips_pattern_confirm(timeframe_key) else "off",
+            },
+        )
+        return await _fire_on_detect(PENDING_ENTRY_SIGNALS[pair])
+
     resting = PENDING_ENTRY_SIGNALS.get(pair)
     if (
         resting
@@ -6045,10 +6137,12 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     if pending and pending.get("timeframe_key") == timeframe_key:
         mode = pending.get("mode")
         if mode == "momentum_lock":
+            if not _bar_confirm_enabled(timeframe_key):
+                return await _apply_step4_then_fire(pending)
             return await _poll_momentum_lock(pending)
         # Migrate leftover detect/confirm locks once into momentum-lock (or fire if disabled).
         if mode in ("confirm_1m", "confirm_scalp", "detect_fire"):
-            if bool(MOMENTUM_LOCK_ENABLED):
+            if _bar_confirm_enabled(timeframe_key):
                 detect_ms = int(pending.get("signal_candle_time") or 0)
                 pending["mode"] = "momentum_lock"
                 pending["entry_policy"] = "momentum_lock"
@@ -6408,7 +6502,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
     detect["pipeline"] = pipe
     detect["pipeline_step"] = 2
 
-    if bool(MOMENTUM_LOCK_ENABLED):
+    if _bar_confirm_enabled(timeframe_key):
         PENDING_ENTRY_SIGNALS[pair] = {
             "detect": detect,
             "side": side,
@@ -6476,63 +6570,7 @@ async def scan_and_maybe_fire_pair(client: httpx.AsyncClient, pair: str, timefra
         "confirm_matched": True,
         "pipeline_step": 5,
     }
-    # Momentum lock off: still run Step4 before legacy fire
-    tm = tenth_prev if tenth_prev.get("verdict") else {"verdict": "ALLOW", "reason": "legacy path"}
-    if tm.get("verdict") == "VETO":
-        if bool(detect.get("weak_score_tenth")) or bool(tm.get("weak_score_tenth")):
-            print(f"[STEP4] weak-score VETO ignored {side} {pair} — force ALLOW")
-            tm = {**tm, "verdict": "ALLOW", "reason": f"weak-score force ALLOW (was VETO: {tm.get('reason')})"}
-        else:
-            _push_pattern_neon(
-                pair=pair,
-                candle_time_ms=close_time,
-                stage="skipped",
-                side=side,
-                action=detect.get("action"),
-                pattern=detect.get("pattern"),
-                reason=f"Step4 VETO: {tm.get('reason')}",
-            )
-            PENDING_ENTRY_SIGNALS.pop(pair, None)
-            print(f"[STEP4] VETO {side} {pair}: {tm.get('reason')}")
-            return False
-    if tm.get("verdict") == "FLIP" and tm.get("flip_to") in ("BUY", "SELL"):
-        if bool(detect.get("weak_score_tenth")) or bool(tm.get("weak_score_tenth")):
-            flip_to = tm["flip_to"]
-            side = "LONG" if flip_to == "BUY" else "SHORT"
-            detect = dict(detect)
-            detect["action"] = flip_to
-            detect["direction"] = side
-            detect["tenth_man"] = {**tm, "verdict": "ALLOW", "applied_flip": True}
-            PENDING_ENTRY_SIGNALS[pair]["side"] = side
-            PENDING_ENTRY_SIGNALS[pair]["detect"] = detect
-            print(f"[STEP4] weak-score FLIP applied → {side} {pair}")
-            tm = detect["tenth_man"]
-        else:
-            PENDING_ENTRY_SIGNALS.pop(pair, None)
-            print(f"[STEP4] FLIP rescan {pair} → {tm.get('flip_to')}")
-            return False
-    _push_pattern_neon(
-        pair=pair,
-        candle_time_ms=close_time,
-        stage="detected",
-        side=side,
-        action=detect.get("action"),
-        pattern=detect.get("pattern"),
-        reason=detect.get("reason"),
-    )
-    system_log.push_agent_chat(
-        f"STEP5 legacy fire {side} on {pair}: {detect.get('pattern')} "
-        f"| AI={detect.get('ai_confirmation', 'SKIP')}",
-        status="match",
-        details={
-            "pair": pair,
-            "side": side,
-            "detect_candle": close_time,
-            "policy": "fire_on_detect",
-            "pipeline_step": 5,
-        },
-    )
-    return await _fire_on_detect(PENDING_ENTRY_SIGNALS[pair])
+    return await _apply_step4_then_fire(PENDING_ENTRY_SIGNALS[pair])
 
 
 async def auto_buy_loop():

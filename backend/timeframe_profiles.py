@@ -63,8 +63,12 @@ _ALIASES = {
 # Maker limit entry + taker market exit on every chart TF.
 MAKER_ENTRY_TFS = frozenset({"1m", "5m", "15m", "1h", "1D", "30s", "3m", "10m", "30m"})
 
-# Scalp pack: same entry/confirm/OF/fee/weak-score fire policy (1m = 5m = 15m pack).
+# Scalp pack: same entry/OF/fee/weak-score fire policy (1m = 5m = 15m pack).
+# 15m still shares scalp fire, but skips extra-bar pattern confirm (too slow).
 SCALP_TFS = frozenset({"1m", "5m", "30s", "15m"})
+
+# Closed pattern bar is the confirm — waiting 1–2 more same-TF bars is too slow.
+SKIP_PATTERN_CONFIRM_TFS = frozenset({"15m", "1h", "1D"})
 
 
 def _canon_tf(timeframe_key: str | None) -> str:
@@ -79,6 +83,14 @@ def _canon_tf(timeframe_key: str | None) -> str:
 
 def is_scalp_tf(timeframe_key: str | None) -> bool:
     return _canon_tf(timeframe_key).lower() in {k.lower() for k in SCALP_TFS}
+
+
+def skips_pattern_confirm(timeframe_key: str | None) -> bool:
+    """15m / 1h / 1D fire on pattern close; 1m/5m still wait extra confirm bars."""
+    key = _canon_tf(timeframe_key)
+    return key in SKIP_PATTERN_CONFIRM_TFS or key.lower() in {
+        k.lower() for k in SKIP_PATTERN_CONFIRM_TFS
+    }
 
 
 def uses_maker_entry(timeframe_key: str | None) -> bool:
