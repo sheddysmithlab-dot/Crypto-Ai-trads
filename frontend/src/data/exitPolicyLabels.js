@@ -21,7 +21,7 @@ function fmtPct(n) {
 export function exitOverlayFor(tf) {
   const key = String(tf || '1M').toUpperCase();
   if (key === '0S') {
-    return '0S tick · OF ≥ 40 · 7-coin batch · exit-all when P+fees > L+fees';
+    return '0S tick · OF ≥ 40 · 7-coin batch · take net profit · hard −1.0%';
   }
   const row = exitLadderFor(tf);
   const label = String(tf || '1M');

@@ -1,7 +1,10 @@
-"""0s tick batches: 7-coin slices, OF score ≥ 40 taker fire, book exit-all.
+"""0s tick batches: 7-coin slices, OF score ≥ 40 taker fire.
 
 Watchlist remainder (n % 7) is skipped this scan and leads the next slice.
-Exit when winner gross + winner fees > loser abs gross + loser fees.
+Exits (not 1m path SL/TP):
+  - take a trade once it is net green after roundtrip fees
+  - hard-cut a bleed at −1.0% gross (stops a −7% hostage)
+  - if 2+ in the same batch are still open and the leftover book is net > 0, exit-all
 """
 from __future__ import annotations
 
@@ -14,6 +17,10 @@ TICK_TF = "0s"
 TICK_BATCH_SIZE = 7
 TICK_SCORE_MIN = 40.0
 TICK_SCORE_TF = "1m"  # OF score source (Bybit has no 0s kline)
+# Circuit breaker — not the 1m −0.50/−0.70 trail.
+TICK_HARD_LOSS_PCT = 1.0
+# Scratch filter: must clear fees by at least this many USD.
+TICK_MIN_NET_USD = 0.01
 
 
 def slice_watchlist(
@@ -88,23 +95,33 @@ def _roundtrip_fees_usd(agent: Any, trade: dict) -> tuple[float, float]:
     return gross, entry_fee + est_exit
 
 
+def tick_trade_exit_reason(agent: Any, trade: dict) -> str | None:
+    """Per-trade 0s exit: net TP after fees, or −1% hard cut."""
+    gross, fees = _roundtrip_fees_usd(agent, trade)
+    m = agent._trade_metrics(trade, for_close=False)
+    try:
+        gross_pct = float(m.get("gross_pct") or 0)
+    except (TypeError, ValueError):
+        gross_pct = 0.0
+    if gross_pct <= -TICK_HARD_LOSS_PCT + 1e-9:
+        return (
+            f"TICK_HARD_STOP | {gross_pct:.2f}% <= -{TICK_HARD_LOSS_PCT:.2f}%"
+        )
+    net = gross - fees
+    if net > TICK_MIN_NET_USD:
+        return f"TICK_NET_TP | net ${net:.2f} after fees ({gross_pct:+.2f}%)"
+    return None
+
+
 def book_should_exit(agent: Any, trades: list[dict]) -> bool:
-    """P + Fp > L + Fl on the batch book (open marks + estimated exit fees)."""
-    if len(trades) < TICK_BATCH_SIZE:
+    """Leftover batch is net green after estimated roundtrip fees."""
+    if len(trades) < 2:
         return False
-    profit = 0.0
-    fee_win = 0.0
-    lose = 0.0
-    fee_lose = 0.0
+    net = 0.0
     for t in trades:
         gross, fees = _roundtrip_fees_usd(agent, t)
-        if gross > 0:
-            profit += gross
-            fee_win += fees
-        else:
-            lose += abs(gross)
-            fee_lose += fees
-    return (profit + fee_win) > (lose + fee_lose)
+        net += gross - fees
+    return net > TICK_MIN_NET_USD
 
 
 def prune_finished_batches(agent: Any) -> None:
@@ -162,32 +179,53 @@ def ensure_assigned_batches(agent: Any, scan_pairs: list[str]) -> list[tuple[str
     return out
 
 
+def _is_open_tick(trade: dict) -> bool:
+    if not trade or trade.get("source") == "manual":
+        return False
+    return bool(
+        is_tick_tf(trade.get("timeframe_key"))
+        or trade.get("exit_mode") == "tick_batch"
+    )
+
+
 def close_tick_batches_if_ready(agent: Any) -> int:
-    """Market-exit every trade in a 7-fill batch when P+Fp > L+Fl."""
+    """Take net-green ticks, hard-cut bleeds, then sweep a leftover green book."""
+    close_ids: set = set()
+    closed_n = 0
+
+    def _close(trade: dict, reason: str) -> None:
+        nonlocal closed_n
+        metrics = agent._trade_metrics(trade)
+        if agent._close_single_trade(trade, metrics, reason):
+            closed_n += 1
+            close_ids.add(trade.get("id"))
+            print(f"[0S TICK] {reason} #{trade.get('id')} {trade.get('pair')}")
+
+    for trade in list(getattr(agent, "trades", []) or []):
+        if not _is_open_tick(trade):
+            continue
+        reason = tick_trade_exit_reason(agent, trade)
+        if reason:
+            _close(trade, reason)
+
     groups: dict[str, list[dict]] = {}
     for t in list(getattr(agent, "trades", []) or []):
-        if t.get("source") == "manual":
-            continue
-        if not is_tick_tf(t.get("timeframe_key")):
+        if t.get("id") in close_ids or not _is_open_tick(t):
             continue
         bid = t.get("batch_id")
         if not bid:
             continue
         groups.setdefault(str(bid), []).append(t)
-    close_ids: set = set()
-    closed_n = 0
+
     for bid, group in groups.items():
-        if len(group) < TICK_BATCH_SIZE:
-            continue
         if not book_should_exit(agent, group):
             continue
-        reason = f"TICK_BATCH_BOOK_EXIT | {bid} | P+Fp > L+Fl"
+        reason = f"TICK_BATCH_BOOK_EXIT | {bid} | leftover net > 0"
         for trade in group:
-            metrics = agent._trade_metrics(trade)
-            if agent._close_single_trade(trade, metrics, reason):
-                closed_n += 1
-                close_ids.add(trade.get("id"))
-                print(f"[0S TICK] {reason} #{trade.get('id')} {trade.get('pair')}")
+            if trade.get("id") in close_ids:
+                continue
+            _close(trade, reason)
+
     if closed_n:
         agent.trades = [t for t in agent.trades if t.get("id") not in close_ids]
         prune_finished_batches(agent)

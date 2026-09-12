@@ -47,10 +47,10 @@ TIMEFRAME_PROFILES: dict[str, dict] = {
         "win_rate": 65, "lose_rate": 35, "capital_pct": 9.0,
         "profit": 1.25, "trail": 0.22, "soft": 1.25, "hard": 1.70,
     },
-    # Tick mode: size only. Per-trade ladder unused (batch book exit).
+    # Tick mode: size 0.5%. Exits in tick_batch.py (net TP + −1% hard, not 1m path).
     "0s": {
         "win_rate": 20, "lose_rate": 80, "capital_pct": 0.5,
-        "profit": 0.0, "trail": 0.0, "soft": 0.0, "hard": 0.0,
+        "profit": 0.0, "trail": 0.0, "soft": 0.0, "hard": 1.00,
     },
 }
 

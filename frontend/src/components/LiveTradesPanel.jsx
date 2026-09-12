@@ -150,6 +150,8 @@ function grossColor(trade) {
 
 function exitReasonLabel(reason) {
   const raw = String(reason || '');
+  if (raw.includes('TICK_NET_TP')) return 'Tick net profit';
+  if (raw.includes('TICK_HARD_STOP')) return 'Tick hard stop';
   if (raw.includes('TICK_BATCH_BOOK_EXIT')) return 'Batch book exit';
   if (raw.includes('PROFIT_LOCK')) return 'Profit book';
   if (raw.includes('LOSS_BAND')) return 'Hard stop';
@@ -235,8 +237,8 @@ function pathExitHint(trade) {
   if (!trade || trade.status === 'sold') return null;
   if (isTickBatchTrade(trade)) {
     return trade.batch_id
-      ? `0S batch ${trade.batch_id} · exit-all when P+fees > L+fees`
-      : '0S batch · exit-all when P+fees > L+fees';
+      ? `0S ${trade.batch_id} · take net profit · hard −1.0%`
+      : '0S · take net profit · hard −1.0%';
   }
   if (trade.status === 'locked' && trade.sell_trigger_pct != null) {
     return `exit ≤ +${Number(trade.sell_trigger_pct).toFixed(2)}%`;

@@ -47,7 +47,7 @@ export default function ChartPanel({
               className="flex items-center gap-1.5 px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-[10px] font-bold uppercase tracking-wide text-cyan-300"
               title={
                 timeframe === '0S'
-                  ? '0S tick · 7-coin batches · OF score ≥ 40 · book exit-all (P+fees > L+fees)'
+                  ? '0S tick · 7-coin batches · OF ≥ 40 · take net profit · hard −1.0%'
                   : timeframe === '1M' || timeframe === '5M' || timeframe === '15M' || timeframe === '1H' || timeframe === '1D'
                   ? `Maker entry + TF ladder — brain + order-flow + ${EXIT_POLICY_SHORT}`
                   : 'Unified candle brain engine'
