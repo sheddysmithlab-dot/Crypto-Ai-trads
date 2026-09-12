@@ -80,6 +80,24 @@ def pair_has_open_tick(agent: Any, pair: str) -> bool:
     return False
 
 
+def pair_used_in_batch(agent: Any, pair: str, batch_id: str) -> bool:
+    """One fill per coin per batch — do not re-fire after TP/hard-stop."""
+    want = (pair or "").strip()
+    bid = str(batch_id or "")
+    if not want or not bid:
+        return False
+    for t in list(getattr(agent, "trades", []) or []) + list(
+        getattr(agent, "trade_history", []) or []
+    ):
+        if not is_tick_tf(t.get("timeframe_key")):
+            continue
+        if (t.get("pair") or "").strip() != want:
+            continue
+        if str(t.get("batch_id") or "") == bid:
+            return True
+    return False
+
+
 def _roundtrip_fees_usd(agent: Any, trade: dict) -> tuple[float, float]:
     """(gross_usd, entry_fee + estimated taker exit)."""
     m = agent._trade_metrics(trade, for_close=False)
@@ -256,6 +274,8 @@ async def run_tick_scan(client: Any, agent: Any) -> None:
     for batch_id, coins in work:
         for pair in coins:
             if pair_has_open_tick(agent, pair):
+                continue
+            if pair_used_in_batch(agent, pair, batch_id):
                 continue
             bybit_symbol = get_bybit_symbol(pair)
             if not bybit_symbol:
