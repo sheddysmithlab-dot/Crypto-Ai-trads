@@ -150,6 +150,7 @@ function grossColor(trade) {
 
 function exitReasonLabel(reason) {
   const raw = String(reason || '');
+  if (raw.includes('TICK_BATCH_BOOK_EXIT')) return 'Batch book exit';
   if (raw.includes('PROFIT_LOCK')) return 'Profit book';
   if (raw.includes('LOSS_BAND')) return 'Hard stop';
   if (raw.includes('LOSS_RECOVERY')) return 'Loss trail';
@@ -225,8 +226,18 @@ function slLockOn(trade) {
   return Boolean(trade.loss_protect || trade.is_stop_active || trade.status === 'sl_lock');
 }
 
+function isTickBatchTrade(trade) {
+  const tf = String(trade?.timeframe_key || '').toLowerCase();
+  return tf === '0s' || trade?.exit_mode === 'tick_batch';
+}
+
 function pathExitHint(trade) {
   if (!trade || trade.status === 'sold') return null;
+  if (isTickBatchTrade(trade)) {
+    return trade.batch_id
+      ? `0S batch ${trade.batch_id} · exit-all when P+fees > L+fees`
+      : '0S batch · exit-all when P+fees > L+fees';
+  }
   if (trade.status === 'locked' && trade.sell_trigger_pct != null) {
     return `exit ≤ +${Number(trade.sell_trigger_pct).toFixed(2)}%`;
   }
@@ -317,6 +328,11 @@ function TradeRowDesktop({ trade, onRequestClose, onSelectTrade }) {
       </td>
       <td className="px-3 py-1.5 font-mono text-[10px] text-gray-400 whitespace-nowrap">
         {trade.timeframe_key || '—'}
+        {trade.batch_id ? (
+          <span className="ml-1 text-[8px] text-cyan-400/80 font-normal" title={trade.batch_id}>
+            · {String(trade.batch_id).split('-').slice(-2).join('-')}
+          </span>
+        ) : null}
       </td>
       <td className={`px-3 py-1.5 font-bold text-[10px] whitespace-nowrap ${fillClass}`} title="Entry liquidity">
         {fill}
@@ -431,7 +447,10 @@ function TradeRowMobile({ trade, onSelectTrade, onRequestClose }) {
             Value: {formatTradeValue(trade)}
           </div>
           <div className="text-[9px] text-gray-400 font-mono mt-0.5">
-            {trade.timeframe_key || '—'} · {fillLabel(trade)}
+            {trade.timeframe_key || '—'}
+            {trade.batch_id ? ` · ${String(trade.batch_id).split('-').slice(-2).join('-')}` : ''}
+            {' · '}
+            {fillLabel(trade)}
           </div>
           <div className="text-[9px] text-red-400 font-mono mt-0.5">
             Entry fee {formatFeeCell(trade.entry_fee_usd, trade.entry_fee_pct)}

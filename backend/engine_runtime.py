@@ -43,6 +43,15 @@ def _safe_trade(t: dict) -> dict:
     return out
 
 
+def _tf_seconds_persist(agent: Any) -> int:
+    """Keep 0 (tick mode). `or 60` would collapse 0s back to 1m."""
+    raw = getattr(agent, "timeframe_seconds", 60)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 60
+
+
 def dump_runtime(agent: Any, *, pattern_neon: list | None = None) -> dict:
     out = {
         "version": 1,
@@ -59,7 +68,10 @@ def dump_runtime(agent: Any, *, pattern_neon: list | None = None) -> dict:
         "freeze_reason": getattr(agent, "freeze_reason", None),
         "active_pair": getattr(agent, "active_pair", "BTC/USDT"),
         "watchlist": list(getattr(agent, "watchlist", []) or []),
-        "timeframe_seconds": int(getattr(agent, "timeframe_seconds", 60) or 60),
+        "timeframe_seconds": _tf_seconds_persist(agent),
+        "tick_batch_cursor": int(getattr(agent, "tick_batch_cursor", 0) or 0),
+        "tick_batch_seq": int(getattr(agent, "tick_batch_seq", 0) or 0),
+        "tick_assigned_batches": dict(getattr(agent, "tick_assigned_batches", {}) or {}),
         "trade_seq": int(getattr(agent, "trade_seq", 0) or 0),
         "trades": [_safe_trade(t) for t in (getattr(agent, "trades", []) or [])],
         "trade_history": [
@@ -147,9 +159,30 @@ def restore_runtime(agent: Any) -> dict:
             agent.watchlist = [str(p) for p in data["watchlist"] if p]
         if isinstance(data.get("momentum_fire_pairs"), list):
             agent.momentum_fire_pairs = [str(p) for p in data["momentum_fire_pairs"] if p]
-        if data.get("timeframe_seconds"):
-            agent.timeframe_seconds = int(data["timeframe_seconds"])
-            print(f"[ENGINE RUNTIME] Restored timeframe_seconds={agent.timeframe_seconds}")
+        if "timeframe_seconds" in data and data.get("timeframe_seconds") is not None:
+            try:
+                agent.timeframe_seconds = int(data["timeframe_seconds"])
+                print(f"[ENGINE RUNTIME] Restored timeframe_seconds={agent.timeframe_seconds}")
+            except (TypeError, ValueError):
+                pass
+        if data.get("tick_batch_cursor") is not None:
+            try:
+                agent.tick_batch_cursor = int(data["tick_batch_cursor"] or 0)
+            except (TypeError, ValueError):
+                agent.tick_batch_cursor = 0
+        if data.get("tick_batch_seq") is not None:
+            try:
+                agent.tick_batch_seq = int(data["tick_batch_seq"] or 0)
+            except (TypeError, ValueError):
+                agent.tick_batch_seq = 0
+        assigned = data.get("tick_assigned_batches")
+        if isinstance(assigned, dict):
+            cleaned = {}
+            for bid, pairs in assigned.items():
+                if not bid or not isinstance(pairs, list):
+                    continue
+                cleaned[str(bid)] = [str(p) for p in pairs if p]
+            agent.tick_assigned_batches = cleaned
         if data.get("trade_seq") is not None:
             agent.trade_seq = max(int(agent.trade_seq or 0), int(data["trade_seq"] or 0))
 

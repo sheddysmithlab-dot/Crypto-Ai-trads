@@ -1,6 +1,7 @@
 /** Shared exit-policy copy — matches backend TF ladder (timeframe_profiles.py). */
 
 export const EXIT_LADDER = {
+  '0S': { profit: 0, trail: 0, soft: 0, hard: 0, capitalPct: 0.5 },
   '1M': { profit: 0.5, trail: 0.1, soft: 0.5, hard: 0.7, capitalPct: 1.5 },
   '5M': { profit: 0.7, trail: 0.15, soft: 0.7, hard: 1.0, capitalPct: 3 },
   '15M': { profit: 1.0, trail: 0.2, soft: 1.0, hard: 1.4, capitalPct: 7 },
@@ -18,28 +19,31 @@ function fmtPct(n) {
 }
 
 export function exitOverlayFor(tf) {
+  const key = String(tf || '1M').toUpperCase();
+  if (key === '0S') {
+    return '0S tick · OF ≥ 40 · 7-coin batch · exit-all when P+fees > L+fees';
+  }
   const row = exitLadderFor(tf);
   const label = String(tf || '1M');
   return (
-    `${label} momentum-lock maker · profit +${fmtPct(row.profit)} trail ${fmtPct(row.trail)} · ` +
+    `${label} maker entry · profit +${fmtPct(row.profit)} trail ${fmtPct(row.trail)} · ` +
     `SL −${fmtPct(row.soft)} hard −${fmtPct(row.hard)}`
   );
 }
 
 export const EXIT_POLICY_SHORT =
-  'momentum-lock maker entry / taker exit · 1m +0.50/0.10/−0.70 size 1.5% · 5m +0.70/0.15/−1.00 · 15m +1.00/0.20/−1.40 size 7% · 1h +1.50/0.25/−2.00 · 1D +2.50/0.40/−3.00';
+  'maker entry / taker exit · 1m +0.50/0.10/−0.70 · 5m +0.70/0.15/−1.00 · 15m +1.00/0.20/−1.40 · 1h +1.50/0.25/−2.00 · 1D +2.50/0.40/−3.00';
 
 export const EXIT_POLICY_CHART_OVERLAY = exitOverlayFor('1M');
 
 export const EXIT_POLICY_SYSTEM_LOG =
-  'All TF momentum-lock maker entry (≤2 bars after detect, color+impulse ≥0.09% → trail% pullback); exit market/taker. ' +
+  'All TF entry maker limit (post-only); exit market/taker. ' +
   'Ladder: 1m profit +0.50 trail 0.10 soft −0.50 hard −0.70 size 1.5% · ' +
-  '5m +0.70/0.15/−0.70/−1.00 size 3% · ' +
-  '15m +1.00/0.20/−1.00/−1.40 size 7% · ' +
+  '5m +0.70/0.15/−0.70/−1.00 size 3% · 15m +1.00/0.20/−1.00/−1.40 size 7% · ' +
   '1h +1.50/0.25/−1.50/−2.00 size 12% · 1D +2.50/0.40/−2.50/−3.00 size 20%.';
 
 export const EXIT_POLICY_MODAL =
-  'Momentum-lock maker entry + taker exit. 15m fire policy matches 1m scalp; exit ladder stays wider. ' +
+  'Maker entry + taker exit on every TF. Size and stops widen 1m < 5m < 15m < 1h < 1D. ' +
   '1m +0.50 trail 0.10 soft −0.50 hard −0.70 size 1.5%. ' +
   '5m +0.70 / 0.15 / −0.70 / −1.00 / 3%. ' +
   '15m +1.00 / 0.20 / −1.00 / −1.40 / 7%. ' +

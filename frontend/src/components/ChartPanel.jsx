@@ -6,7 +6,7 @@ import { TIMEFRAME_PROFILES, getTimeframeProfile } from '../data/timeframeProfil
 import { EXIT_POLICY_SHORT, exitOverlayFor } from '../data/exitPolicyLabels';
 import { formatTfMoveLabel } from '../hooks/useTfMoveStats';
 
-const TIMEFRAMES = ['1M', '5M', '15M', '1H', '1D'];
+const TIMEFRAMES = ['0S', '1M', '5M', '15M', '1H', '1D'];
 
 export default function ChartPanel({
   pairSelector,
@@ -46,7 +46,9 @@ export default function ChartPanel({
             <div
               className="flex items-center gap-1.5 px-2 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-[10px] font-bold uppercase tracking-wide text-cyan-300"
               title={
-                timeframe === '1M' || timeframe === '5M' || timeframe === '15M' || timeframe === '1H' || timeframe === '1D'
+                timeframe === '0S'
+                  ? '0S tick · 7-coin batches · OF score ≥ 40 · book exit-all (P+fees > L+fees)'
+                  : timeframe === '1M' || timeframe === '5M' || timeframe === '15M' || timeframe === '1H' || timeframe === '1D'
                   ? `Maker entry + TF ladder — brain + order-flow + ${EXIT_POLICY_SHORT}`
                   : 'Unified candle brain engine'
               }

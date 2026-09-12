@@ -36,14 +36,29 @@ import {
 // Timeframe -> candle interval in seconds. Drives BOTH historical bucketing
 // and live WebSocket tick bucketing so the chart genuinely reacts to the
 // selected timeframe (not just a cosmetic label change).
-const TIMEFRAME_SECONDS = { '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 86400 };
-const SECONDS_TO_TIMEFRAME = { 60: '1M', 300: '5M', 900: '15M', 3600: '1H', 86400: '1D' };
+const TIMEFRAME_SECONDS = { '0S': 0, '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 86400 };
+const SECONDS_TO_TIMEFRAME = { 0: '0S', 60: '1M', 300: '5M', 900: '15M', 3600: '1H', 86400: '1D' };
 const CHART_TIMEFRAME_STORAGE_KEY = 'ai_trading_bot_chart_timeframe';
+
+function hasChartTf(tf) {
+  return Object.prototype.hasOwnProperty.call(TIMEFRAME_SECONDS, tf);
+}
+
+/** Candle bucket for the chart. 0S is tick mode — backdrop is 1m klines. */
+function chartIntervalSecs(tfKey) {
+  const s = TIMEFRAME_SECONDS[tfKey];
+  if (s === 0) return 60;
+  return Number.isFinite(s) && s > 0 ? s : 3600;
+}
+
+function engineSecondsForTf(tf) {
+  return hasChartTf(tf) ? TIMEFRAME_SECONDS[tf] : 60;
+}
 
 function readStoredTimeframe() {
   try {
     const saved = localStorage.getItem(CHART_TIMEFRAME_STORAGE_KEY);
-    if (saved && TIMEFRAME_SECONDS[saved]) return saved;
+    if (saved && hasChartTf(saved)) return saved;
   } catch {
     /* private browsing / storage blocked */
   }
@@ -57,7 +72,7 @@ function timeframeFromSeconds(seconds) {
 }
 
 // Standard kline granularities on each exchange (1M and above).
-const BYBIT_KLINE_INTERVAL = { '1M': '1', '5M': '5', '15M': '15', '1H': '60', '1D': 'D' };
+const BYBIT_KLINE_INTERVAL = { '0S': '1', '1M': '1', '5M': '5', '15M': '15', '1H': '60', '1D': 'D' };
 
 const MA_PERIODS = [5, 10, 20, 30];
 const MA_COLORS = { 5: '#facc15', 10: '#ec4899', 20: '#38bdf8', 30: '#a855f7' };
@@ -159,7 +174,7 @@ async function fetchBackend24hCandles(pairLabelArg) {
 
 async function loadHistoricalData(pairLabelArg, tfKey, basePrice) {
   const bybitSymbol = getBybitSymbol(pairLabelArg);
-  const intervalSecs = TIMEFRAME_SECONDS[tfKey] || 3600;
+  const intervalSecs = chartIntervalSecs(tfKey);
   const bybitKline = BYBIT_KLINE_INTERVAL[tfKey];
 
   if (!bybitSymbol) {
@@ -474,7 +489,7 @@ export function useTradingChart({
   const mockDataRef = useRef([]);
   const entryPriceRef = useRef(pairPrice);
   const initialTimeframe = readStoredTimeframe();
-  const currentIntervalRef = useRef(TIMEFRAME_SECONDS[initialTimeframe] || 60);
+  const currentIntervalRef = useRef(chartIntervalSecs(initialTimeframe));
   const tradingModeRef = useRef(null);
   const freeSourceWsRef = useRef(null);
   const pairLabelRef = useRef(pairLabel);
@@ -1150,10 +1165,10 @@ export function useTradingChart({
 
   const switchTimeframe = useCallback(
     (tf, { persistBackend = true } = {}) => {
-      if (!tf || !TIMEFRAME_SECONDS[tf]) return;
+      if (!hasChartTf(tf)) return;
       setTimeframe(tf);
       timeframeRef.current = tf;
-      currentIntervalRef.current = TIMEFRAME_SECONDS[tf] || 3600;
+      currentIntervalRef.current = chartIntervalSecs(tf);
       const timeScaleOpts = buildTimeScaleOptions(currentIntervalRef.current);
       chartRef.current?.applyOptions({ timeScale: { ...darkThemeConfig.timeScale, ...timeScaleOpts } });
       volumeChartRef.current?.applyOptions({ timeScale: timeScaleOpts });
@@ -1170,7 +1185,7 @@ export function useTradingChart({
         authFetch('/set-timeframe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ seconds: TIMEFRAME_SECONDS[tf] || 60 }),
+          body: JSON.stringify({ seconds: engineSecondsForTf(tf) }),
         }).catch((err) => console.warn('set-timeframe sync failed:', err));
       }
 

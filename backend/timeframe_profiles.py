@@ -47,6 +47,11 @@ TIMEFRAME_PROFILES: dict[str, dict] = {
         "win_rate": 65, "lose_rate": 35, "capital_pct": 9.0,
         "profit": 1.25, "trail": 0.22, "soft": 1.25, "hard": 1.70,
     },
+    # Tick mode: size only. Per-trade ladder unused (batch book exit).
+    "0s": {
+        "win_rate": 20, "lose_rate": 80, "capital_pct": 0.5,
+        "profit": 0.0, "trail": 0.0, "soft": 0.0, "hard": 0.0,
+    },
 }
 
 _DEFAULT = {
@@ -57,6 +62,7 @@ _DEFAULT = {
 _ALIASES = {
     "1M": "1m", "5M": "5m", "15M": "15m", "1H": "1h", "1D": "1D",
     "3M": "3m", "30M": "30m", "30S": "30s", "10M": "10m",
+    "0S": "0s", "0s": "0s",
     "1h": "1h", "1d": "1D",
 }
 
@@ -82,6 +88,11 @@ def _canon_tf(timeframe_key: str | None) -> str:
 
 def is_scalp_tf(timeframe_key: str | None) -> bool:
     return _canon_tf(timeframe_key).lower() in {k.lower() for k in SCALP_TFS}
+
+
+def is_tick_tf(timeframe_key: str | None) -> bool:
+    """0s ticker batches — not a candle TF, not scalp/maker pack."""
+    return _canon_tf(timeframe_key).lower() == "0s"
 
 
 def skips_pattern_confirm(timeframe_key: str | None) -> bool:

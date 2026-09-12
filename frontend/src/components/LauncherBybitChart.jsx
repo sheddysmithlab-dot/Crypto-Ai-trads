@@ -9,8 +9,8 @@ import {
 import { BYBIT_SYMBOL_MAP, fmtNum, getBybitSymbol } from '../data/pairs';
 import { sanitizeCandleData } from '../utils/chartCandles';
 
-const TF_INTERVAL = { '1M': '1', '5M': '5', '15M': '15', '1H': '60', '1D': 'D' };
-const TF_SECONDS = { '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 86400 };
+const TF_INTERVAL = { '0S': '1', '1M': '1', '5M': '5', '15M': '15', '1H': '60', '1D': 'D' };
+const TF_SECONDS = { '0S': 60, '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '1D': 86400 };
 const VISIBLE_TAIL = 60;
 
 /**

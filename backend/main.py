@@ -96,9 +96,11 @@ from timeframe_profiles import (
     get_exit_ladder,
     get_timeframe_profile,
     is_scalp_tf,
+    is_tick_tf,
     skips_pattern_confirm,
     uses_maker_entry,
 )
+from tick_batch import TICK_BATCH_SIZE, close_tick_batches_if_ready, run_tick_scan
 
 # Load backend/.env before any credential reads (cwd-safe path).
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -1259,7 +1261,11 @@ class AITradingAgent:
         self.trade_history = []  # session list (active + sold), cleared only on START/STOP
 
         # Chart timeframe — shared by all watchlist pairs in auto_buy_loop().
+        # 0 = 0s tick batches (not a candle interval).
         self.timeframe_seconds = 60
+        self.tick_batch_cursor = 0
+        self.tick_batch_seq = 0
+        self.tick_assigned_batches: dict[str, list[str]] = {}
 
     # Cap = every mapped Bybit pair (frontend TRADING_PAIRS / BYBIT_SYMBOL_MAP).
     MAX_WATCHLIST = 32
@@ -1556,6 +1562,7 @@ class AITradingAgent:
             "pattern": trade.get("pattern"),
             "opened_at": trade.get("opened_at"),
             "timeframe_key": trade.get("timeframe_key"),
+            "batch_id": trade.get("batch_id"),
             "exchange": trade.get("exchange"),
             "season_id": trade.get("season_id") or self.ai_season_id,
         })
@@ -1641,6 +1648,7 @@ class AITradingAgent:
                 row["closed_reason"] = reason
                 row["closed_at"] = time.time()
                 row["exit_candle_time"] = exit_ms
+                row["batch_id"] = trade.get("batch_id")
                 found = True
                 break
         if not found:
@@ -1674,6 +1682,7 @@ class AITradingAgent:
                 "exchange": trade.get("exchange"),
                 "pattern": trade.get("pattern"),
                 "timeframe_key": trade.get("timeframe_key"),
+                "batch_id": trade.get("batch_id"),
             })
         try:
             _push_pattern_neon(
@@ -2125,7 +2134,7 @@ class AITradingAgent:
             seconds = int(seconds)
         except (TypeError, ValueError):
             return
-        if seconds <= 0:
+        if seconds < 0:
             return
         if self.timeframe_seconds == seconds:
             # Still checkpoint so preferred TF is on disk even if unchanged.
@@ -2165,6 +2174,7 @@ class AITradingAgent:
         brain_verdict=None,
         train_context=None,
         entry_liquidity=None,
+        batch_id=None,
     ):
         """ RULE 1: Opens a position as a Market Order (RULE 7) with simulated minor slippage.
         Manual entries default to 1% margin x 100x leverage. Auto entries pass
@@ -2309,14 +2319,17 @@ class AITradingAgent:
                 resolved_family = None
 
         # Manual: keep SL+TP from signal when provided.
-        # Auto: path SL/TP; pilot families may override % from family_engine_rules.
+        # Auto: path SL/TP; 0s tick uses 7-coin book exit only (no per-trade SL/TP).
         clean_sl = None
         clean_tp = None
         # Probe loss tier from filled entry (trade dict not built yet).
         _probe = {"entry": filled_price, "timeframe_key": tf_key}
         trail_pct, arm_pct, band_pct, _is_small, _tier = self._loss_policy_for_trade(_probe)
         lock_start = self._profit_lock_start_pct(_probe)
-        if source == "auto":
+        if source == "auto" and is_tick_tf(tf_key):
+            clean_sl = None
+            clean_tp = None
+        elif source == "auto":
             loss_pct = arm_pct
             profit_pct = lock_start
             try:
@@ -2387,7 +2400,12 @@ class AITradingAgent:
             "capital_reserved": capital_reserved,
             "season_id": self.ai_season_id,
             "timeframe_key": tf_key,
-            "exit_mode": "path_sl" if source == "auto" else "manual",
+            "batch_id": batch_id,
+            "exit_mode": (
+                "tick_batch" if (source == "auto" and is_tick_tf(tf_key))
+                else "path_sl" if source == "auto"
+                else "manual"
+            ),
             "entry_pattern": ENTRY_PATTERN_NAME,
             # Path SL + profit lock/trail state (auto):
             #   1m: profit arm +0.50% trail −0.10%; SL soft −0.50% trail 0.10% hard −0.70%
@@ -2644,6 +2662,7 @@ class AITradingAgent:
 
         if AUTO_TRADE_AUTO_EXIT_ENABLED:
             self._run_auto_exits()
+            close_tick_batches_if_ready(self)
 
         self._sync_agent_trailing_lock_state()
 
@@ -2762,6 +2781,8 @@ class AITradingAgent:
 
     def _update_path_sl_state(self, trade: dict, gross_pct: float, mark: float | None = None) -> None:
         """Update profit/loss protect UI levels for open trades."""
+        if is_tick_tf(trade.get("timeframe_key")) or trade.get("exit_mode") == "tick_batch":
+            return
         trail_pct, arm_pct, band_pct, _is_small, _tier = self._loss_policy_for_trade(trade)
         if trade.get("path_seeded") is not True:
             trade["path_last_gross_pct"] = gross_pct
@@ -2962,6 +2983,8 @@ class AITradingAgent:
         LONG/SHORT symmetric on gross %. Fees stay out of the trigger.
         """
         trade.pop("_exit_fill_mark", None)
+        if is_tick_tf(trade.get("timeframe_key")) or trade.get("exit_mode") == "tick_batch":
+            return None
         entry = float(trade.get("entry") or 0)
         if entry <= 0:
             return None
@@ -3184,6 +3207,7 @@ class AITradingAgent:
 
         Path lock/trail/emergency exits are unchanged; this only runs on opposite
         auto-entry fire. Manual positions are never touched.
+        0s tick trades stay in the 7-coin book — never flip-close one-off.
         """
         opposite = "SHORT" if side == "LONG" else "LONG"
         opposites = [
@@ -3192,6 +3216,8 @@ class AITradingAgent:
             if t.get("source") == "auto"
             and t.get("pair") == pair
             and t.get("side") == opposite
+            and not is_tick_tf(t.get("timeframe_key"))
+            and t.get("exit_mode") != "tick_batch"
         ]
         if not opposites:
             return "none"
@@ -3536,6 +3562,7 @@ class AITradingAgent:
         self.momentum_scan_total = 0
         self.momentum_scan_stage = "starting"
         self.last_momentum_candle_ms = 0
+        self.tick_assigned_batches = {}
         # Seed cursor on next scan so already-closed history is not traded as fresh detects.
         _reset_scan_candle_baseline()
         print(
@@ -3938,6 +3965,7 @@ def min_lot_qty(bybit_symbol: str | None) -> float | None:
 # Chart timeframe (seconds) → UVSS key → Bybit kline interval.
 # Frontend: 1M/5M/15M/1H/1D. Bybit has no native 30s/10m (fallbacks below).
 SECONDS_TO_TIMEFRAME_KEY = {
+    0: "0s",
     30: "30s",
     60: "1m",
     300: "5m",
@@ -3947,7 +3975,7 @@ SECONDS_TO_TIMEFRAME_KEY = {
 }
 
 TIMEFRAME_KEY_TO_BYBIT_KLINE = {
-    "30s": "1", "1m": "1", "3m": "3", "5m": "5", "10m": "5",
+    "0s": "1", "30s": "1", "1m": "1", "3m": "3", "5m": "5", "10m": "5",
     "15m": "15", "30m": "30", "1h": "60", "1D": "D",
 }
 
@@ -4044,6 +4072,7 @@ def _pattern_is_trade_skipped(detect: dict | None) -> str | None:
 
 def _timeframe_interval_ms(timeframe_key: str) -> int:
     seconds = {
+        "0s": 1,
         "30s": 30,
         "1m": 60,
         "3m": 180,
@@ -4773,6 +4802,20 @@ def concurrent_entry_blocked(agent, pair: str) -> str | None:
     ).strip().lower()
     open_n = len(getattr(agent, "trades", None) or [])
     user_max = effective_max_concurrent_trades(agent)
+
+    if is_tick_tf(tf):
+        tick_on_pair = sum(
+            1
+            for t in (getattr(agent, "trades", None) or [])
+            if is_tick_tf(t.get("timeframe_key"))
+            and (t.get("pair") or "").strip().upper() == (pair or "").strip().upper()
+        )
+        if tick_on_pair >= 1:
+            return f"0s already open on {pair}"
+        abs_cap = max(user_max, TICK_BATCH_SIZE * 8)
+        if open_n >= abs_cap:
+            return f"Max concurrent trades ({abs_cap}) reached"
+        return None
 
     if is_scalp_tf(tf):
         n = count_open_trades_for_pair(agent, pair)
@@ -6604,20 +6647,27 @@ async def auto_buy_loop():
                         and getattr(agent, "one_m_fee_hold", False)
                         and is_scalp_tf(timeframe_key)
                     )
-                    fire_pairs = list(agent.get_scan_pairs())
-                    pending_keys = [
-                        p
-                        for p, pend in PENDING_ENTRY_SIGNALS.items()
-                        if pend.get("timeframe_key") == timeframe_key
-                    ]
-                    pending_first = [p for p in pending_keys if p in PENDING_ENTRY_SIGNALS]
-                    rest = [] if frozen else [p for p in fire_pairs if p not in PENDING_ENTRY_SIGNALS]
-                    scan_list = pending_first + rest
-                    for pair in scan_list:
-                        try:
-                            await scan_and_maybe_fire_pair(client, pair, timeframe_key)
-                        except Exception as exc:
-                            print(f"[SCAN] error {pair}: {exc}")
+                    if is_tick_tf(timeframe_key):
+                        if not frozen:
+                            try:
+                                await run_tick_scan(client, agent)
+                            except Exception as exc:
+                                print(f"[0S TICK] scan error: {exc}")
+                    else:
+                        fire_pairs = list(agent.get_scan_pairs())
+                        pending_keys = [
+                            p
+                            for p, pend in PENDING_ENTRY_SIGNALS.items()
+                            if pend.get("timeframe_key") == timeframe_key
+                        ]
+                        pending_first = [p for p in pending_keys if p in PENDING_ENTRY_SIGNALS]
+                        rest = [] if frozen else [p for p in fire_pairs if p not in PENDING_ENTRY_SIGNALS]
+                        scan_list = pending_first + rest
+                        for pair in scan_list:
+                            try:
+                                await scan_and_maybe_fire_pair(client, pair, timeframe_key)
+                            except Exception as exc:
+                                print(f"[SCAN] error {pair}: {exc}")
                     agent.persist_runtime()
                 await asyncio.sleep(poll)
             except Exception as exc:
@@ -6770,6 +6820,7 @@ async def auto_exit_watchdog():
         try:
             if AUTO_TRADE_AUTO_EXIT_ENABLED and agent.trades:
                 n = agent._run_auto_exits()
+                n += close_tick_batches_if_ready(agent)
                 if n:
                     agent._sync_agent_trailing_lock_state()
         except Exception as exc:
@@ -7245,7 +7296,7 @@ async def bot_status():
         "pair": agent.active_pair,
         "watchlist": list(agent.watchlist or []),
         "scan_pairs": agent.get_scan_pairs(),
-        "timeframe_seconds": int(agent.timeframe_seconds or 60),
+        "timeframe_seconds": int(agent.timeframe_seconds) if agent.timeframe_seconds is not None else 60,
         "timeframe": tf_key,
         "fee_structure": bybit_api.fee_structure_dict(),
     }
@@ -7637,7 +7688,7 @@ async def timeframe_profiles():
         "profiles": {k: get_timeframe_profile(k) for k in ("1m", "5m", "15m", "1h", "1D")},
         "active": get_timeframe_profile(tf_key),
         "timeframe": tf_key,
-        "timeframe_seconds": int(agent.timeframe_seconds or 60),
+        "timeframe_seconds": int(agent.timeframe_seconds) if agent.timeframe_seconds is not None else 60,
     }
 
 # ==========================================
@@ -8234,8 +8285,197 @@ async def reset_settings():
     }
 
 # ==========================================
-# PILLAR 4: REAL-TIME DATA PIPELINES (WebSockets)
+# PILLAR 4: REAL-TIME DATA PIPELINES (WebSockets + HTTP for aitrads.in proxy)
 # ==========================================
+def _rt_market_payload() -> dict:
+    return {
+        "price": round(agent.current_price, 4),
+        "active_pair": agent.active_pair,
+        "lock_active": agent.is_lock_active,
+        "peak_pct": round(agent.peak_net_pct, 4),
+        "trading_mode": bybit_api.mode,
+    }
+
+
+def _rt_trades_payload() -> dict:
+    return {
+        "pair": agent.active_pair,
+        "trades": agent.get_trades_snapshot(),
+        "active_count": len(agent.trades),
+        "lock_active": agent.is_lock_active,
+        "entry_candles": agent.get_entry_candle_highlights(),
+        "pattern_neon": get_pattern_neon_snapshot(),
+    }
+
+
+def _rt_notifications_payload() -> dict:
+    return {"notifications": notifications.notifications}
+
+
+def _rt_portfolio_payload() -> dict:
+    # RULE 6: current_capital only changes via REALIZED trade P&L.
+    total_value = agent.get_total_portfolio_value()
+    unrealized_net = agent.get_unrealized_net_usd()
+    margin_in_use = sum(float(t.get("margin") or 0) for t in agent.trades)
+
+    season_live = agent.ai_season_start_capital is not None and not agent.session_stats_frozen
+    if season_live:
+        open_book = list(agent.trades)
+        trade_notional = sum(float(t.get("position_size") or 0) for t in open_book)
+        open_positions = len(open_book)
+        fee_book = agent.get_session_gross_and_fees_usd()
+        broker_fee = float(fee_book["broker_fee_usd"])
+        daily_gross = float(fee_book["gross_usd"])
+        daily_profit = daily_gross
+        baseline = float(agent.ai_season_start_capital or agent.starting_capital or 0)
+        daily_profit_pct = (daily_profit / baseline) * 100 if baseline else 0
+        ai_season_profit = daily_gross
+        ai_season_profit_pct = daily_profit_pct
+        ai_season_profit_net = daily_gross - broker_fee
+        ai_season_profit_net_pct = (ai_season_profit_net / baseline) * 100 if baseline else 0
+        exited_booked_usd = float(fee_book.get("closed_gross_usd") or 0)
+    else:
+        snap = agent.session_stats_snapshot
+        open_book = list(agent.trades)
+        trade_notional = (
+            sum(float(t.get("position_size") or 0) for t in open_book)
+            if open_book
+            else float(snap.get("trade_notional") or 0)
+        )
+        open_positions = len(open_book) if open_book else int(snap.get("open_positions") or 0)
+        broker_fee = float(snap.get("daily_broker_fee") or 0)
+        daily_profit = float(snap.get("daily_profit") or 0)
+        daily_profit_pct = float(snap.get("daily_profit_pct") or 0)
+        ai_season_profit = float(snap.get("ai_season_profit") or 0)
+        ai_season_profit_pct = float(snap.get("ai_season_profit_pct") or 0)
+        ai_season_profit_net = float(
+            snap.get("ai_season_profit_net")
+            if snap.get("ai_season_profit_net") is not None
+            else (ai_season_profit - broker_fee)
+        )
+        ai_season_profit_net_pct = float(
+            snap.get("ai_season_profit_net_pct")
+            if snap.get("ai_season_profit_net_pct") is not None
+            else (
+                (ai_season_profit_net / float(agent.starting_capital or 0)) * 100
+                if agent.starting_capital
+                else 0
+            )
+        )
+        daily_gross = daily_profit
+        exited_booked_usd = float(snap.get("exited_booked_usd") or 0)
+
+    if (
+        agent.is_active
+        and agent.daily_profit_target_pct > 0
+        and not agent.daily_target_reached
+        and not agent.emergency_triggered
+        and daily_profit_pct >= agent.daily_profit_target_pct
+    ):
+        agent.daily_target_reached = True
+        notifications.push(
+            f"Daily profit target {agent.daily_profit_target_pct}% reached "
+            f"({daily_profit_pct:.2f}%) — new auto entries halted.",
+            "success",
+        )
+
+    season_active = bool(season_live and agent.is_active)
+    baseline = agent.get_session_baseline()
+    portfolio_drop = ((baseline - total_value) / baseline) * 100 if baseline else 0
+
+    if (
+        agent.is_active
+        and float(agent.risk_level_pct or 0) > 0
+        and not agent.emergency_triggered
+        and not agent.session_hold_mode
+        and portfolio_drop >= float(agent.risk_level_pct)
+    ):
+        agent.hold_stop(
+            f"Total capital risk {agent.risk_level_pct:g}% hit "
+            f"(portfolio −{portfolio_drop:.2f}%) — Hold stop"
+        )
+
+    if agent.is_active and not bool(getattr(agent, "momentum_gate_ready", False)):
+        if agent.watchlist or getattr(agent, "momentum_fire_pairs", None):
+            agent.momentum_gate_ready = True
+            agent.boot_ui_until = 0.0
+            agent.momentum_scan_stage = "ready"
+    try:
+        blue_box_overlay = build_blue_box_chart_overlay([])
+    except Exception:
+        blue_box_overlay = []
+
+    return {
+        "capital": round(agent.current_capital, 2),
+        "available_capital": round(agent.get_available_capital(), 2),
+        "total_portfolio_value": round(total_value, 2),
+        "unrealized_net_usd": round(unrealized_net, 2),
+        "margin_in_use": round(margin_in_use, 2),
+        "trade_notional": round(trade_notional, 2),
+        "trading_mode": bybit_api.mode,
+        "daily_profit": round(daily_profit, 2),
+        "daily_profit_pct": round(daily_profit_pct, 2),
+        "daily_broker_fee": round(broker_fee, 4),
+        "daily_gross_profit": round(daily_gross, 2),
+        "fee_structure": bybit_api.fee_structure_dict(),
+        "exited_booked_usd": round(exited_booked_usd, 2),
+        "ai_season_profit": round(ai_season_profit, 2),
+        "ai_season_profit_pct": round(ai_season_profit_pct, 2),
+        "ai_season_profit_net": round(ai_season_profit_net, 2),
+        "ai_season_profit_net_pct": round(ai_season_profit_net_pct, 2),
+        "ai_season_active": season_active,
+        "session_stats_frozen": bool(agent.session_stats_frozen),
+        "session_hold_mode": bool(agent.session_hold_mode),
+        "connectivity_frozen": bool(agent.connectivity_frozen),
+        "freeze_reason": agent.freeze_reason,
+        "trading_ready": bool(agent.trading_ready()),
+        "warmup_remaining_sec": round(agent.warmup_remaining_sec(), 1),
+        "warmup_total_sec": ENGINE_BOOT_MAX_SEC,
+        "boot_intro_sec": ENGINE_BOOT_INTRO_SEC,
+        "boot_analysis_sec": ENGINE_BOOT_ANALYSIS_SEC,
+        "one_m_fee_hold": bool(getattr(agent, "one_m_fee_hold", False)),
+        "momentum_gate_ready": bool(getattr(agent, "momentum_gate_ready", False)),
+        "momentum_threshold_pct": float(getattr(agent, "momentum_threshold_pct", 0) or 0),
+        "momentum_fire_pairs": list(getattr(agent, "momentum_fire_pairs", None) or []),
+        "momentum_scores": list(getattr(agent, "momentum_scores", None) or [])[:24],
+        "momentum_last_refresh_ms": int(getattr(agent, "momentum_last_refresh_ms", 0) or 0),
+        "momentum_scan_done": int(getattr(agent, "momentum_scan_done", 0) or 0),
+        "momentum_scan_total": int(getattr(agent, "momentum_scan_total", 0) or 0),
+        "momentum_scan_stage": str(getattr(agent, "momentum_scan_stage", "") or ""),
+        "portfolio_drop_pct": round(portfolio_drop, 2),
+        "is_active": agent.is_active,
+        "timeframe_seconds": agent.timeframe_seconds,
+        "timeframe_profile": get_timeframe_profile(
+            SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+        ),
+        "session_schedule": schedule_store.status_dict(),
+        "emergency": False,
+        "risk_level_pct": agent.risk_level_pct,
+        "max_concurrent_trades": agent.max_concurrent_trades,
+        "profit_floor_pct": agent.get_profit_floor_pct(),
+        "profit_floor_mode": "fixed_tp_gross",
+        "trading_execution": (
+            "paper_simulation" if bybit_api.mode == "PAPER_TRADING" else "bybit_testnet"
+        ),
+        "trades": open_positions,
+        "agent_chat": system_log.agent_chat[-8:],
+        "blue_box_overlay": blue_box_overlay,
+        "watchlist": list(agent.watchlist),
+        "scan_pairs": agent.get_scan_pairs(),
+    }
+
+
+@app.get("/rt/live")
+async def rt_live_bundle():
+    """HTTP mirror of WS pipes for aitrads.in (Hostinger /__api cannot proxy WebSockets)."""
+    return {
+        "market": _rt_market_payload(),
+        "portfolio": _rt_portfolio_payload(),
+        "trades": _rt_trades_payload(),
+        "notifications": _rt_notifications_payload(),
+    }
+
+
 @app.websocket("/ws/market")
 async def market_feed(websocket: WebSocket):
     """ Pushes the latest agent state (price, lock, peak, mode) to connected
@@ -8246,17 +8486,9 @@ async def market_feed(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            payload = {
-                "price": round(agent.current_price, 4),
-                "active_pair": agent.active_pair,
-                "lock_active": agent.is_lock_active,
-                "peak_pct": round(agent.peak_net_pct, 4),
-                "trading_mode": bybit_api.mode,
-            }
-            await websocket.send_json(payload)
-            await asyncio.sleep(0.5) # Send updates every 500ms
+            await websocket.send_json(_rt_market_payload())
+            await asyncio.sleep(0.5)
     except WebSocketDisconnect:
-        # POLICY 4: Error Handling & System Safety
         print("POLICY 4: Market WS Client Disconnected. Bot is NOT crashed. Waiting for Reconnection...")
 
 @app.websocket("/ws/portfolio")
@@ -8266,177 +8498,9 @@ async def portfolio_feed(websocket: WebSocket):
         return
     await websocket.accept()
     try:
-        # POLICY 4: Check live portfolio balance and lock positions immediately on connect
         print("POLICY 4: Reconnected. Synchronizing current positions and portfolio lock state.")
         while True:
-            # RULE 6: current_capital now only changes via REALIZED trade P&L (execute_sell /
-            # trigger_emergency_exit), never a random walk - this is the true capital ledger.
-            total_value = agent.get_total_portfolio_value()
-            unrealized_net = agent.get_unrealized_net_usd()
-            margin_in_use = sum(float(t.get("margin") or 0) for t in agent.trades)
-
-            # Portfolio session counters: live during AI season / Hold-stop; frozen after Emergency.
-            # OPEN POSITIONS / TRADE VALUE always reflect the real local open book (all pairs),
-            # then Bybit reconcile keeps that book honest against the exchange.
-            season_live = agent.ai_season_start_capital is not None and not agent.session_stats_frozen
-            if season_live:
-                open_book = list(agent.trades)
-                trade_notional = sum(float(t.get("position_size") or 0) for t in open_book)
-                open_positions = len(open_book)
-                fee_book = agent.get_session_gross_and_fees_usd()
-                broker_fee = float(fee_book["broker_fee_usd"])
-                # Portfolio shows GROSS profit and fees separately (never net = profit − fees).
-                daily_gross = float(fee_book["gross_usd"])
-                daily_profit = daily_gross
-                baseline = float(agent.ai_season_start_capital or agent.starting_capital or 0)
-                daily_profit_pct = (daily_profit / baseline) * 100 if baseline else 0
-                ai_season_profit = daily_gross
-                ai_season_profit_pct = daily_profit_pct
-                ai_season_profit_net = daily_gross - broker_fee
-                ai_season_profit_net_pct = (ai_season_profit_net / baseline) * 100 if baseline else 0
-                exited_booked_usd = float(fee_book.get("closed_gross_usd") or 0)
-            else:
-                snap = agent.session_stats_snapshot
-                # Even when season counters are frozen, never hide a still-open local trade.
-                open_book = list(agent.trades)
-                trade_notional = (
-                    sum(float(t.get("position_size") or 0) for t in open_book)
-                    if open_book
-                    else float(snap.get("trade_notional") or 0)
-                )
-                open_positions = len(open_book) if open_book else int(snap.get("open_positions") or 0)
-                broker_fee = float(snap.get("daily_broker_fee") or 0)
-                daily_profit = float(snap.get("daily_profit") or 0)
-                daily_profit_pct = float(snap.get("daily_profit_pct") or 0)
-                ai_season_profit = float(snap.get("ai_season_profit") or 0)
-                ai_season_profit_pct = float(snap.get("ai_season_profit_pct") or 0)
-                ai_season_profit_net = float(
-                    snap.get("ai_season_profit_net")
-                    if snap.get("ai_season_profit_net") is not None
-                    else (ai_season_profit - broker_fee)
-                )
-                ai_season_profit_net_pct = float(
-                    snap.get("ai_season_profit_net_pct")
-                    if snap.get("ai_season_profit_net_pct") is not None
-                    else (
-                        (ai_season_profit_net / float(agent.starting_capital or 0)) * 100
-                        if agent.starting_capital
-                        else 0
-                    )
-                )
-                daily_gross = daily_profit
-                exited_booked_usd = float(snap.get("exited_booked_usd") or 0)
-
-            if (
-                agent.is_active
-                and agent.daily_profit_target_pct > 0
-                and not agent.daily_target_reached
-                and not agent.emergency_triggered
-                and daily_profit_pct >= agent.daily_profit_target_pct
-            ):
-                agent.daily_target_reached = True
-                notifications.push(
-                    f"Daily profit target {agent.daily_profit_target_pct}% reached "
-                    f"({daily_profit_pct:.2f}%) — new auto entries halted.",
-                    "success",
-                )
-
-            season_active = bool(season_live and agent.is_active)
-
-            baseline = agent.get_session_baseline()
-            portfolio_drop = ((baseline - total_value) / baseline) * 100 if baseline else 0
-
-            # Total capital risk % (from AI Engine Instructions): when session portfolio
-            # mark-to-market drop hits the limit → Hold-stop (no new fires; open trades
-            # keep path TP/SL until they exit on their own).
-            if (
-                agent.is_active
-                and float(agent.risk_level_pct or 0) > 0
-                and not agent.emergency_triggered
-                and not agent.session_hold_mode
-                and portfolio_drop >= float(agent.risk_level_pct)
-            ):
-                agent.hold_stop(
-                    f"Total capital risk {agent.risk_level_pct:g}% hit "
-                    f"(portfolio −{portfolio_drop:.2f}%) — Hold stop"
-                )
-
-            tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
-            scan = system_log.last_taapi_scan
-
-            # Heal stuck boot UI: engine already has a universe → never keep SCAN overlay open.
-            if agent.is_active and not bool(getattr(agent, "momentum_gate_ready", False)):
-                if agent.watchlist or getattr(agent, "momentum_fire_pairs", None):
-                    agent.momentum_gate_ready = True
-                    agent.boot_ui_until = 0.0
-                    agent.momentum_scan_stage = "ready"
-            last_scan = scan if scan and scan.get("pair") == agent.active_pair else None
-            # Stub overlay only — wrong kwargs used to crash /ws/portfolio every tick.
-            try:
-                blue_box_overlay = build_blue_box_chart_overlay([])
-            except Exception:
-                blue_box_overlay = []
-
-            payload = {
-                "capital": round(agent.current_capital, 2),
-                "available_capital": round(agent.get_available_capital(), 2),
-                "total_portfolio_value": round(total_value, 2),
-                "unrealized_net_usd": round(unrealized_net, 2),
-                "margin_in_use": round(margin_in_use, 2),
-                "trade_notional": round(trade_notional, 2),
-                "trading_mode": bybit_api.mode,
-                "daily_profit": round(daily_profit, 2),
-                "daily_profit_pct": round(daily_profit_pct, 2),
-                "daily_broker_fee": round(broker_fee, 4),
-                "daily_gross_profit": round(daily_gross, 2),
-                "fee_structure": bybit_api.fee_structure_dict(),
-                "exited_booked_usd": round(exited_booked_usd, 2),
-                "ai_season_profit": round(ai_season_profit, 2),
-                "ai_season_profit_pct": round(ai_season_profit_pct, 2),
-                "ai_season_profit_net": round(ai_season_profit_net, 2),
-                "ai_season_profit_net_pct": round(ai_season_profit_net_pct, 2),
-                "ai_season_active": season_active,
-                "session_stats_frozen": bool(agent.session_stats_frozen),
-                "session_hold_mode": bool(agent.session_hold_mode),
-                "connectivity_frozen": bool(agent.connectivity_frozen),
-                "freeze_reason": agent.freeze_reason,
-                "trading_ready": bool(agent.trading_ready()),
-                "warmup_remaining_sec": round(agent.warmup_remaining_sec(), 1),
-                "warmup_total_sec": ENGINE_BOOT_MAX_SEC,
-                "boot_intro_sec": ENGINE_BOOT_INTRO_SEC,
-                "boot_analysis_sec": ENGINE_BOOT_ANALYSIS_SEC,
-                "one_m_fee_hold": bool(getattr(agent, "one_m_fee_hold", False)),
-                "momentum_gate_ready": bool(getattr(agent, "momentum_gate_ready", False)),
-                "momentum_threshold_pct": float(getattr(agent, "momentum_threshold_pct", 0) or 0),
-                "momentum_fire_pairs": list(getattr(agent, "momentum_fire_pairs", None) or []),
-                "momentum_scores": list(getattr(agent, "momentum_scores", None) or [])[:24],
-                "momentum_last_refresh_ms": int(getattr(agent, "momentum_last_refresh_ms", 0) or 0),
-                "momentum_scan_done": int(getattr(agent, "momentum_scan_done", 0) or 0),
-                "momentum_scan_total": int(getattr(agent, "momentum_scan_total", 0) or 0),
-                "momentum_scan_stage": str(getattr(agent, "momentum_scan_stage", "") or ""),
-                "portfolio_drop_pct": round(portfolio_drop, 2),
-                "is_active": agent.is_active,
-                "timeframe_seconds": agent.timeframe_seconds,
-                "timeframe_profile": get_timeframe_profile(
-                    SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
-                ),
-                "session_schedule": schedule_store.status_dict(),
-                                "emergency": False,
-                "risk_level_pct": agent.risk_level_pct,
-                "max_concurrent_trades": agent.max_concurrent_trades,
-                "profit_floor_pct": agent.get_profit_floor_pct(),
-                "profit_floor_mode": "fixed_tp_gross",
-                "trading_execution": (
-                    "paper_simulation" if bybit_api.mode == "PAPER_TRADING" else "bybit_testnet"
-                ),
-                "trades": open_positions,
-                "agent_chat": system_log.agent_chat[-8:],
-                "blue_box_overlay": blue_box_overlay,
-                "watchlist": list(agent.watchlist),
-                "scan_pairs": agent.get_scan_pairs(),
-            }
-            # POLICY 4: Alerting Frontend on Emergency Exit
-            await websocket.send_json(payload)
+            await websocket.send_json(_rt_portfolio_payload())
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         print("POLICY 4: Portfolio WS Client Disconnected. System tracking preserved.")
@@ -8450,7 +8514,7 @@ async def notifications_feed(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            await websocket.send_json({"notifications": notifications.notifications})
+            await websocket.send_json(_rt_notifications_payload())
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         print("POLICY 4: Notifications WS Client Disconnected. System tracking preserved.")
@@ -8463,15 +8527,7 @@ async def trades_feed(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            payload = {
-                "pair": agent.active_pair,
-                "trades": agent.get_trades_snapshot(),
-                "active_count": len(agent.trades),
-                "lock_active": agent.is_lock_active,
-                "entry_candles": agent.get_entry_candle_highlights(),
-                "pattern_neon": get_pattern_neon_snapshot(),
-            }
-            await websocket.send_json(payload)
+            await websocket.send_json(_rt_trades_payload())
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         print("POLICY 4: Trades WS Client Disconnected. System tracking preserved.")

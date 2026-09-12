@@ -2,9 +2,10 @@ const SECTIONS = [
   {
     title: 'AI Engine',
     items: [
-      'START AI ENGINE scans watchlist pairs on your chart TF (1m–1D).',
+      'START AI ENGINE scans watchlist pairs on your chart TF (0s tick, or 1m–1D candles).',
+      '0S tick: watchlist in 7-coin batches (35→5 batches; 30/31→28 this scan, leftovers next). Fire when OF score ≥ 40 (taker). No per-trade SL/TP — exit all 7 when winner profit+fees > loser loss+fees. Size 0.5%. Chart shows 1m candles as backdrop.',
       'Engine runs on the VPS — closing the browser does NOT stop trading. Only AI ENGINE STOP does.',
-      'Momentum gate: only coins with MARKET avg% above TF floor (1M>0.055, 5M>0.085, 15M>0.25, 1H>0.55, 1D>7) auto-enter watchlist; re-scan hourly.',
+      'Momentum gate: only coins with MARKET avg% above TF floor (0S/1M>0.055, 5M>0.25, 15M>0.25, 1H>0.55, 1D>7) auto-enter watchlist; re-scan hourly.',
       'HARD RULE: 7th-candle / watchlist refresh·replace·add·edit NEVER closes or hides related OPEN trades — they keep their own TP/SL until exit.',
       'Brain 5-step pipeline: (1) pattern detect → (2) trap scan → (3) candle-1 confirm on 1m/5m/15m; 1h/1D fire on pattern close → (4) 10th-man ALLOW/VETO → (5) fire or skip.',
       'Step2/4: if structure trap fights the pattern, take the opposite (trap) side — do not skip into the trap. Dual-gate must still pass on the flipped side.',
@@ -28,6 +29,7 @@ const SECTIONS = [
     items: [
       'Profit arms at +0.50, trails −0.10 until +0.65, then −0.20. No +1% hard exit.',
       '1m batch: when 10 trades net ≥ +0.25% (after fees), all 10 exit together.',
+      '0S batch: when 7 tick trades have P + winner fees > L + loser fees, all 7 exit together.',
     ],
   },
   {
