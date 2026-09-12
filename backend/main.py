@@ -1093,14 +1093,14 @@ SKIP_FIRST_DETECT_SCALP = os.environ.get("SKIP_FIRST_DETECT_SCALP", "0").strip()
     "1", "true", "yes",
 )
 # Detect → next-candle impulse lock → trail% pullback maker (no taker chase).
-# 15m / 1h / 1D skip the extra confirm bars even when this flag is on.
+# 1h / 1D skip the extra confirm bars even when this flag is on. 15m uses 1m/5m confirm.
 MOMENTUM_LOCK_ENABLED = os.environ.get("MOMENTUM_LOCK_ENABLED", "1").strip().lower() not in (
     "0", "false", "no",
 )
 
 
 def _bar_confirm_enabled(timeframe_key: str | None) -> bool:
-    """1m/5m wait extra color bars. 15m/1h/1D fire on the closed pattern bar."""
+    """1m/5m/15m wait extra color bars. 1h/1D fire on the closed pattern bar."""
     return bool(MOMENTUM_LOCK_ENABLED) and not skips_pattern_confirm(timeframe_key)
 
 
@@ -3542,8 +3542,8 @@ class AITradingAgent:
             f"[AI ENGINE] Armed — trading READY now "
             f"(boot UI scan-driven, max {ENGINE_BOOT_MAX_SEC:g}s). "
             f"Momentum watchlist gate pending. "
-            f"5-step pipeline: pattern detect → trap scan → confirm ≤2 bars on 1m/5m "
-            f"(15m/1h/1D fire on pattern close) → "
+            f"5-step pipeline: pattern detect → trap scan → confirm ≤2 bars on 1m/5m/15m "
+            f"(1h/1D fire on pattern close) → "
             f"10th-man → fire/skip (pullback maker, no taker chase). "
             f"First detect per pair may be skipped."
         )
@@ -3960,8 +3960,8 @@ TIMEFRAME_KEY_TO_BYBIT_KLINE = {
 # different candle granularities.
 LAST_CANDLE_TIMESTAMPS = {}
 
-# Detect on last closed candle → 1m/5m: confirm ≤2 bars → trail% pullback maker.
-# 15m/1h/1D: pattern close is confirm (no extra same-TF bars).
+# Detect on last closed candle → 1m/5m/15m: confirm ≤2 bars → trail% pullback maker.
+# 1h/1D: pattern close is confirm (no extra same-TF bars).
 PENDING_ENTRY_SIGNALS: dict[str, dict] = {}
 # 1m only: last auto fire candle open-time per pair (blocks fires after a gap).
 LAST_AUTO_FIRE_CANDLE_MS: dict[str, int] = {}
@@ -4337,15 +4337,27 @@ async def apply_momentum_watchlist_refresh(*, reason: str = "refresh") -> dict:
     thr = float(built["threshold"])
     new_fire = list(built["qualified"])
     scores = list(built["scores"])
-    # Fire = NEW-entry universe only. Open pairs are pinned onto watchlist so
-    # they stay visible/managed without forcing new entries if they fell off cut.
-    new_watch = list(new_fire)
+    # Fire = NEW-entry universe only. Watchlist can include chart + top scores
+    # when the tape is quiet so launcher chips still set.
+    new_watch = list(built.get("watchlist") or new_fire)
 
     # Start/boot: chart → #1 fire pair. Does NOT close any open trades.
     if reason in ("bot_start", "schedule_start", "boot", "hourly_restart") and new_fire:
         first = new_fire[0]
         mark = float(agent.pair_prices.get(first) or agent.current_price or 0)
         agent.set_active_pair(first, mark)
+
+    chart = (agent.active_pair or "").strip()
+    if chart and chart not in new_watch:
+        new_watch = [chart] + [p for p in new_watch if p != chart]
+    if not new_watch:
+        ranked = [
+            s.get("pair")
+            for s in scores
+            if s.get("pair") and s.get("avg_pct") is not None
+        ]
+        cap = int(getattr(agent, "MAX_WATCHLIST", 32) or 32)
+        new_watch = [p for p in ranked if p][: max(1, min(16, cap))]
 
     pinned: list[str] = []
     seen_w = set(new_watch)

@@ -354,7 +354,7 @@ export default function App() {
       const hasMomentum = prev.some(
         (s) => !ORIGINAL_SYMBOLS.has(String(s.symbol || '').toUpperCase())
       );
-      if (!hasMomentum) return prev;
+      if (prev.length && !hasMomentum) return prev;
       const restored = TRADING_PAIRS.map((p, i) => ({
         id: `${p.symbol}-orig-${i}`,
         symbol: p.symbol,

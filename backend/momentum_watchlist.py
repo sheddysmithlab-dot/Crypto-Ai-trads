@@ -169,12 +169,19 @@ async def build_momentum_watchlist(
 
     fire_pairs = list(qualified)
     watchlist = list(qualified)
+    cap = int(max_pairs) if max_pairs and max_pairs > 0 else 16
+    if not watchlist:
+        # Quiet tape: still dock chips from highest MARKET avg% so launcher is not empty.
+        watchlist = [
+            r["pair"]
+            for r in scores
+            if r.get("pair") and r.get("avg_pct") is not None
+        ][:cap]
     active = (active_pair or "").strip()
     if active and active not in watchlist:
         # Chart focus always docked; may not be fire-eligible.
-        watchlist = [active] + watchlist
-        if max_pairs > 0:
-            watchlist = watchlist[: int(max_pairs)]
+        watchlist = [active] + [p for p in watchlist if p != active]
+        watchlist = watchlist[:cap]
 
     passed_set = {r["pair"] for r in scores if r["passed"]}
     skipped = [r["pair"] for r in scores if not r["passed"]]
