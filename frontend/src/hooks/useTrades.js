@@ -1,10 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { authFetch, backendWsUrl } from '../config/api';
+import { authFetch, backendWsUrl, preferHttpRealtime } from '../config/api';
+import { subscribeRtLive } from '../config/rtLive';
 import { debugLog } from '../config/debug';
 
-// Live trades - populated exclusively from the backend /ws/trades feed.
-// No dummy/mock trades; the table only ever reflects the backend AI Agent's
-// real-time state for the single active trading pair (multiple stacked trades allowed).
+function applyTradesData(data, setters) {
+  const { setActivePair, setTrades, setEntryCandles, setPatternNeon, setActiveCount } = setters;
+  setActivePair(data.pair);
+  setTrades(data.trades);
+  setEntryCandles(data.entry_candles || []);
+  setPatternNeon(data.pattern_neon || []);
+  setActiveCount(data.active_count ?? (data.trades || []).filter((t) => t.status !== 'sold').length);
+}
+
+// Live trades — WS normally; on aitrads.in HTTP /rt/live via Hostinger proxy.
 export function useTrades(setConnected) {
   const [trades, setTrades] = useState([]);
   const [activeCount, setActiveCount] = useState(0);
@@ -17,6 +25,18 @@ export function useTrades(setConnected) {
 
   useEffect(() => {
     stopped.current = false;
+    const setters = { setActivePair, setTrades, setEntryCandles, setPatternNeon, setActiveCount };
+
+    if (preferHttpRealtime) {
+      return subscribeRtLive((bundle, err) => {
+        if (err || !bundle?.trades) {
+          setConnected('trades', false);
+          return;
+        }
+        setConnected('trades', true);
+        applyTradesData(bundle.trades, setters);
+      });
+    }
 
     function connect() {
       if (stopped.current) return;
@@ -27,12 +47,7 @@ export function useTrades(setConnected) {
 
       ws.onmessage = (event) => {
         setConnected('trades', true);
-        const data = JSON.parse(event.data);
-        setActivePair(data.pair);
-        setTrades(data.trades);
-        setEntryCandles(data.entry_candles || []);
-        setPatternNeon(data.pattern_neon || []);
-        setActiveCount(data.active_count ?? (data.trades || []).filter((t) => t.status !== 'sold').length);
+        applyTradesData(JSON.parse(event.data), setters);
       };
 
       ws.onclose = () => {
@@ -73,7 +88,6 @@ export function useTrades(setConnected) {
       console.error('Failed to close trade:', err);
       throw err;
     }
-    // Next /ws/trades tick will refresh the table with the authoritative state
   }, []);
 
   return { trades, activeCount, activePair, closeTrade, entryCandles, patternNeon };

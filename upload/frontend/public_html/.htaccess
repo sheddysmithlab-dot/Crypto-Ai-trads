@@ -1,3 +1,11 @@
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+  RewriteCond %{HTTP:Authorization} .
+  RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+  RewriteRule ^__api/?(.*)$ __api/index.php?__path=$1 [QSA,L]
+</IfModule>
+
 # Force fresh HTML so hard refresh picks new hashed assets
 <IfModule mod_headers.c>
   <FilesMatch "index\.html$">

@@ -2140,6 +2140,14 @@ class AITradingAgent:
             # Still checkpoint so preferred TF is on disk even if unchanged.
             self.persist_runtime(force=True)
             return
+        # Refresh/login used to POST localStorage 1M and yank 0s → 1m mid-session.
+        # Chart TF buttons are already disabled while the engine is ON.
+        if self.is_active:
+            print(
+                f"[TIMEFRAME SYNC] Ignored {seconds}s — engine ON, "
+                f"locked to {self.timeframe_seconds}s"
+            )
+            return
         self.timeframe_seconds = seconds
         _reset_scan_candle_baseline()
         reset_blue_box_state()
@@ -7664,17 +7672,25 @@ class SetTimeframePayload(BaseModel):
 async def set_timeframe(payload: SetTimeframePayload):
     """ RULE 2: Dynamic Timeframe Syncing - the frontend tells the backend exactly
     which candle interval to read volume/price data on. """
-    agent.set_timeframe(payload.seconds)
-    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(agent.timeframe_seconds, "1m")
+    requested = int(payload.seconds)
+    agent.set_timeframe(requested)
+    applied = int(agent.timeframe_seconds) if agent.timeframe_seconds is not None else 60
+    locked = bool(agent.is_active) and applied != requested
+    tf_key = SECONDS_TO_TIMEFRAME_KEY.get(applied, "1m")
     profile = get_timeframe_profile(tf_key)
     return {
         "status": "success",
+        "locked": locked,
         "message": (
-            f"Backend synced to {payload.seconds}s ({tf_key}) — "
-            f"trade size {profile['capital_pct']:g}% capital, "
-            f"win/lose {profile['win_rate']}/{profile['lose_rate']}."
+            f"Timeframe locked to {applied}s ({tf_key}) — engine ON."
+            if locked
+            else (
+                f"Backend synced to {applied}s ({tf_key}) — "
+                f"trade size {profile['capital_pct']:g}% capital, "
+                f"win/lose {profile['win_rate']}/{profile['lose_rate']}."
+            )
         ),
-        "seconds": agent.timeframe_seconds,
+        "seconds": applied,
         "timeframe": tf_key,
         "profile": profile,
     }

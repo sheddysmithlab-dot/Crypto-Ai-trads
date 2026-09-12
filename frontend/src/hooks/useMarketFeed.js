@@ -1,10 +1,10 @@
 import { useEffect, useRef } from 'react';
-import { backendWsUrl } from '../config/api';
+import { backendWsUrl, preferHttpRealtime } from '../config/api';
+import { subscribeRtLive } from '../config/rtLive';
 
 /**
- * App-level /ws/market connection for API-status health.
- * Chart still opens its own market socket for lock/price overlays; this pipe
- * keeps the header badge green even if the chart effect remounts.
+ * App-level market pipe for API-status health.
+ * aitrads.in uses shared /rt/live HTTP poll; elsewhere WebSocket.
  */
 export function useMarketFeed(setConnected) {
   const wsRef = useRef(null);
@@ -14,6 +14,12 @@ export function useMarketFeed(setConnected) {
   useEffect(() => {
     stopped.current = false;
 
+    if (preferHttpRealtime) {
+      return subscribeRtLive((bundle, err) => {
+        setConnected?.('market', Boolean(!err && bundle?.market));
+      });
+    }
+
     function connect() {
       if (stopped.current) return;
       const ws = new WebSocket(backendWsUrl('/ws/market'));
@@ -22,13 +28,10 @@ export function useMarketFeed(setConnected) {
       ws.onopen = () => setConnected?.('market', true);
 
       ws.onmessage = () => {
-        // Presence heartbeat only — chart owns price/lock rendering.
         setConnected?.('market', true);
       };
 
-      ws.onerror = () => {
-        // onclose follows; avoid double reconnect
-      };
+      ws.onerror = () => {};
 
       ws.onclose = () => {
         setConnected?.('market', false);

@@ -1,5 +1,62 @@
 import { useEffect, useRef, useState } from 'react';
-import { backendWsUrl } from '../config/api';
+import { backendWsUrl, preferHttpRealtime } from '../config/api';
+import { subscribeRtLive } from '../config/rtLive';
+
+function applyPortfolioData(data) {
+  return {
+    totalCapital: data.total_portfolio_value,
+    cashLedger: data.capital,
+    unrealizedNetUsd: data.unrealized_net_usd ?? 0,
+    marginInUse: data.margin_in_use ?? 0,
+    tradeNotional: data.trade_notional ?? 0,
+    dailyProfit: data.daily_profit,
+    dailyProfitPct: data.daily_profit_pct,
+    dailyBrokerFee: data.daily_broker_fee ?? 0,
+    exitedBookedUsd: data.exited_booked_usd ?? 0,
+    seasonProfit: data.ai_season_profit ?? 0,
+    seasonProfitPct: data.ai_season_profit_pct ?? 0,
+    seasonProfitNet: data.ai_season_profit_net ?? (
+      (Number(data.ai_season_profit) || 0) - (Number(data.daily_broker_fee) || 0)
+    ),
+    seasonProfitNetPct: data.ai_season_profit_net_pct ?? 0,
+    seasonActive: Boolean(data.ai_season_active),
+    sessionStatsFrozen: Boolean(data.session_stats_frozen),
+    sessionOpenPositions: Number(data.trades) || 0,
+    isActive: data.is_active,
+    connectivityFrozen: Boolean(data.connectivity_frozen),
+    freezeReason: data.freeze_reason || null,
+    oneMFeeHold: Boolean(data.one_m_fee_hold),
+    feeStructure: data.fee_structure && typeof data.fee_structure === 'object'
+      ? data.fee_structure
+      : null,
+    tradingReady: data.trading_ready !== false,
+    warmupRemainingSec: Number(data.warmup_remaining_sec) || 0,
+    warmupTotalSec: Number(data.warmup_total_sec) || 60,
+    bootIntroSec: Number(data.boot_intro_sec) || 10,
+    bootAnalysisSec: Number(data.boot_analysis_sec) || 10,
+    tradingMode: data.trading_mode,
+    agentChat: data.agent_chat || [],
+    blueBoxOverlay: data.blue_box_overlay || null,
+    sessionSchedule: data.session_schedule || null,
+    watchlist: Array.isArray(data.watchlist) ? data.watchlist : [],
+    scanPairs: Array.isArray(data.scan_pairs) ? data.scan_pairs : [],
+    momentumGateReady: Boolean(data.momentum_gate_ready),
+    momentumThresholdPct: Number(data.momentum_threshold_pct) || 0,
+    momentumFirePairs: Array.isArray(data.momentum_fire_pairs) ? data.momentum_fire_pairs : [],
+    momentumScores: Array.isArray(data.momentum_scores) ? data.momentum_scores : [],
+    momentumLastRefreshMs: Number(data.momentum_last_refresh_ms) || 0,
+    momentumScanDone: Number(data.momentum_scan_done) || 0,
+    momentumScanTotal: Number(data.momentum_scan_total) || 0,
+    momentumScanStage: data.momentum_scan_stage || '',
+    timeframeSeconds: (() => {
+      const v = data.timeframe_seconds;
+      if (v === 0 || v === '0') return 0;
+      if (v == null || v === '') return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    })(),
+  };
+}
 
 // Portfolio value, daily PnL, bot active state, and trading mode (paper/live).
 export function usePortfolio(setConnected) {
@@ -44,6 +101,7 @@ export function usePortfolio(setConnected) {
     momentumScanDone: 0,
     momentumScanTotal: 0,
     momentumScanStage: '',
+    timeframeSeconds: null,
   });
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
@@ -51,6 +109,17 @@ export function usePortfolio(setConnected) {
 
   useEffect(() => {
     stopped.current = false;
+
+    if (preferHttpRealtime) {
+      return subscribeRtLive((bundle, err) => {
+        if (err || !bundle?.portfolio) {
+          setConnected('portfolio', false);
+          return;
+        }
+        setConnected('portfolio', true);
+        setPortfolio(applyPortfolioData(bundle.portfolio));
+      });
+    }
 
     function connect() {
       if (stopped.current) return;
@@ -61,54 +130,7 @@ export function usePortfolio(setConnected) {
 
       ws.onmessage = (event) => {
         setConnected('portfolio', true);
-        const data = JSON.parse(event.data);
-
-        setPortfolio({
-          totalCapital: data.total_portfolio_value,
-          cashLedger: data.capital,
-          unrealizedNetUsd: data.unrealized_net_usd ?? 0,
-          marginInUse: data.margin_in_use ?? 0,
-          tradeNotional: data.trade_notional ?? 0,
-          dailyProfit: data.daily_profit,
-          dailyProfitPct: data.daily_profit_pct,
-          dailyBrokerFee: data.daily_broker_fee ?? 0,
-          exitedBookedUsd: data.exited_booked_usd ?? 0,
-          seasonProfit: data.ai_season_profit ?? 0,
-          seasonProfitPct: data.ai_season_profit_pct ?? 0,
-          seasonProfitNet: data.ai_season_profit_net ?? (
-            (Number(data.ai_season_profit) || 0) - (Number(data.daily_broker_fee) || 0)
-          ),
-          seasonProfitNetPct: data.ai_season_profit_net_pct ?? 0,
-          seasonActive: Boolean(data.ai_season_active),
-          sessionStatsFrozen: Boolean(data.session_stats_frozen),
-          sessionOpenPositions: Number(data.trades) || 0,
-          isActive: data.is_active,
-          connectivityFrozen: Boolean(data.connectivity_frozen),
-          freezeReason: data.freeze_reason || null,
-          oneMFeeHold: Boolean(data.one_m_fee_hold),
-          feeStructure: data.fee_structure && typeof data.fee_structure === 'object'
-            ? data.fee_structure
-            : null,
-          tradingReady: data.trading_ready !== false,
-          warmupRemainingSec: Number(data.warmup_remaining_sec) || 0,
-          warmupTotalSec: Number(data.warmup_total_sec) || 60,
-          bootIntroSec: Number(data.boot_intro_sec) || 10,
-          bootAnalysisSec: Number(data.boot_analysis_sec) || 10,
-          tradingMode: data.trading_mode,
-          agentChat: data.agent_chat || [],
-          blueBoxOverlay: data.blue_box_overlay || null,
-          sessionSchedule: data.session_schedule || null,
-          watchlist: Array.isArray(data.watchlist) ? data.watchlist : [],
-          scanPairs: Array.isArray(data.scan_pairs) ? data.scan_pairs : [],
-          momentumGateReady: Boolean(data.momentum_gate_ready),
-          momentumThresholdPct: Number(data.momentum_threshold_pct) || 0,
-          momentumFirePairs: Array.isArray(data.momentum_fire_pairs) ? data.momentum_fire_pairs : [],
-          momentumScores: Array.isArray(data.momentum_scores) ? data.momentum_scores : [],
-          momentumLastRefreshMs: Number(data.momentum_last_refresh_ms) || 0,
-          momentumScanDone: Number(data.momentum_scan_done) || 0,
-          momentumScanTotal: Number(data.momentum_scan_total) || 0,
-          momentumScanStage: data.momentum_scan_stage || '',
-        });
+        setPortfolio(applyPortfolioData(JSON.parse(event.data)));
       };
 
       ws.onclose = () => {

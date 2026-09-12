@@ -65,8 +65,10 @@ function readStoredTimeframe() {
   return '1M';
 }
 
-function timeframeFromSeconds(seconds) {
+export function timeframeFromSeconds(seconds) {
+  if (seconds === 0 || seconds === '0') return '0S';
   const s = Number(seconds);
+  if (s === 0) return '0S';
   if (Number.isFinite(s) && SECONDS_TO_TIMEFRAME[s]) return SECONDS_TO_TIMEFRAME[s];
   return null;
 }
@@ -452,6 +454,7 @@ export function useTradingChart({
   blueBoxOverlay = null,
   entryCandles = [],
   patternNeon = [],
+  engineTimeframeSeconds = null,
 }) {
   const chartRef = useRef(null);
   const volumeChartRef = useRef(null);
@@ -1181,7 +1184,9 @@ export function useTradingChart({
       connectFreeSource(pairLabelRef.current);
 
       // Sync trading engine TF so auto-size % matches chart (persists on VPS).
-      if (persistBackend) {
+      // Only POST when we know the engine is OFF. `null` (status not loaded yet)
+      // and `true` (engine ON) must not send localStorage 1M and yank 0s → 1m.
+      if (persistBackend && botIsActiveRef.current === false) {
         authFetch('/set-timeframe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1562,7 +1567,7 @@ export function useTradingChart({
         if (!res.ok || cancelled) return;
         const data = await res.json();
         const serverTf = timeframeFromSeconds(data.timeframe_seconds);
-        if (!serverTf || cancelled) return;
+        if (serverTf == null || cancelled) return;
         try {
           localStorage.setItem(CHART_TIMEFRAME_STORAGE_KEY, serverTf);
         } catch {
@@ -1579,6 +1584,15 @@ export function useTradingChart({
       cancelled = true;
     };
   }, []);
+
+  // Live portfolio/rt feed keeps the chart on the engine TF (0s must not
+  // flash back to localStorage 1M after refresh).
+  useEffect(() => {
+    if (engineTimeframeSeconds == null) return;
+    const serverTf = timeframeFromSeconds(engineTimeframeSeconds);
+    if (serverTf == null || serverTf === timeframeRef.current) return;
+    switchTimeframeRef.current(serverTf, { persistBackend: false });
+  }, [engineTimeframeSeconds]);
 
   // Live wall-clock in the chart header (updates every second even between ticks).
   useEffect(() => {

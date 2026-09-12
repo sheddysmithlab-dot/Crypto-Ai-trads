@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { backendWsUrl } from '../config/api';
+import { backendWsUrl, preferHttpRealtime } from '../config/api';
+import { subscribeRtLive } from '../config/rtLive';
 
 export function timeAgo(unixSeconds) {
   const seconds = Math.floor(Date.now() / 1000 - unixSeconds);
@@ -25,6 +26,13 @@ export function useNotifications() {
   const reconnectTimer = useRef(null);
 
   useEffect(() => {
+    if (preferHttpRealtime) {
+      return subscribeRtLive((bundle, err) => {
+        if (err || !bundle?.notifications) return;
+        setNotifications(bundle.notifications.notifications || []);
+      });
+    }
+
     function connect() {
       const ws = new WebSocket(backendWsUrl('/ws/notifications'));
       ws.onmessage = (event) => {

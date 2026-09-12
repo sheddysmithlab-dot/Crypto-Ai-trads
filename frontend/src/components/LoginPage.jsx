@@ -3,6 +3,7 @@ import { useState } from 'react';
 export default function LoginPage({ onLogin }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -15,7 +16,6 @@ export default function LoginPage({ onLogin }) {
     } catch (err) {
       setError(err.message || 'Sign in failed. Check your credentials.');
     } finally {
-      setPassword('');
       setBusy(false);
     }
   }
@@ -57,18 +57,29 @@ export default function LoginPage({ onLogin }) {
               <label htmlFor="login-pass" className="block text-xs font-semibold text-gray-400 mb-1.5 uppercase tracking-wider">
                 Password
               </label>
-              <input
-                id="login-pass"
-                name="login-pass"
-                type="password"
-                autoComplete="new-password"
-                data-lpignore="true"
-                data-form-type="other"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full bg-[#0b0e11] border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"
-                required
-              />
+              <div className="relative">
+                <input
+                  id="login-pass"
+                  name="login-pass"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  data-lpignore="true"
+                  data-form-type="other"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full bg-[#0b0e11] border border-gray-700 rounded-lg px-3 py-2.5 pr-11 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500"
+                  required
+                />
+                <button
+                  type="button"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-gray-500 hover:text-gray-200"
+                  onClick={() => setShowPassword((v) => !v)}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  title={showPassword ? 'Hide password' : 'Show password'}
+                >
+                  <i className={`fas ${showPassword ? 'fa-eye-slash' : 'fa-eye'}`} aria-hidden="true" />
+                </button>
+              </div>
             </div>
           </div>
 

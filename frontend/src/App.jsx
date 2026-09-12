@@ -8,7 +8,7 @@ import { usePairSelector } from './hooks/usePairSelector';
 import { useTrades } from './hooks/useTrades';
 import { useNotifications } from './hooks/useNotifications';
 import { usePortfolio } from './hooks/usePortfolio';
-import { useTradingChart } from './hooks/useTradingChart';
+import { useTradingChart, timeframeFromSeconds } from './hooks/useTradingChart';
 import { useUptime } from './hooks/useUptime';
 import { useDayStats } from './hooks/useDayStats';
 import { useTfMoveStats } from './hooks/useTfMoveStats';
@@ -40,6 +40,12 @@ import { TRADING_PAIRS } from './data/pairs';
 
 const ORIGINAL_SYMBOLS = new Set(TRADING_PAIRS.map((p) => p.symbol));
 const LAUNCHER_SLOTS_KEY = 'ai_trading_bot_launcher_slots';
+const CHART_TFS = new Set(['0S', '1M', '5M', '15M', '1H', '1D']);
+
+function slotTimeframe(tf) {
+  const t = String(tf || '').toUpperCase();
+  return CHART_TFS.has(t) ? t : '1M';
+}
 
 function readSavedLauncherSlots() {
   try {
@@ -227,6 +233,7 @@ export default function App() {
     blueBoxOverlay: portfolio.blueBoxOverlay,
     entryCandles,
     patternNeon,
+    engineTimeframeSeconds: portfolio.timeframeSeconds,
   });
   const tfMoveStats = useTfMoveStats(pairSelector.activePairLabel, timeframe);
 
@@ -247,10 +254,11 @@ export default function App() {
         if (st.ok) {
           const data = await st.json();
           engineOn = Boolean(data.is_active);
+          const engineTf = slotTimeframe(timeframeFromSeconds(data.timeframe_seconds) || timeframe);
           if (!cancelled && engineOn && Array.isArray(data.watchlist) && data.watchlist.length) {
             const slots = data.watchlist.slice(0, MAX_LAUNCHER_SLOTS).map((pair, i) => {
               const symbol = String(pair).split('/')[0].toUpperCase();
-              return { id: `${symbol}-restored-${i}`, symbol, timeframe: '1M' };
+              return { id: `${symbol}-restored-${i}`, symbol, timeframe: engineTf };
             });
             setLauncherSlots(slots);
             persistLauncherSlots(slots);
@@ -276,7 +284,7 @@ export default function App() {
         if (!pairs.length || cancelled) return;
         const slots = pairs.slice(0, MAX_LAUNCHER_SLOTS).map((pair, i) => {
           const symbol = String(pair).split('/')[0].toUpperCase();
-          return { id: `${symbol}-restored-${i}`, symbol, timeframe: '1M' };
+          return { id: `${symbol}-restored-${i}`, symbol, timeframe: slotTimeframe(timeframe) };
         });
         setLauncherSlots(slots);
         persistLauncherSlots(slots);
@@ -319,12 +327,14 @@ export default function App() {
         next.push({
           id: prevSlot?.id || `${sym}-fire-${next.length}`,
           symbol: sym,
-          timeframe: prevSlot?.timeframe || '1M',
+          timeframe: slotTimeframe(timeframe || prevSlot?.timeframe),
         });
       }
       const same =
         next.length === prev.length &&
-        next.every((s, i) => s.symbol === prev[i]?.symbol);
+        next.every(
+          (s, i) => s.symbol === prev[i]?.symbol && s.timeframe === prev[i]?.timeframe
+        );
       if (same) return prev;
       persistLauncherSlots(next);
       return next;
@@ -345,6 +355,7 @@ export default function App() {
     portfolio.momentumFirePairs,
     portfolio.momentumLastRefreshMs,
     trades,
+    timeframe,
   ]);
 
   // Engine OFF → restore launcher to original 20 (drop momentum-added chips).
@@ -358,7 +369,7 @@ export default function App() {
       const restored = TRADING_PAIRS.map((p, i) => ({
         id: `${p.symbol}-orig-${i}`,
         symbol: p.symbol,
-        timeframe: '1M',
+        timeframe: slotTimeframe(timeframe),
       }));
       persistLauncherSlots(restored);
       return restored;
