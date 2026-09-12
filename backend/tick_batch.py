@@ -1,10 +1,11 @@
 """0s tick batches: 7-coin slices, OF score ≥ 40 taker fire.
 
 Watchlist remainder (n % 7) is skipped this scan and leads the next slice.
-Exits (not 1m path SL/TP):
-  - take a trade once it is net green after roundtrip fees
-  - hard-cut a bleed at −1.0% gross (stops a −7% hostage)
-  - if 2+ in the same batch are still open and the leftover book is net > 0, exit-all
+Exits are BATCH-ONLY (never a single trade):
+  - wait until all 7 are open
+  - hard-stop the book at −1.00% combined gross
+  - profit trail arms at +0.30% (no cap); giveback −0.30% from peak
+    then exit-all when winner profit+Bybit fees > loser loss+Bybit fees
 """
 from __future__ import annotations
 
@@ -17,10 +18,9 @@ TICK_TF = "0s"
 TICK_BATCH_SIZE = 7
 TICK_SCORE_MIN = 40.0
 TICK_SCORE_TF = "1m"  # OF score source (Bybit has no 0s kline)
-# Circuit breaker — not the 1m −0.50/−0.70 trail.
-TICK_HARD_LOSS_PCT = 1.0
-# Scratch filter: must clear fees by at least this many USD.
-TICK_MIN_NET_USD = 0.01
+TICK_BATCH_HARD_PCT = 1.0
+TICK_BATCH_TRAIL_ARM_PCT = 0.30
+TICK_BATCH_TRAIL_GIVEBACK_PCT = 0.30
 
 
 def slice_watchlist(
@@ -113,33 +113,90 @@ def _roundtrip_fees_usd(agent: Any, trade: dict) -> tuple[float, float]:
     return gross, entry_fee + est_exit
 
 
-def tick_trade_exit_reason(agent: Any, trade: dict) -> str | None:
-    """Per-trade 0s exit: net TP after fees, or −1% hard cut."""
-    gross, fees = _roundtrip_fees_usd(agent, trade)
-    m = agent._trade_metrics(trade, for_close=False)
-    try:
-        gross_pct = float(m.get("gross_pct") or 0)
-    except (TypeError, ValueError):
-        gross_pct = 0.0
-    if gross_pct <= -TICK_HARD_LOSS_PCT + 1e-9:
-        return (
-            f"TICK_HARD_STOP | {gross_pct:.2f}% <= -{TICK_HARD_LOSS_PCT:.2f}%"
-        )
-    net = gross - fees
-    if net > TICK_MIN_NET_USD:
-        return f"TICK_NET_TP | net ${net:.2f} after fees ({gross_pct:+.2f}%)"
-    return None
-
-
-def book_should_exit(agent: Any, trades: list[dict]) -> bool:
-    """Leftover batch is net green after estimated roundtrip fees."""
-    if len(trades) < 2:
-        return False
-    net = 0.0
+def batch_book_stats(agent: Any, trades: list[dict]) -> dict:
+    """Combined 7-trade book: winner pile vs loser pile + Bybit fees, plus $weighted %."""
+    profit = 0.0
+    lose = 0.0
+    fee_win = 0.0
+    fee_lose = 0.0
+    gross_usd = 0.0
+    notional = 0.0
     for t in trades:
-        gross, fees = _roundtrip_fees_usd(agent, t)
-        net += gross - fees
-    return net > TICK_MIN_NET_USD
+        g, fees = _roundtrip_fees_usd(agent, t)
+        gross_usd += g
+        notional += float(t.get("position_size") or 0)
+        if g > 0:
+            profit += g
+            fee_win += fees
+        else:
+            lose += abs(g)
+            fee_lose += fees
+    pct = (gross_usd / notional * 100.0) if notional > 0 else 0.0
+    return {
+        "profit": profit,
+        "lose": lose,
+        "fee_win": fee_win,
+        "fee_lose": fee_lose,
+        "gross_usd": gross_usd,
+        "notional": notional,
+        "gross_pct": pct,
+        "book_beats": (profit + fee_win) > (lose + fee_lose),
+    }
+
+
+def _batch_peaks(agent: Any) -> dict:
+    peaks = getattr(agent, "tick_batch_peaks", None)
+    if not isinstance(peaks, dict):
+        peaks = {}
+        agent.tick_batch_peaks = peaks
+    return peaks
+
+
+def _stamp_batch_ui(trades: list[dict], st: dict, peak: float) -> None:
+    trail_line = (
+        peak - TICK_BATCH_TRAIL_GIVEBACK_PCT
+        if peak >= TICK_BATCH_TRAIL_ARM_PCT
+        else None
+    )
+    for t in trades:
+        t["batch_gross_pct"] = round(float(st["gross_pct"]), 4)
+        t["batch_peak_gross_pct"] = round(float(peak), 4)
+        t["batch_trail_line_pct"] = (
+            round(float(trail_line), 4) if trail_line is not None else None
+        )
+        t["batch_book_ready"] = bool(st["book_beats"])
+
+
+def batch_exit_reason(agent: Any, bid: str, trades: list[dict]) -> str | None:
+    """All-or-nothing 7-trade exits. None until the batch is full."""
+    st = batch_book_stats(agent, trades)
+    pct = float(st["gross_pct"])
+    peaks = _batch_peaks(agent)
+    peak = float(peaks.get(bid) or 0)
+    if pct > peak:
+        peak = pct
+        peaks[bid] = pct
+    _stamp_batch_ui(trades, st, peak)
+    if len(trades) < TICK_BATCH_SIZE:
+        return None
+
+    if pct <= -TICK_BATCH_HARD_PCT + 1e-9:
+        return (
+            f"TICK_BATCH_HARD_STOP | {bid} | "
+            f"book {pct:.2f}% <= -{TICK_BATCH_HARD_PCT:.2f}%"
+        )
+
+    armed = peak >= TICK_BATCH_TRAIL_ARM_PCT - 1e-9
+    if not armed:
+        return None
+    trail_line = peak - TICK_BATCH_TRAIL_GIVEBACK_PCT
+    if pct <= trail_line + 1e-9 and st["book_beats"]:
+        return (
+            f"TICK_BATCH_PROFIT_TRAIL | {bid} | "
+            f"peak {peak:.2f}% giveback {TICK_BATCH_TRAIL_GIVEBACK_PCT:.2f}% "
+            f"now {pct:.2f}% · P+Fp > L+Fl"
+        )
+    return None
 
 
 def prune_finished_batches(agent: Any) -> None:
@@ -168,6 +225,8 @@ def prune_finished_batches(agent: Any) -> None:
             continue
         keep[key] = list(pairs)
     agent.tick_assigned_batches = keep
+    peaks = _batch_peaks(agent)
+    agent.tick_batch_peaks = {k: v for k, v in peaks.items() if k in keep}
 
 
 def ensure_assigned_batches(agent: Any, scan_pairs: list[str]) -> list[tuple[str, list[str]]]:
@@ -207,28 +266,13 @@ def _is_open_tick(trade: dict) -> bool:
 
 
 def close_tick_batches_if_ready(agent: Any) -> int:
-    """Take net-green ticks, hard-cut bleeds, then sweep a leftover green book."""
+    """Exit a full 7-trade batch together — never a single tick fill."""
     close_ids: set = set()
     closed_n = 0
 
-    def _close(trade: dict, reason: str) -> None:
-        nonlocal closed_n
-        metrics = agent._trade_metrics(trade)
-        if agent._close_single_trade(trade, metrics, reason):
-            closed_n += 1
-            close_ids.add(trade.get("id"))
-            print(f"[0S TICK] {reason} #{trade.get('id')} {trade.get('pair')}")
-
-    for trade in list(getattr(agent, "trades", []) or []):
-        if not _is_open_tick(trade):
-            continue
-        reason = tick_trade_exit_reason(agent, trade)
-        if reason:
-            _close(trade, reason)
-
     groups: dict[str, list[dict]] = {}
     for t in list(getattr(agent, "trades", []) or []):
-        if t.get("id") in close_ids or not _is_open_tick(t):
+        if not _is_open_tick(t):
             continue
         bid = t.get("batch_id")
         if not bid:
@@ -236,13 +280,15 @@ def close_tick_batches_if_ready(agent: Any) -> int:
         groups.setdefault(str(bid), []).append(t)
 
     for bid, group in groups.items():
-        if not book_should_exit(agent, group):
+        reason = batch_exit_reason(agent, bid, group)
+        if not reason:
             continue
-        reason = f"TICK_BATCH_BOOK_EXIT | {bid} | leftover net > 0"
         for trade in group:
-            if trade.get("id") in close_ids:
-                continue
-            _close(trade, reason)
+            metrics = agent._trade_metrics(trade)
+            if agent._close_single_trade(trade, metrics, reason):
+                closed_n += 1
+                close_ids.add(trade.get("id"))
+                print(f"[0S TICK] {reason} #{trade.get('id')} {trade.get('pair')}")
 
     if closed_n:
         agent.trades = [t for t in agent.trades if t.get("id") not in close_ids]

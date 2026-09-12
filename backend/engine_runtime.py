@@ -72,6 +72,11 @@ def dump_runtime(agent: Any, *, pattern_neon: list | None = None) -> dict:
         "tick_batch_cursor": int(getattr(agent, "tick_batch_cursor", 0) or 0),
         "tick_batch_seq": int(getattr(agent, "tick_batch_seq", 0) or 0),
         "tick_assigned_batches": dict(getattr(agent, "tick_assigned_batches", {}) or {}),
+        "tick_batch_peaks": {
+            str(k): float(v)
+            for k, v in dict(getattr(agent, "tick_batch_peaks", {}) or {}).items()
+            if k is not None
+        },
         "trade_seq": int(getattr(agent, "trade_seq", 0) or 0),
         "trades": [_safe_trade(t) for t in (getattr(agent, "trades", []) or [])],
         "trade_history": [
@@ -183,6 +188,17 @@ def restore_runtime(agent: Any) -> dict:
                     continue
                 cleaned[str(bid)] = [str(p) for p in pairs if p]
             agent.tick_assigned_batches = cleaned
+        raw_peaks = data.get("tick_batch_peaks")
+        if isinstance(raw_peaks, dict):
+            cleaned_peaks = {}
+            for bid, val in raw_peaks.items():
+                if not bid:
+                    continue
+                try:
+                    cleaned_peaks[str(bid)] = float(val)
+                except (TypeError, ValueError):
+                    continue
+            agent.tick_batch_peaks = cleaned_peaks
         if data.get("trade_seq") is not None:
             agent.trade_seq = max(int(agent.trade_seq or 0), int(data["trade_seq"] or 0))
 

@@ -150,8 +150,8 @@ function grossColor(trade) {
 
 function exitReasonLabel(reason) {
   const raw = String(reason || '');
-  if (raw.includes('TICK_NET_TP')) return 'Tick net profit';
-  if (raw.includes('TICK_HARD_STOP')) return 'Tick hard stop';
+  if (raw.includes('TICK_BATCH_PROFIT_TRAIL')) return 'Batch profit trail';
+  if (raw.includes('TICK_BATCH_HARD_STOP')) return 'Batch hard stop';
   if (raw.includes('TICK_BATCH_BOOK_EXIT')) return 'Batch book exit';
   if (raw.includes('PROFIT_LOCK')) return 'Profit book';
   if (raw.includes('LOSS_BAND')) return 'Hard stop';
@@ -236,9 +236,18 @@ function isTickBatchTrade(trade) {
 function pathExitHint(trade) {
   if (!trade || trade.status === 'sold') return null;
   if (isTickBatchTrade(trade)) {
-    return trade.batch_id
-      ? `0S ${trade.batch_id} · take net profit · hard −1.0%`
-      : '0S · take net profit · hard −1.0%';
+    const book = trade.batch_gross_pct;
+    const peak = trade.batch_peak_gross_pct;
+    const line = trade.batch_trail_line_pct;
+    const bookTxt =
+      Number.isFinite(Number(book))
+        ? `book ${Number(book) >= 0 ? '+' : ''}${Number(book).toFixed(2)}%`
+        : 'book';
+    const trailTxt =
+      line != null && Number.isFinite(Number(line))
+        ? ` · trail ${Number(line).toFixed(2)}% (peak ${Number(peak || 0).toFixed(2)}%)`
+        : ' · trail arm +0.30%';
+    return `0S 7-batch ${bookTxt}${trailTxt} · hard −1.00% · exit-all P+fees > L+fees`;
   }
   if (trade.status === 'locked' && trade.sell_trigger_pct != null) {
     return `exit ≤ +${Number(trade.sell_trigger_pct).toFixed(2)}%`;

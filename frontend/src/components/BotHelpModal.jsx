@@ -3,7 +3,7 @@ const SECTIONS = [
     title: 'AI Engine',
     items: [
       'START AI ENGINE scans watchlist pairs on your chart TF (0s tick, or 1m–1D candles).',
-      '0S tick: watchlist in 7-coin batches (35→5 batches; leftovers next scan). Fire when OF score ≥ 40 (taker). Each fill books when net after fees is green; hard-cut at −1.0% so one dog cannot hold winners. Leftover batch still exits together if net > 0. Size 0.5%. Chart shows 1m candles as backdrop.',
+      '0S tick: watchlist in 7-coin batches (leftovers next scan). Fire when OF score ≥ 40 (taker). No single-trade exit — all 7 close together. Batch hard stop −1.00%. Profit trail arms at +0.30% (no cap); giveback −0.30% from peak then exit-all when winner profit+Bybit fees > loser loss+Bybit fees. Size 0.5%. Chart shows 1m candles as backdrop.',
       'Engine runs on the VPS — closing the browser does NOT stop trading. Only AI ENGINE STOP does.',
       'Momentum gate: only coins with MARKET avg% above TF floor (0S/1M>0.055, 5M>0.25, 15M>0.25, 1H>0.55, 1D>7) auto-enter watchlist; re-scan hourly.',
       'HARD RULE: 7th-candle / watchlist refresh·replace·add·edit NEVER closes or hides related OPEN trades — they keep their own TP/SL until exit.',

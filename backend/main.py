@@ -1266,6 +1266,7 @@ class AITradingAgent:
         self.tick_batch_cursor = 0
         self.tick_batch_seq = 0
         self.tick_assigned_batches: dict[str, list[str]] = {}
+        self.tick_batch_peaks: dict[str, float] = {}
 
     # Cap = every mapped Bybit pair (frontend TRADING_PAIRS / BYBIT_SYMBOL_MAP).
     MAX_WATCHLIST = 32
@@ -3571,6 +3572,7 @@ class AITradingAgent:
         self.momentum_scan_stage = "starting"
         self.last_momentum_candle_ms = 0
         self.tick_assigned_batches = {}
+        self.tick_batch_peaks = {}
         # Seed cursor on next scan so already-closed history is not traded as fresh detects.
         _reset_scan_candle_baseline()
         print(
