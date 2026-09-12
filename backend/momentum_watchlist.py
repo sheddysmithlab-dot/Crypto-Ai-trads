@@ -16,14 +16,15 @@ from typing import Any, Awaitable, Callable
 from chart_tf_move import fetch_tf_move
 
 # Strict: avg_pct must be greater than these floors (same units as MARKET %).
-# Tightened so fewer quiet coins flood the watchlist / fire list.
+# 1m/0s restored to 0.055 (15m-align 0.25 was starving the 1m fire list).
 MOMENTUM_MIN_AVG_PCT: dict[str, float] = {
-    "1m": float(os.environ.get("MOMENTUM_MIN_1M", "0.25")),
+    "1m": float(os.environ.get("MOMENTUM_MIN_1M", "0.055")),
     "5m": float(os.environ.get("MOMENTUM_MIN_5M", "0.25")),
     "15m": float(os.environ.get("MOMENTUM_MIN_15M", "0.25")),
     "1h": float(os.environ.get("MOMENTUM_MIN_1H", "0.55")),
     "1d": float(os.environ.get("MOMENTUM_MIN_1D", "7.0")),
     "1D": float(os.environ.get("MOMENTUM_MIN_1D", "7.0")),
+    "0s": float(os.environ.get("MOMENTUM_MIN_0S", "0.055")),
 }
 
 MOMENTUM_REFRESH_EVERY_N_CANDLES = 7  # legacy; candle re-scan disabled — use timer instead
@@ -35,6 +36,7 @@ SCORE_CONCURRENCY = 10
 
 # engine key (1m) → UI key for fetch_tf_move (1M)
 _ENGINE_TO_UI_TF: dict[str, str] = {
+    "0s": "1M",
     "1m": "1M",
     "30s": "1M",
     "5m": "5M",
