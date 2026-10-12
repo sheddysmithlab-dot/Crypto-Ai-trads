@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
-import { backendWsUrl, preferHttpRealtime } from '../config/api';
-import { subscribeRtLive } from '../config/rtLive';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { authFetch, backendWsUrl, preferHttpRealtime } from '../config/api';
+import { bumpRtLive, subscribeRtLive } from '../config/rtLive';
 
 function applyPortfolioData(data) {
   return {
@@ -55,6 +55,7 @@ function applyPortfolioData(data) {
       const n = Number(v);
       return Number.isFinite(n) ? n : null;
     })(),
+    availableCapital: Number(data.available_capital),
   };
 }
 
@@ -102,6 +103,7 @@ export function usePortfolio(setConnected) {
     momentumScanTotal: 0,
     momentumScanStage: '',
     timeframeSeconds: null,
+    availableCapital: null,
   });
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
@@ -153,5 +155,39 @@ export function usePortfolio(setConnected) {
     };
   }, [setConnected]);
 
-  return portfolio;
+  const applyModeSnapshot = useCallback((data) => {
+    if (!data) return;
+    setPortfolio((prev) => ({
+      ...prev,
+      tradingMode: data.trading_mode || prev.tradingMode,
+      totalCapital:
+        data.total_portfolio_value != null
+          ? Number(data.total_portfolio_value)
+          : prev.totalCapital,
+      cashLedger:
+        data.capital != null
+          ? Number(data.capital)
+          : data.equity != null
+            ? Number(data.equity)
+            : prev.cashLedger,
+    }));
+  }, []);
+
+  const refresh = useCallback(async () => {
+    bumpRtLive();
+    try {
+      const res = await authFetch('/rt/live');
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (data?.portfolio) {
+        setPortfolio(applyPortfolioData(data.portfolio));
+        setConnected('portfolio', true);
+      }
+      return data;
+    } catch {
+      return null;
+    }
+  }, [setConnected]);
+
+  return { ...portfolio, refresh, applyModeSnapshot };
 }

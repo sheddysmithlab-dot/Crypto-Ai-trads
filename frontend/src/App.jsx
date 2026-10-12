@@ -108,6 +108,8 @@ export default function App() {
   const [launcherEditingId, setLauncherEditingId] = useState(null);
 
   const portfolio = usePortfolio(setConnected);
+  const refreshPortfolio = portfolio.refresh;
+  const applyModeSnapshot = portfolio.applyModeSnapshot;
   const effectiveTradingMode = tradingModeOverride || portfolio.tradingMode;
 
   useEffect(() => {
@@ -183,8 +185,10 @@ export default function App() {
         }
         const nextMode = data.trading_mode || mode;
         setTradingModeOverride(nextMode);
+        applyModeSnapshot?.(data);
         setTradingModeModalOpen(false);
         await refreshPaperStatus();
+        await refreshPortfolio?.();
         if (nextMode === 'PAPER_TRADING') {
           setPaperModalForcePaper(true);
           setPaperModalOpen(true);
@@ -195,7 +199,7 @@ export default function App() {
         setTradingModeSwitching(false);
       }
     },
-    [effectiveBotActive, refreshPaperStatus]
+    [effectiveBotActive, refreshPaperStatus, refreshPortfolio, applyModeSnapshot]
   );
 
   const fetchSystemLogs = useCallback(async () => {
@@ -821,13 +825,14 @@ export default function App() {
   const seasonProfitPct = Number(portfolio.seasonProfitPct) || 0;
   const seasonProfitNetPct = Number(portfolio.seasonProfitNetPct) || 0;
 
-  // Total Capital from portfolio ledger (WS). Paper hook is only a seed.
-  const totalEquity =
-    Number(portfolio.cashLedger) > 0 || Number(portfolio.totalCapital) > 0
-      ? (portfolio.cashLedger ?? portfolio.totalCapital)
-      : (paperCapital != null && Number.isFinite(Number(paperCapital))
-          ? Number(paperCapital)
-          : (portfolio.cashLedger ?? portfolio.totalCapital ?? 0));
+  // Total Capital = mode equity (paper simulated book / live Bybit). Never mix the two.
+  const wsEquity = Number(portfolio.totalCapital);
+  const isLiveMode = effectiveTradingMode === 'LIVE_TRADING';
+  const totalEquity = Number.isFinite(wsEquity)
+    ? wsEquity
+    : (!isLiveMode && paperCapital != null && Number.isFinite(Number(paperCapital))
+        ? Number(paperCapital)
+        : 0);
   const tradeValue = Number(portfolio.tradeNotional) || 0;
   const sessionOpenPositions = Number(portfolio.sessionOpenPositions) || 0;
 

@@ -5,14 +5,17 @@ const listeners = new Set();
 let timer = null;
 let inFlight = false;
 let lastBundle = null;
+let epoch = 0;
 
 async function pollOnce() {
   if (inFlight) return;
   inFlight = true;
+  const myEpoch = epoch;
   try {
     const res = await authFetch('/rt/live');
     if (!res.ok) throw new Error(`rt/live ${res.status}`);
     const data = await res.json();
+    if (myEpoch !== epoch) return;
     lastBundle = data;
     listeners.forEach((fn) => {
       try {
@@ -22,6 +25,7 @@ async function pollOnce() {
       }
     });
   } catch (err) {
+    if (myEpoch !== epoch) return;
     listeners.forEach((fn) => {
       try {
         fn(null, err);
@@ -46,6 +50,12 @@ function stopIfIdle() {
     clearInterval(timer);
     timer = null;
   }
+}
+
+/** Drop cached /rt/live so the next poll cannot overwrite a paper↔live switch. */
+export function bumpRtLive() {
+  epoch += 1;
+  lastBundle = null;
 }
 
 /**

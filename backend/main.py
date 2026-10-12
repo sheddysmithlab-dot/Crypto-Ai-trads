@@ -1185,6 +1185,9 @@ class AITradingAgent:
         # Pre-start strategy config (AI Agent Instructions modal before START).
         self.starting_capital = 0.0
         self.current_capital = 0.0
+        # Paper vault survives LIVE mode (Bybit equity must not overwrite simulated cash).
+        self.paper_starting_capital = 0.0
+        self.paper_current_capital = 0.0
         # Total capital risk % from modal -> max_concurrent_trades via round(risk_pct * 2).
         # Also: when session portfolio drop hits this %, auto Hold-stop (no new entries).
         self.risk_level_pct = 5.0
@@ -1994,8 +1997,32 @@ class AITradingAgent:
             return 0.0  # LIVE but balance not fetched yet → 0, not paper
         return self.current_capital
 
+    def snapshot_paper_vault(self) -> None:
+        """Freeze simulated paper cash before LIVE overwrites current_capital."""
+        if bybit_api.mode == "LIVE_TRADING":
+            return
+        cap = float(self.current_capital or 0)
+        if cap < 100:
+            return
+        self.paper_current_capital = cap
+        self.paper_starting_capital = float(self.starting_capital or cap)
+
+    def restore_paper_vault(self) -> None:
+        """Bring simulated paper cash back after leaving LIVE."""
+        paper = float(self.paper_current_capital or 0)
+        start = float(self.paper_starting_capital or paper or 0)
+        if paper < 100:
+            self.set_paper_capital(100_000.0)
+            return
+        self.current_capital = paper
+        self.starting_capital = start if start >= 100 else paper
+        print(
+            f"[PAPER VAULT] Restored simulated capital ${self.current_capital:,.2f} "
+            f"(start ${self.starting_capital:,.2f})."
+        )
+
     def on_live_connected(self, equity: float):
-        """ Paper credentials sleep: clear simulated state and bind ledger to Bybit equity. """
+        """Bind ledger to Bybit equity. Paper vault stays untouched."""
         self.trades = []
         self.trade_history = []
         self.current_capital = equity
@@ -2119,6 +2146,8 @@ class AITradingAgent:
         Only allowed while the agent is still in PAPER_TRADING mode (never touches real funds). """
         self.starting_capital = amount
         self.current_capital = amount
+        self.paper_starting_capital = float(amount)
+        self.paper_current_capital = float(amount)
         self.trades = []
         self.trade_history = []
         self.is_lock_active = False
@@ -2497,6 +2526,11 @@ class AITradingAgent:
                         row["exchange"] = "bybit_linear"
                         break
                 self.persist_runtime(force=True)
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(bybit_api.fetch_real_balance())
+                except RuntimeError:
+                    pass
             else:
                 bybit_api.execute_market_open(
                     trade_pair,
@@ -3610,6 +3644,9 @@ class AITradingAgent:
 
     def persist_runtime(self, force: bool = False) -> None:
         """Checkpoint open book + chart neon so restarts keep detect→confirm→fire history."""
+        if bybit_api.mode == "PAPER_TRADING":
+            self.paper_current_capital = float(self.current_capital or 0)
+            self.paper_starting_capital = float(self.starting_capital or 0)
         now = time.time()
         if not force and (now - float(self._last_runtime_save or 0)) < 2.0:
             return
@@ -6925,9 +6962,12 @@ async def start_background_tasks():
     try:
         want_live = bool(settings_store.live_trading_preferred) and settings_store.is_bybit_configured()
         if want_live:
+            if float(getattr(agent, "paper_current_capital", 0) or 0) < 100:
+                agent.paper_current_capital = 100_000.0
+                agent.paper_starting_capital = 100_000.0
             bybit_api.mode = "LIVE_TRADING"
             bybit_api.connected = True
-            # Wipe paper capital — LIVE mode uses Bybit balance exclusively.
+            # LIVE ledger uses Bybit equity; paper vault stays on disk.
             agent.current_capital = 0.0
             agent.starting_capital = 0.0
             print(
@@ -6961,6 +7001,7 @@ async def start_background_tasks():
                     print(f"[RECONCILE] startup note: {exc}")
 
             asyncio.create_task(_startup_reconcile())
+            agent.persist_runtime(force=True)
         else:
             bybit_api.mode = "PAPER_TRADING"
             bybit_api.connected = False
@@ -6968,16 +7009,13 @@ async def start_background_tasks():
                 settings_store.live_trading_preferred = False
                 _persist_live_trading(False)
                 print("[SETTINGS] LIVE preferred but no Bybit keys — forced PAPER.")
-            if agent.current_capital <= 0:
-                agent.starting_capital = 100_000.0
-                agent.current_capital = agent.starting_capital
-                print("[SETTINGS] PAPER mode (capital seeded $100,000). Use header button for LIVE.")
-            else:
-                keys_note = "keys on disk" if settings_store.is_bybit_configured() else "no keys"
-                print(
-                    f"[SETTINGS] PAPER mode ({keys_note}, restored capital). "
-                    f"Header button controls LIVE."
-                )
+            agent.restore_paper_vault()
+            agent.persist_runtime(force=True)
+            keys_note = "keys on disk" if settings_store.is_bybit_configured() else "no keys"
+            print(
+                f"[SETTINGS] PAPER mode ({keys_note}, vault ${agent.current_capital:,.2f}). "
+                f"Header button controls LIVE."
+            )
     except Exception as exc:
         print(f"[SETTINGS] Bybit restore note: {exc}")
     asyncio.create_task(market_simulator())
@@ -7428,9 +7466,15 @@ async def set_trading_mode(payload: TradingModePayload):
     if want == "PAPER_TRADING":
         reset_bybit_executor_agent()
         bybit_api.disconnect_real_api(reason="User switched to Paper Trading")
-        # Keep existing paper capital if set; otherwise seed a safe default.
-        if float(agent.current_capital or 0) < 100:
-            agent.set_paper_capital(100000.0)
+        agent.restore_paper_vault()
+        # Live Bybit book must not follow into paper equity.
+        agent.trades = []
+        agent.trade_history = []
+        agent.ai_season_start_capital = None
+        agent.ai_season_id = None
+        agent.ai_season_started_at = None
+        agent._reset_session_stats()
+        agent.persist_runtime(force=True)
         notifications.push("Switched to PAPER TRADING (simulated capital).", "success")
         system_log.push(
             "ai",
@@ -7442,6 +7486,7 @@ async def set_trading_mode(payload: TradingModePayload):
             "message": "PAPER TRADING active — virtual capital, no real orders.",
             "trading_mode": "PAPER_TRADING",
             "capital": round(float(agent.current_capital or 0), 2),
+            "total_portfolio_value": round(float(agent.get_total_portfolio_value() or 0), 2),
         }
 
     # LIVE_TRADING
@@ -7452,11 +7497,14 @@ async def set_trading_mode(payload: TradingModePayload):
             "trading_mode": bybit_api.mode,
             "needs_keys": True,
         }
+    agent.snapshot_paper_vault()
+    agent.persist_runtime(force=True)
     reset_bybit_executor_agent()
     bybit_api.connect_real_api()
     equity = await bybit_api.fetch_real_balance()
     if equity is not None:
         agent.on_live_connected(equity)
+        agent.persist_runtime(force=True)
     system_log.push(
         "ai",
         "Trading mode → LIVE_TRADING",
@@ -7471,12 +7519,14 @@ async def set_trading_mode(payload: TradingModePayload):
             ),
             "trading_mode": "LIVE_TRADING",
             "equity": None,
+            "total_portfolio_value": 0.0,
         }
     return {
         "status": "success",
         "message": f"LIVE TRADING active — Bybit equity ${equity:,.2f}.",
         "trading_mode": "LIVE_TRADING",
         "equity": equity,
+        "total_portfolio_value": round(float(equity), 2),
     }
 
 # ==========================================
@@ -8423,8 +8473,14 @@ def _rt_portfolio_payload() -> dict:
     except Exception:
         blue_box_overlay = []
 
+    live = bybit_api.mode == "LIVE_TRADING"
+    cash = (
+        float(bybit_api.last_known_available)
+        if live and bybit_api.last_known_available is not None
+        else float(agent.current_capital or 0)
+    )
     return {
-        "capital": round(agent.current_capital, 2),
+        "capital": round(cash, 2),
         "available_capital": round(agent.get_available_capital(), 2),
         "total_portfolio_value": round(total_value, 2),
         "unrealized_net_usd": round(unrealized_net, 2),

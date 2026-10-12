@@ -94,6 +94,8 @@ def dump_runtime(agent: Any, *, pattern_neon: list | None = None) -> dict:
         "daily_target_reached": bool(getattr(agent, "daily_target_reached", False)),
         "current_capital": float(getattr(agent, "current_capital", 0) or 0),
         "starting_capital": float(getattr(agent, "starting_capital", 0) or 0),
+        "paper_current_capital": float(getattr(agent, "paper_current_capital", 0) or 0),
+        "paper_starting_capital": float(getattr(agent, "paper_starting_capital", 0) or 0),
         "pair_prices": dict(getattr(agent, "pair_prices", {}) or {}),
         "current_price": float(getattr(agent, "current_price", 0) or 0),
     }
@@ -249,6 +251,18 @@ def restore_runtime(agent: Any) -> dict:
             agent.current_capital = float(data["current_capital"])
         if data.get("starting_capital") is not None:
             agent.starting_capital = float(data["starting_capital"])
+        if data.get("paper_current_capital") is not None:
+            agent.paper_current_capital = float(data["paper_current_capital"])
+        elif float(getattr(agent, "paper_current_capital", 0) or 0) <= 0:
+            cur = float(getattr(agent, "current_capital", 0) or 0)
+            # Never seed the paper vault from LIVE Bybit equity (~$10k). Paper default is $100k.
+            agent.paper_current_capital = cur if cur >= 100_000 else 100_000.0
+        if data.get("paper_starting_capital") is not None:
+            agent.paper_starting_capital = float(data["paper_starting_capital"])
+        elif float(getattr(agent, "paper_starting_capital", 0) or 0) <= 0:
+            start = float(getattr(agent, "starting_capital", 0) or 0)
+            paper = float(getattr(agent, "paper_current_capital", 0) or 0)
+            agent.paper_starting_capital = start if start >= 100_000 else paper
         prices = data.get("pair_prices")
         if isinstance(prices, dict) and prices:
             agent.pair_prices = {str(k): float(v) for k, v in prices.items() if v is not None}

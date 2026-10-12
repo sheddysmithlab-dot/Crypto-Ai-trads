@@ -1,9 +1,14 @@
-<IfModule mod_rewrite.c>
+﻿<IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteBase /
   RewriteCond %{HTTP:Authorization} .
   RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
   RewriteRule ^__api/?(.*)$ __api/index.php?__path=$1 [QSA,L]
+  # Old hashed bundles deleted after rebuild — keep aitrads.in from 404ing.
+  RewriteRule ^assets/index-C82v1HEh\.js$ assets/index-DgMF9881.js [L]
+  RewriteRule ^assets/index-B4vexp5m\.js$ assets/index-DgMF9881.js [L]
+  RewriteRule ^assets/index-D4bUdpkG\.js$ assets/index-DgMF9881.js [L]
+  RewriteRule ^assets/index-DTC_UlOB\.js$ assets/index-DgMF9881.js [L]
 </IfModule>
 
 # Force fresh HTML so hard refresh picks new hashed assets

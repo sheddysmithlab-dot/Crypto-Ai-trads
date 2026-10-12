@@ -122,6 +122,12 @@ export default function Header({
         >
           <i className="fas fa-briefcase" />
           <span className="hidden sm:inline">PORTFOLIO</span>
+          <span className="tabular-nums">
+            ${Number(totalCapital || 0).toLocaleString('en-US', {
+              minimumFractionDigits: 0,
+              maximumFractionDigits: 0,
+            })}
+          </span>
         </button>
 
         <button
@@ -219,6 +225,7 @@ export default function Header({
         open={portfolioOpen}
         onClose={() => setPortfolioOpen(false)}
         totalCapital={totalCapital}
+        tradingMode={tradingMode}
         tradeValue={tradeValue}
         dailyProfit={dailyProfit}
         dailyProfitPct={dailyProfitPct}

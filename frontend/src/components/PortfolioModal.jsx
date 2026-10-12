@@ -29,6 +29,7 @@ export default function PortfolioModal({
   open,
   onClose,
   totalCapital,
+  tradingMode = null,
   tradeValue = 0,
   dailyProfit,
   dailyProfitPct,
@@ -103,8 +104,18 @@ export default function PortfolioModal({
         </div>
 
         <div className="p-4 grid grid-cols-2 sm:grid-cols-3 gap-2.5">
-          <StatCell label="Total Capital" tip="Cash available for new trades.">
+          <StatCell
+            label="Total Capital"
+            tip={
+              tradingMode === 'LIVE_TRADING'
+                ? 'Live Bybit USDT equity (updates with real-money P&L).'
+                : 'Paper simulated equity (cash + open P&L). Switching Live/Paper loads the matching book.'
+            }
+          >
             <span className="text-gray-900 dark:text-white">${capStr}</span>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 mt-0.5">
+              {tradingMode === 'LIVE_TRADING' ? 'Live Bybit' : 'Paper'}
+            </div>
           </StatCell>
           <StatCell label="Trade Value" tip="Open trade size for this AI session. Freezes on STOP, resets on START.">
             <span className="text-amber-500">${tradeValStr}</span>
