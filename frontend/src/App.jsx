@@ -874,6 +874,11 @@ export default function App() {
         onOpenStatement={() => setStatementOpen(true)}
         onLogout={logout}
         username={username}
+        onPortfolioResetDone={(data) => {
+          applyModeSnapshot?.(data);
+          if (data?.trading_mode) setTradingModeOverride(data.trading_mode);
+          refreshPortfolio?.();
+        }}
       />
 
       <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden flex flex-col p-2 lg:p-4 gap-3 pb-4">

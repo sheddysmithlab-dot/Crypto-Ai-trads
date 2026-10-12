@@ -2021,6 +2021,25 @@ class AITradingAgent:
             f"(start ${self.starting_capital:,.2f})."
         )
 
+    def reset_local_trade_table(self) -> None:
+        """Wipe the local live/paper trades table + session counters. Does not touch Bybit positions."""
+        self.trades = []
+        self.trade_history = []
+        self.tick_batch_cursor = 0
+        self.tick_batch_seq = 0
+        self.tick_assigned_batches = {}
+        self.tick_batch_peaks = {}
+        self.ai_season_start_capital = None
+        self.ai_season_id = None
+        self.ai_season_started_at = None
+        self.ai_season_end_reason = None
+        self._reset_session_stats()
+        self.is_lock_active = False
+        self.peak_net_pct = 0.0
+        self.daily_target_reached = False
+        self.clear_emergency_state()
+        print("[PORTFOLIO RESET] Local trades table + session stats cleared.")
+
     def on_live_connected(self, equity: float):
         """Bind ledger to Bybit equity. Paper vault stays untouched."""
         self.trades = []
@@ -7407,6 +7426,67 @@ async def connect_bybit():
         "equity": equity,
         "trading_mode": bybit_api.mode,
     }
+
+@app.post("/portfolio/reset")
+async def reset_portfolio_from_bybit():
+    """Clear the old local trades table, then load Total Capital from live Bybit equity.
+
+    Does not close Bybit positions and does not stop the AI engine.
+    """
+    if not settings_store.is_bybit_configured():
+        return {
+            "status": "error",
+            "message": "Add Bybit API keys in Settings, then Reset to load live funds.",
+            "needs_keys": True,
+            "trading_mode": bybit_api.mode,
+        }
+
+    equity = await bybit_api.fetch_real_balance()
+    if equity is None:
+        return {
+            "status": "error",
+            "message": (
+                f"Bybit fund fetch failed: {bybit_api.last_error or 'unknown error'}. "
+                "Old table was not cleared."
+            ),
+            "equity": None,
+            "trading_mode": bybit_api.mode,
+            "total_portfolio_value": round(float(agent.get_total_portfolio_value() or 0), 2),
+        }
+
+    agent.reset_local_trade_table()
+    agent.current_capital = float(equity)
+    agent.starting_capital = float(equity)
+    if bybit_api.mode != "LIVE_TRADING":
+        bybit_api.mode = "LIVE_TRADING"
+        bybit_api.connected = True
+        settings_store.live_trading_preferred = True
+        try:
+            _persist_live_trading(True)
+        except Exception as exc:
+            print(f"[PORTFOLIO RESET] persist live preference note: {exc}")
+    agent.persist_runtime(force=True)
+    payload = _rt_portfolio_payload()
+    notifications.push(
+        f"Portfolio reset — live Bybit equity ${float(equity):,.2f}. Old table cleared.",
+        "success",
+    )
+    system_log.push(
+        "ai",
+        "Portfolio reset from Bybit",
+        {"equity": float(equity), "mode": bybit_api.mode},
+    )
+    print(f"[PORTFOLIO RESET] Live Bybit equity ${float(equity):,.2f} loaded.")
+    return {
+        "status": "success",
+        "message": f"Old table reset. Live Bybit funds ${float(equity):,.2f}.",
+        "equity": round(float(equity), 2),
+        "capital": round(float(bybit_api.last_known_available or equity), 2),
+        "total_portfolio_value": round(float(equity), 2),
+        "trading_mode": bybit_api.mode,
+        "portfolio": payload,
+    }
+
 
 @app.get("/trading-mode")
 async def get_trading_mode():

@@ -1,17 +1,17 @@
-﻿<IfModule mod_rewrite.c>
+<IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteBase /
   RewriteCond %{HTTP:Authorization} .
   RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
   RewriteRule ^__api/?(.*)$ __api/index.php?__path=$1 [QSA,L]
-  # Old hashed bundles deleted after rebuild — keep aitrads.in from 404ing.
-  RewriteRule ^assets/index-C82v1HEh\.js$ assets/index-DgMF9881.js [L]
-  RewriteRule ^assets/index-B4vexp5m\.js$ assets/index-DgMF9881.js [L]
-  RewriteRule ^assets/index-D4bUdpkG\.js$ assets/index-DgMF9881.js [L]
-  RewriteRule ^assets/index-DTC_UlOB\.js$ assets/index-DgMF9881.js [L]
+  RewriteRule ^assets/index-C82v1HEh\.js$ assets/index-Bd7S9zKo.js [L]
+  RewriteRule ^assets/index-B4vexp5m\.js$ assets/index-Bd7S9zKo.js [L]
+  RewriteRule ^assets/index-D4bUdpkG\.js$ assets/index-Bd7S9zKo.js [L]
+  RewriteRule ^assets/index-DTC_UlOB\.js$ assets/index-Bd7S9zKo.js [L]
+  RewriteRule ^assets/index-DgMF9881\.js$ assets/index-Bd7S9zKo.js [L]
+  RewriteRule ^assets/index-B0Hoe0wn\.css$ assets/index-D0lRlsOr.css [L]
 </IfModule>
 
-# Force fresh HTML so hard refresh picks new hashed assets
 <IfModule mod_headers.c>
   <FilesMatch "index\.html$">
     Header set Cache-Control "no-cache, no-store, must-revalidate"

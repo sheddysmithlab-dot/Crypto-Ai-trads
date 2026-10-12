@@ -157,6 +157,10 @@ export function usePortfolio(setConnected) {
 
   const applyModeSnapshot = useCallback((data) => {
     if (!data) return;
+    if (data.portfolio) {
+      setPortfolio(applyPortfolioData(data.portfolio));
+      return;
+    }
     setPortfolio((prev) => ({
       ...prev,
       tradingMode: data.trading_mode || prev.tradingMode,

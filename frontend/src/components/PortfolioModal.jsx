@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { fmtNum } from '../data/pairs';
 import { formatTfMoveLabel } from '../hooks/useTfMoveStats';
 import InfoTip from './InfoTip';
+import { authFetch } from '../config/api';
 
 const STATUS_COLOR = {
   green: 'text-green-500',
@@ -47,7 +49,11 @@ export default function PortfolioModal({
   tfMovePct = null,
   tfMoveLabel = null,
   chartTimeframe = '1M',
+  onResetDone,
 }) {
+  const [resetting, setResetting] = useState(false);
+  const [resetMsg, setResetMsg] = useState(null);
+
   if (!open) return null;
 
   const isProfit = dailyProfit >= 0;
@@ -75,6 +81,26 @@ export default function PortfolioModal({
       : '--';
   const tfMoveTitle = formatTfMoveLabel(chartTimeframe, tfMoveLabel);
 
+  async function handleReset() {
+    if (resetting) return;
+    setResetting(true);
+    setResetMsg(null);
+    try {
+      const res = await authFetch('/portfolio/reset', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.status === 'error') {
+        setResetMsg({ tone: 'error', text: data.message || 'Reset failed.' });
+        return;
+      }
+      onResetDone?.(data);
+      setResetMsg({ tone: 'ok', text: data.message || 'Live Bybit funds loaded.' });
+    } catch (err) {
+      setResetMsg({ tone: 'error', text: err?.message || 'Network error resetting portfolio.' });
+    } finally {
+      setResetting(false);
+    }
+  }
+
   return (
     <div
       className="fixed inset-0 z-[80] flex items-start sm:items-center justify-center p-3 sm:p-6 bg-black/50 backdrop-blur-[2px]"
@@ -93,14 +119,26 @@ export default function PortfolioModal({
             <i className="fas fa-briefcase mr-2 text-blue-500" />
             Portfolio
           </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="w-8 h-8 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 transition"
-            aria-label="Close portfolio"
-          >
-            <i className="fas fa-times" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleReset}
+              disabled={resetting}
+              title="Clear the old trades table and load live USDT funds from Bybit. Does not close Bybit positions."
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide border border-amber-400/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 disabled:opacity-50 disabled:cursor-wait transition"
+            >
+              <i className={`fas fa-rotate-right ${resetting ? 'animate-spin' : ''}`} />
+              {resetting ? 'Resetting…' : 'Reset'}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-8 h-8 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 transition"
+              aria-label="Close portfolio"
+            >
+              <i className="fas fa-times" />
+            </button>
+          </div>
         </div>
 
         <div className="p-4 grid grid-cols-2 sm:grid-cols-3 gap-2.5">
@@ -194,6 +232,19 @@ export default function PortfolioModal({
             </span>
           </StatCell>
         </div>
+        {resetMsg ? (
+          <div
+            className={`px-4 pb-4 text-[11px] font-medium ${
+              resetMsg.tone === 'ok' ? 'text-green-400' : 'text-red-400'
+            }`}
+          >
+            {resetMsg.text}
+          </div>
+        ) : (
+          <div className="px-4 pb-4 text-[10px] text-gray-500">
+            Reset clears the old trades table, then Total Capital loads from live Bybit funds only.
+          </div>
+        )}
       </div>
     </div>
   );

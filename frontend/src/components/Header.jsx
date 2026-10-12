@@ -36,6 +36,7 @@ export default function Header({
   onOpenStatement,
   onLogout,
   username,
+  onPortfolioResetDone,
 }) {
   const [profileOpen, setProfileOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -243,6 +244,7 @@ export default function Header({
         tfMovePct={tfMovePct}
         tfMoveLabel={tfMoveLabel}
         chartTimeframe={chartTimeframe}
+        onResetDone={onPortfolioResetDone}
       />
     </header>
   );
